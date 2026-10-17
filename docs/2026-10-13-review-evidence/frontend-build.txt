@@ -1,0 +1,10 @@
+npm notice run xunjia-console@1.0.0 build
+npm notice run vue-tsc --noEmit && vite build
+src/pages/Link.vue(170,18): error TS2367: This comparison appears to be unintentional because the types '""' and '"local"' have no overlap.
+src/pages/Link.vue(170,62): error TS2367: This comparison appears to be unintentional because the types '""' and '"lan"' have no overlap.
+src/pages/Link.vue(171,7): error TS2367: This comparison appears to be unintentional because the types '""' and '"local"' have no overlap.
+src/pages/Link.vue(173,14): error TS2367: This comparison appears to be unintentional because the types '""' and '"lan"' have no overlap.
+src/pages/Link.vue(441,28): error TS2367: This comparison appears to be unintentional because the types '""' and '"local"' have no overlap.
+src/pages/Link.vue(447,28): error TS2367: This comparison appears to be unintentional because the types '""' and '"lan"' have no overlap.
+src/pages/Link.vue(460,28): error TS2367: This comparison appears to be unintentional because the types '""' and '"public"' have no overlap.
+src/pages/Link.vue(479,17): error TS2339: Property 'accountCard' does not exist on type 'CreateComponentPublicInstanceWithMixins<ToResolvedProps<{}, {}>, { imLinks: Ref<{ id: string; name: string; mode: "local" | "lan" | "public" | "oss" | "mail"; mode_label: string; account_id: string; workbench_id?: string | undefined; ... 15 more ...; form: Record<...>; }[], ImLink[] | { ...; }[]>; ... 23 more ...; t...'.

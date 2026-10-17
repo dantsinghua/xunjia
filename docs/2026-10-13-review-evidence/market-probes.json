@@ -1,0 +1,39 @@
+{
+  "all_withdraw": {
+    "new_events": 0,
+    "retained_bid": 2.0,
+    "retained_ofr": 1.9
+  },
+  "stale_valuation": {
+    "input": 2.5,
+    "persisted": 1.8
+  },
+  "same_price_refresh": {
+    "new_events": 0,
+    "stored_issue_time": 1791860673596,
+    "new_issue_time": 1791860733596
+  },
+  "write_failure_lost": {
+    "advanced_source_id": 2,
+    "retry_events": 0,
+    "latest_rows": 0
+  },
+  "old_broker_wins": {
+    "retained_best_bid": 1.5,
+    "current_broker_bid": 2.0
+  },
+  "null_delta": {
+    "f": 2,
+    "u": "100",
+    "t": 1,
+    "bo": 1.9
+  },
+  "net_price_as_yield": {
+    "quote_type": 1,
+    "bid_yield": 99.85
+  },
+  "absolute_floor_unused": {
+    "stored_yield": 2.1,
+    "dify_floor": null
+  }
+}

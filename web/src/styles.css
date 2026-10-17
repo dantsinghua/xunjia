@@ -1,0 +1,131 @@
+/* 全局样式 —— 还原设计稿 现券询价机器人.dc.html 的视觉基调 */
+:root {
+  --red: #B01C24;
+  --red-bright: #C2333B;
+  --paper: #F3F0EA;
+  --panel: #F6F1EC;
+  --ink: #2B2320;
+  --muted: #6E6258;
+  --line: rgba(176, 28, 36, .12);
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: 'Noto Serif SC', serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: #9A2F2A; text-decoration: none; }
+a:hover { color: #7C231F; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(176, 28, 36, .25); border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.mono { font-family: var(--mono); }
+.serif { font-family: var(--serif); }
+
+/* ---- 背景动画光斑 ---- */
+@keyframes blobA { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(60px, 40px) scale(1.15); } 100% { transform: translate(0, 0) scale(1); } }
+@keyframes blobB { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-50px, -30px) scale(1.1); } 100% { transform: translate(0, 0) scale(1); } }
+@keyframes glowPulse { 0%, 100% { box-shadow: 0 0 0 1px rgba(176, 28, 36, .55), 0 0 18px rgba(176, 28, 36, .35), 0 0 42px rgba(176, 28, 36, .18); } 50% { box-shadow: 0 0 0 1px rgba(176, 28, 36, .8), 0 0 26px rgba(176, 28, 36, .5), 0 0 60px rgba(176, 28, 36, .28); } }
+@keyframes dotPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(61, 166, 94, .6); } 70% { box-shadow: 0 0 0 7px rgba(61, 166, 94, 0); } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes popIn { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: none; } }
+
+.fade-up { animation: fadeUp .4s ease both; }
+.pop-in { animation: popIn .25s ease both; }
+
+/* ---- 复选框(还原设计稿描红勾) ---- */
+input[type=checkbox].ny {
+  appearance: none; -webkit-appearance: none; width: 15px; height: 15px;
+  border: 1.5px solid rgba(176, 28, 36, .55); border-radius: 4px;
+  background: rgba(255, 255, 255, .9); display: inline-grid; place-content: center;
+  cursor: pointer; transition: all .15s; margin: 0; flex: none;
+}
+input[type=checkbox].ny::before {
+  content: ''; width: 9px; height: 9px; transform: scale(0); background: #fff;
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0, 43% 62%); transition: transform .12s;
+}
+input[type=checkbox].ny:hover { border-color: #B01C24; box-shadow: 0 0 8px rgba(176, 28, 36, .25); }
+input[type=checkbox].ny:checked { border-color: #B01C24; background: linear-gradient(135deg, #C2333B, #8E1620); }
+input[type=checkbox].ny:checked::before { transform: scale(1); }
+
+/* ---- 表单输入(玻璃底) ---- */
+.ny-input {
+  min-width: 0; padding: 4px 7px; font-size: 11.5px; font-family: inherit;
+  border-radius: 6px; border: 1px solid rgba(176, 28, 36, .16);
+  background: rgba(255, 255, 255, .8); color: #2B2320; transition: all .2s;
+}
+.ny-input::placeholder { color: #B0A69B; }
+.ny-input:focus { outline: none; border-color: rgba(176, 28, 36, .6); box-shadow: 0 0 0 3px rgba(176, 28, 36, .12), 0 0 14px rgba(176, 28, 36, .18); }
+
+/* ---- 玻璃面板 ---- */
+.glass { background: rgba(255, 255, 255, .6); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(176, 28, 36, .12); }
+
+/* ---- 通用按钮 ---- */
+.btn-primary {
+  cursor: pointer; border: none; color: #fff;
+  background: linear-gradient(135deg, #C2333B, #8E1620);
+  box-shadow: 0 0 14px rgba(176, 28, 36, .4); transition: all .25s;
+  font-family: inherit;
+}
+.btn-primary:hover { box-shadow: 0 0 22px rgba(176, 28, 36, .6); transform: translateY(-1px); }
+.btn-ghost {
+  cursor: pointer; color: #B01C24; background: rgba(255, 255, 255, .6);
+  border: 1px solid rgba(176, 28, 36, .3); transition: all .2s; font-family: inherit;
+}
+.btn-ghost:hover { background: rgba(176, 28, 36, .08); }
+
+/* ---- markdown 问答气泡 ---- */
+.md-body { font-size: 14px; line-height: 1.8; }
+.md-body p { margin: 0 0 8px; }
+.md-body p:last-child { margin-bottom: 0; }
+.md-body table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.md-body th, .md-body td { border: 1px solid rgba(176, 28, 36, .16); padding: 5px 10px; text-align: left; }
+.md-body th { background: rgba(176, 28, 36, .06); color: #B01C24; }
+.md-body code { font-family: var(--mono); background: rgba(176, 28, 36, .08); padding: 1px 5px; border-radius: 4px; }
+.md-body strong { color: #B01C24; }
+.md-body ul, .md-body ol { margin: 6px 0; padding-left: 20px; }
+
+/* antd 弹窗在本站少用,行情表用原生;保证 antd message/notification 字体统一 */
+.ant-message, .ant-notification { font-family: inherit; }
+
+/* ---- 模态框统一骨架 ----------------------------------------------------
+   三条硬规则,五个弹窗(债券详情/询价策略/链路追踪/询价明细/导出记录)一律照此:
+   1. 必须 <Teleport to="body">。页面 .pane 带 z-index:1 会开层叠上下文,
+      留在里面遮罩压不过 z-index:50 的顶栏(现场实测:顶栏不被罩)。
+   2. 弹窗随浏览器窗宽高自适应:.ov 的 padding 就是四周留白,.mdl 最多撑到剩余空间。
+   3. 标题区 .mdl-hd 与操作区 .mdl-ft 固定不滚,只有 .mdl-bd 出滚动条。 */
+.ov {
+  position: fixed; inset: 0; z-index: 200; box-sizing: border-box;
+  background: rgba(43, 35, 32, .38);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  display: grid; place-items: center; padding: 24px;
+  /* minmax(0,1fr) 不能省:默认轨道按 max-content 算,明细表 min-width:1500px
+     会把弹窗撑到窗口之外并被切掉(现场实测 1440 窗口下弹窗宽 1556)。
+     钳死后超出的内容归各自的 overflow 容器出滚动条。 */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.mdl {
+  display: flex; flex-direction: column; box-sizing: border-box;
+  width: 100%; max-height: 100%; min-height: 0;
+  border-radius: 22px; background: rgba(250, 248, 244, .96);
+  backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(176, 28, 36, .22);
+  box-shadow: 0 30px 90px rgba(43, 35, 32, .35), 0 0 60px rgba(176, 28, 36, .2);
+}
+.mdl-hd { flex: none; padding: 22px 26px 14px; }
+.mdl-bd { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 26px; }
+.mdl-bd::after { content: ''; display: block; height: 22px; } /* 滚到底留口气 */
+.mdl-ft { flex: none; padding: 14px 26px 20px; display: flex; gap: 10px; justify-content: flex-end; }
+.mdl-ft.between { justify-content: space-between; align-items: center; }
+/* 弹窗打开时锁背景滚动,--sbw 由 useBodyScrollLock 写入,补掉滚动条消失造成的右移 */
+body.modal-open { overflow: hidden; padding-right: var(--sbw, 0px); }
+@media (max-width: 900px) { .ov { padding: 12px; } .mdl-hd { padding: 16px 16px 10px; } .mdl-bd { padding: 0 16px; } .mdl-ft { padding: 10px 16px 14px; } }

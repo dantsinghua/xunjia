@@ -1,0 +1,16 @@
+[
+  {
+    "owner_user_id": "REPLACE_OWNER_USER_ID",
+    "account_uid": "REPLACE_QIDIAN_ACCOUNT_UID",
+    "workbench_id": "REPLACE_WORKBENCH_ID",
+    "seal_key_env": "XUNJIA_SEAL_KEY",
+    "sign_key_env": "XUNJIA_SIGN_KEY",
+    "oss": {
+      "endpoint": "https://REPLACE_OSS_BUCKET_ENDPOINT",
+      "sts_url": "http://nginx.mq.dq.yingmi-inc.com/its-accesspoint/v1/api/sts",
+      "expected_bucket": "qtrade-nyoss-lab",
+      "auth_key_env": "XUNJIA_STS_AUTH_KEY",
+      "sm4_key_env": "XUNJIA_STS_SM4_KEY"
+    }
+  }
+]

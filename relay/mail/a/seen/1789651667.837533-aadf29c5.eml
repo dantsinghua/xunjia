@@ -1,0 +1,9 @@
+To: a@relay.local
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+{"v": 1, "type": "outbound", "in_reply_to": "g-fa252c", "thread": "=E5=BC=A0=
+=E4=B8=89-=E5=8D=8E=E6=B3=B0=E5=9B=BA=E6=94=B6", "session": {"windcode": "102=
+400895.IB"}, "action": "send", "text": "=E5=A5=BD=E7=9A=84 =E6=88=90=E4=BA=A4=
+", "ts": 1789651667.8372104}

@@ -1,0 +1,26 @@
+{
+  "review_date": "2026-10-13",
+  "status": "待安琳评审；D01/D06按后续Chat裁决更新，D10/D11仍待选择；未实施",
+  "confirmed_decisions": [
+    "D01",
+    "D02",
+    "D03",
+    "D04",
+    "D05",
+    "D06",
+    "D07",
+    "D08",
+    "D09"
+  ],
+  "pending_decisions": {
+    "D10": "服务端每页50行分页或保留无限滚动",
+    "D11": "真正xlsx、CSV或暂缓导出"
+  },
+  "independent_review": "3项必须修改已关闭；限定复核APPROVE；不代表实施验证",
+  "coverage": "R01-R40全部映射到整改批次",
+  "code_changes": false,
+  "live_external_operations": false,
+  "design_sha256": "6760a52bbed1a9788e93ac9eae6c2bbe5ac0c59da32ac439b49f2008fcd871bd",
+  "superseding_chat_design": "docs/2026-10-13-dify-chat-agent-design.md",
+  "sts_design": "docs/2026-10-13-sts-integration-design.md"
+}

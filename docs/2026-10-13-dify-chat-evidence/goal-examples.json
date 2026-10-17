@@ -1,0 +1,68 @@
+{
+  "purpose": "仅验证设计中价格示例的Decimal算术，不是业务实现测试",
+  "cases": [
+    {
+      "our_side": "BUY",
+      "our_limit_yield_pct": "2.40",
+      "peer_yield_pct": "2.20",
+      "raw_gap_bp": "20.00",
+      "remaining_gap_bp": "20.00",
+      "price_target_hit": false,
+      "action_at_target": "转人工，不成交"
+    },
+    {
+      "our_side": "BUY",
+      "our_limit_yield_pct": "2.40",
+      "peer_yield_pct": "2.35",
+      "raw_gap_bp": "5.00",
+      "remaining_gap_bp": "5.00",
+      "price_target_hit": false,
+      "action_at_target": "转人工，不成交"
+    },
+    {
+      "our_side": "BUY",
+      "our_limit_yield_pct": "2.40",
+      "peer_yield_pct": "2.40",
+      "raw_gap_bp": "0.00",
+      "remaining_gap_bp": "0",
+      "price_target_hit": true,
+      "action_at_target": "转人工，不成交"
+    },
+    {
+      "our_side": "BUY",
+      "our_limit_yield_pct": "2.40",
+      "peer_yield_pct": "2.42",
+      "raw_gap_bp": "-2.00",
+      "remaining_gap_bp": "0",
+      "price_target_hit": true,
+      "action_at_target": "转人工，不成交"
+    },
+    {
+      "our_side": "SELL",
+      "our_limit_yield_pct": "2.10",
+      "peer_yield_pct": "2.40",
+      "raw_gap_bp": "30.00",
+      "remaining_gap_bp": "30.00",
+      "price_target_hit": false,
+      "action_at_target": "转人工，不成交"
+    },
+    {
+      "our_side": "SELL",
+      "our_limit_yield_pct": "2.10",
+      "peer_yield_pct": "2.10",
+      "raw_gap_bp": "0.00",
+      "remaining_gap_bp": "0",
+      "price_target_hit": true,
+      "action_at_target": "转人工，不成交"
+    },
+    {
+      "our_side": "SELL",
+      "our_limit_yield_pct": "2.10",
+      "peer_yield_pct": "2.08",
+      "raw_gap_bp": "-2.00",
+      "remaining_gap_bp": "0",
+      "price_target_hit": true,
+      "action_at_target": "转人工，不成交"
+    }
+  ]
+}

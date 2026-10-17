@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ============================================================================
+# qidian_monitor_all.py —— 企点全会话(群 + 私聊)新进消息实时监控【纯只读】
+# ----------------------------------------------------------------------------
+# 读法 = 旁路读主库 /data/data/com.tencent.qidian/databases/{uin}.db(WAL)。
+#   * 只发 `adb shell` 只读命令:stat / date / sqlite3 'file:…?mode=ro'。
+#     零 input / am / uiautomator / push / 写库;不 attach 企点进程。
+#   * 压力上限:每个 tick(默认 1 s)至多 1 次 adb shell 调用。
+#     那一次调用在设备上先 stat WAL+主库(纳秒 mtime+size);签名没变就不起 sqlite3;
+#     变了才执行一条 UNION ALL 增量 SQL(各会话表各自 `_id` 水位),SQL 走 stdin。
+#   * 名称表(好友/群/群成员)启动时读一次,之后遇到未知 uin 时至多每 300 s 刷一次
+#     (刷新占用那个 tick 的唯一一次调用)。
+#   * 启动时水位 = 各表当前 MAX(_id),不回灌历史;运行中新出现的会话表从 0 读,
+#     但用历史闸挡掉 time < 启动时刻 - 120 s 的行(防新建表带历史漫游)。
+#
+# 解码:msgData / frienduin / senderuin 逐字节 XOR(KEY = b"02:00:00:00:00:00" 17 字节循环);
+#       名称类 TEXT 列按 UTF-16 码元逐字符 XOR(同一把 KEY)。
+#       正文复用 qidian_msgdata_decode.decode(),另补:-2017 群文件名、-2011 卡片标题、
+#       -1012 系统提示、-2006 PTT_URL=语音;解不出的只标类型、不猜。
+#
+# 落盘:logs/monitor/qidian_msgs_YYYYMMDD.jsonl(+ 常驻时 qidian_live_YYYYMMDD.txt),目录 700、文件 600,只在本机。
+#
+# 用法:
+#   python3 qidian_monitor_all.py                 # 前台滚动输出
+#   python3 qidian_monitor_all.py --minutes 2     # 试跑 2 分钟
+#   setsid nohup python3 qidian_monitor_all.py --quiet-stdout >/dev/null 2>&1 &  # 常驻;看:tail -f logs/monitor/qidian_live_*.txt
+# ============================================================================
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from qidian_msgdata_decode import KEY, decode, xor  # noqa: E402
+
+PKG = "com.tencent.qidian"
+HERE = Path(__file__).resolve().parent
+LOGDIR = HERE / "logs" / "monitor"
+TZ = dt.timezone(dt.timedelta(hours=8))
+HIST_GATE_S = 120
+NAME_REFRESH_MIN_S = 300
+STALE_WARN_S = 900          # WAL 签名这么久没变 → 提示安琳看投屏(可能掉线)
+
+TYPE_LABEL = {-1000: "文本", -1051: "文本", -1049: "文本@", -1035: "图文",
+              -2000: "图片", -2017: "群文件", -2011: "链接卡片", -2006: "系统",
+              -5040: "系统", -2018: "系统", -1012: "系统"}
+
+
+# --------------------------------------------------------------------------- #
+# 设备访问(唯一出口:adb shell 只读命令)
+# --------------------------------------------------------------------------- #
+class Dev:
+    def __init__(self, serial: str, uin: str):
+        self.serial = serial
+        self.db = f"/data/data/{PKG}/databases/{uin}.db"
+        self.calls = 0
+
+    def shell(self, cmd: str, stdin: str | None = None, timeout: float = 20) -> str:
+        self.calls += 1
+        p = subprocess.run(["adb", "-s", self.serial, "shell", cmd], input=stdin,
+                           capture_output=True, text=True, timeout=timeout)
+        if p.returncode != 0 and not p.stdout:
+            raise RuntimeError(f"adb 失败 rc={p.returncode}: {p.stderr.strip()[:200]}")
+        err = p.stderr.strip()
+        if err and ("malformed" in err or "locked" in err or "corrupt" in err or "Error" in err):
+            raise RuntimeError(f"sqlite3 报错: {err[:300]}")
+        return p.stdout.replace("\r", "")
+
+    def sqlite_cmd(self) -> str:
+        return f"sqlite3 -separator '|' 'file:{self.db}?mode=ro'"
+
+    def sig_cmd(self) -> str:
+        return f"stat -c '%y %s' {self.db}-wal {self.db} 2>/dev/null | tr '\\n' ' '"
+
+    def query(self, sql: str) -> list[list[str]]:
+        out = self.shell(self.sqlite_cmd(), stdin=sql)
+        return [ln.split("|") for ln in out.splitlines() if ln]
+
+    def tick(self, prev_sig: str, sql: str) -> tuple[str, int, list[list[str]] | None]:
+        """一次 adb 调用:签名没变 → (sig, 设备时间, None);变了 → 顺带跑增量 SQL。"""
+        esc = prev_sig.replace("'", "")
+        cmd = (f"S=$({self.sig_cmd()}); echo \"SIG $S\"; echo \"NOW $(date +%s)\"; "
+               f"if [ \"$S\" != '{esc}' ]; then {self.sqlite_cmd()}; fi")
+        out = self.shell(cmd, stdin=sql)
+        sig, now, rows, changed = "", int(time.time()), [], False
+        for ln in out.splitlines():
+            if ln.startswith("SIG "):
+                sig = ln[4:].strip()
+            elif ln.startswith("NOW "):
+                now = int(ln[4:].strip() or now)
+            elif ln:
+                rows.append(ln.split("|"))
+        changed = sig != prev_sig
+        return sig, now, (rows if changed else None)
+
+
+# --------------------------------------------------------------------------- #
+# 解码
+# --------------------------------------------------------------------------- #
+def cxor(s: str) -> str:
+    """名称类 TEXT 列:按 UTF-16 码元逐个 XOR KEY(Java char 层面)。"""
+    if not s:
+        return s
+    u = s.encode("utf-16-le", "surrogatepass")
+    units = [int.from_bytes(u[i:i + 2], "little") ^ KEY[(i // 2) % len(KEY)] for i in range(0, len(u), 2)]
+    return b"".join(x.to_bytes(2, "little") for x in units).decode("utf-16-le", "replace")
+
+
+def hx(h: str) -> bytes:
+    try:
+        return bytes.fromhex(h) if h else b""
+    except ValueError:
+        return b""
+
+
+def uin_of(h: str) -> str:
+    return xor(hx(h)).decode("utf-8", "replace")
+
+
+def name_of(h: str) -> str:
+    return cxor(hx(h).decode("utf-8", "replace"))
+
+
+def _java_strings(b: bytes) -> list[str]:
+    out, i, n = [], 0, len(b)
+    while i < n - 3:
+        if b[i] == 0x74:
+            ln = int.from_bytes(b[i + 1:i + 3], "big")
+            if 1 <= ln <= n - i - 3:
+                try:
+                    s = b[i + 3:i + 3 + ln].decode("utf-8")
+                    if s.isprintable():
+                        out.append(s)
+                        i += 3 + ln
+                        continue
+                except UnicodeDecodeError:
+                    pass
+        i += 1
+    return out
+
+
+def _val_after(b: bytes, key: bytes) -> str | None:
+    i = b.find(len(key).to_bytes(2, "big") + key)
+    if i < 0:
+        return None
+    e = i + 2 + len(key)
+    for p in range(e, e + 17):
+        ln = int.from_bytes(b[p:p + 4], "big")
+        if 0 < ln <= 4096 and p + 4 + ln <= len(b):
+            try:
+                s = b[p + 4:p + 4 + ln].decode("utf-8")
+                if s.isprintable():
+                    return s
+            except UnicodeDecodeError:
+                pass
+    return None
+
+
+def render(msgtype: int, blob_hex: str) -> tuple[str, str, bool]:
+    """返回 (类型标签, 可读正文, 是否解出)。"""
+    raw = hx(blob_hex)
+    label = TYPE_LABEL.get(msgtype, f"未知({msgtype})")
+    rec = decode(msgtype, raw)
+    plain = xor(raw)
+    if rec["type"] == "text":
+        return label, rec["text"], True
+    if msgtype == -2000:
+        return label, "[图片]", True
+    if msgtype == -1035:                    # 纯图片的混排
+        return "图片", "[图片]", True
+    if msgtype == -2017:
+        names = [s for s in _java_strings(plain)
+                 if re.search(r"\.[A-Za-z0-9]{1,6}$", s) and not s.startswith(("/", "http", "com.", "L", "["))]
+        return label, f"[群文件] {names[0]}" if names else "[群文件]", bool(names)
+    if msgtype == -2011:
+        t = _val_after(plain, b"title")
+        return label, f"[链接] {t}" if t else "[链接卡片]", bool(t)
+    if msgtype == -2006 and rec["text"] == "PTT_URL":
+        return "语音", "[语音]", True
+    if msgtype == -1012:
+        s = plain.decode("utf-8", "replace").split("##**##")[0].strip()
+        return label, s, bool(s)
+    if rec["type"] == "system" and rec["text"]:
+        return label, rec["text"], True
+    return label, f"[{label},未解码]", False
+
+
+# --------------------------------------------------------------------------- #
+# 名称簿
+# --------------------------------------------------------------------------- #
+class Names:
+    def __init__(self):
+        self.friend: dict[str, str] = {}
+        self.troop: dict[str, str] = {}
+        self.member: dict[tuple[str, str], str] = {}
+        self.loaded_at = 0.0
+        self.miss = False
+
+    SQL = ("select 'F',hex(uin),hex(remark),hex(name) from Friends;"
+           "select 'X',hex(uin),'',hex(nickname) from QidianExternalInfo;"
+           "select 'T',hex(troopuin),hex(troopRemark),hex(troopname) from TroopInfoV2;"
+           "select 'M',hex(troopuin),hex(memberuin),hex(troopnick),hex(autoremark),hex(friendnick) from TroopMemberInfo;")
+
+    def load(self, rows: list[list[str]]):
+        f, t, m = {}, {}, {}
+        for r in rows:
+            k = r[0]
+            if k in ("F", "X") and len(r) >= 4:
+                u = uin_of(r[1])
+                nm = name_of(r[2]) or name_of(r[3])
+                if nm and (k == "F" or u not in f):
+                    f[u] = nm
+            elif k == "T" and len(r) >= 4:
+                t[uin_of(r[1])] = name_of(r[2]) or name_of(r[3])
+            elif k == "M" and len(r) >= 6:
+                nm = name_of(r[3]) or name_of(r[4]) or name_of(r[5])
+                if nm:
+                    m[(uin_of(r[1]), uin_of(r[2]))] = nm
+        self.friend, self.troop, self.member = f, t, m
+        self.loaded_at, self.miss = time.time(), False
+
+    def peer(self, uin: str) -> str:
+        n = self.friend.get(uin)
+        if n is None:
+            self.miss = True
+        return f"{n}({uin})" if n else uin
+
+    def group(self, gid: str) -> str:
+        n = self.troop.get(gid)
+        if n is None:
+            self.miss = True
+        return f"{n}({gid})" if n else gid
+
+    def sender(self, gid: str, uin: str) -> str:
+        n = self.member.get((gid, uin)) or self.friend.get(uin)
+        if n is None:
+            self.miss = True
+        return f"{n}({uin})" if n else uin
+
+
+# --------------------------------------------------------------------------- #
+# 主循环
+# --------------------------------------------------------------------------- #
+COLS = "_id,istroop,issend,time,msgtype,hex(frienduin),hex(senderuin),uniseq,hex(msgData)"
+LIST_SQL = ("select 'L',name,(select 0) from sqlite_master where type='table' "
+            "and (name like 'mr_friend_%_New' or name like 'mr_troop_%_New');")
+
+
+def build_sql(marks: dict[str, int], gate: int) -> str:
+    parts = []
+    for t, m in marks.items():
+        cond = f"_id>{m}" + ("" if m > 0 else f" and time>={gate}")
+        parts.append(f"select 'R','{t}',{COLS} from \"{t}\" where {cond}")
+    sql = LIST_SQL
+    if parts:
+        sql += " union all ".join(parts) + ";"
+    return sql
+
+
+class DayFile:
+    """按天滚动的追加文件(目录 700、文件 600)。"""
+
+    def __init__(self, prefix: str, ext: str):
+        self.prefix, self.ext, self.day, self.fh, self.path = prefix, ext, None, None, None
+
+    def write(self, s: str):
+        day = f"{dt.datetime.now(TZ):%Y%m%d}"
+        if day != self.day:
+            if self.fh:
+                self.fh.close()
+            LOGDIR.mkdir(parents=True, exist_ok=True)
+            os.chmod(LOGDIR, 0o700)
+            self.path = LOGDIR / f"{self.prefix}_{day}.{self.ext}"
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            os.chmod(self.path, 0o600)
+            self.fh, self.day = os.fdopen(fd, "a", encoding="utf-8", buffering=1), day
+        self.fh.write(s)
+
+    def close(self):
+        if self.fh:
+            self.fh.close()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="企点全会话新消息只读监控")
+    ap.add_argument("--serial", default="emulator-5554")
+    ap.add_argument("--uin", default="3007373675")
+    ap.add_argument("--interval", type=float, default=1.0, help="tick 间隔(秒),≥1")
+    ap.add_argument("--minutes", type=float, default=0, help="运行时长,0=一直跑")
+    ap.add_argument("--width", type=int, default=80, help="正文摘要最大字数")
+    ap.add_argument("--quiet-stdout", action="store_true",
+                    help="常驻用:滚动行不打屏,改写 logs/monitor/qidian_live_YYYYMMDD.txt(tail -f 看)")
+    a = ap.parse_args()
+    a.interval = max(1.0, a.interval)
+
+    dev = Dev(a.serial, a.uin)
+    names = Names()
+    stop = {"flag": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
+
+    live = DayFile("qidian_live", "txt")
+
+    def say(s: str):
+        if a.quiet_stdout:
+            live.write(s + "\n")
+        else:
+            print(s, flush=True)
+
+    # 启动:枚举表 + 各表 MAX(_id) 定水位(1 次调用)
+    tables = [r[1] for r in dev.query(LIST_SQL) if r and r[0] == "L"]
+    marks: dict[str, int] = {}
+    if tables:
+        sql = " union all ".join(f"select '{t}',coalesce(max(_id),0) from \"{t}\"" for t in tables) + ";"
+        time.sleep(a.interval)
+        for r in dev.query(sql):
+            if len(r) == 2 and r[1].isdigit():
+                marks[r[0]] = int(r[1])
+    time.sleep(a.interval)
+    names.load(dev.query(Names.SQL))
+    boot = int(time.time())
+    gate = boot - HIST_GATE_S
+    log = DayFile("qidian_msgs", "jsonl")
+    log.write(json.dumps({"ev": "start", "ts": boot, "tables": len(marks),
+                          "friends": len(names.friend), "troops": len(names.troop),
+                          "members": len(names.member)}, ensure_ascii=False) + "\n")
+    say(f"# 启动 {dt.datetime.now(TZ):%H:%M:%S}  会话表 {len(marks)} 张  好友名 {len(names.friend)}  "
+        f"群名 {len(names.troop)}  群成员名 {len(names.member)}  只看新消息  日志 {log.path}  PID {os.getpid()}")
+    say("时间     | 类别 | 会话 | 发送人 | 类型 | 正文摘要 | 读取延迟")
+
+    sig, last_change = "", time.time()
+    stats = {"polls": 0, "queries": 0, "msgs": 0, "undecoded": 0, "qcost": 0.0}
+    warned_stale = False
+    deadline = time.time() + a.minutes * 60 if a.minutes > 0 else None
+    next_tick = time.time()
+    try:
+        while not stop["flag"] and (deadline is None or time.time() < deadline):
+            next_tick += a.interval
+            delay = next_tick - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_tick = time.time()
+
+            # 这个 tick 的唯一一次调用:要么刷名称,要么签名+增量
+            if names.miss and time.time() - names.loaded_at > NAME_REFRESH_MIN_S:
+                names.load(dev.query(Names.SQL))
+                continue
+
+            t0 = time.time()
+            new_sig, dnow, rows = dev.tick(sig, build_sql(marks, gate))
+            cost = time.time() - t0
+            stats["polls"] += 1
+            if rows is None:
+                if time.time() - last_change > STALE_WARN_S and not warned_stale:
+                    warned_stale = True
+                    say(f"# ⚠ 主库已 {int(time.time() - last_change)} s 无写入 —— 可能掉线,请安琳看一眼投屏窗口")
+                    log.write(json.dumps({"ev": "stale", "ts": int(time.time())}) + "\n")
+                continue
+            sig, last_change, warned_stale = new_sig, time.time(), False
+            stats["queries"] += 1
+            stats["qcost"] += cost
+            seen_tables = set()
+            out = []
+            for r in rows:
+                if r[0] == "L" and len(r) >= 2:
+                    seen_tables.add(r[1])
+                elif r[0] == "R" and len(r) == 11:
+                    out.append(r)
+            for t in seen_tables - marks.keys():         # 新会话表:从 0 读 + 历史闸
+                marks[t] = 0
+                say(f"# 新会话表出现:{t}")
+            out.sort(key=lambda r: (int(r[4]), int(r[2])))
+            for r in out:
+                _, table, _id, istroop, issend, ts, mtype, fh, sh_, uniseq, blob = r
+                _id, ts, mtype = int(_id), int(ts), int(mtype)
+                marks[table] = max(marks.get(table, 0), _id)
+                if ts < gate:                             # 历史闸
+                    continue
+                grp = istroop == "1"
+                conv_id = uin_of(fh)
+                sender_id = uin_of(sh_)
+                mine = issend == "1"
+                label, text, ok = render(mtype, blob)
+                stats["msgs"] += 1
+                stats["undecoded"] += 0 if ok else 1
+                conv = names.group(conv_id) if grp else names.peer(conv_id)
+                who = "我" if mine else (names.sender(conv_id, sender_id) if grp else names.peer(sender_id))
+                lat = dnow - ts
+                tstr = dt.datetime.fromtimestamp(ts, TZ).strftime("%H:%M:%S")
+                summ = text.replace("\n", "⏎")
+                if len(summ) > a.width:
+                    summ = summ[:a.width] + "…"
+                say(f"{tstr} | {'群' if grp else '私聊'} | {conv} | {who} | {label} | {summ} | {lat}s")
+                log.write(json.dumps({
+                    "ev": "msg", "ts": ts, "read_at": dnow, "latency_s": lat,
+                    "kind": "group" if grp else "private", "conv_id": conv_id, "conv": conv,
+                    "sender_id": sender_id, "sender": who, "mine": mine,
+                    "msgtype": mtype, "type": label, "decoded": ok, "text": text,
+                    "table": table, "_id": _id, "uniseq": uniseq,
+                }, ensure_ascii=False) + "\n")
+    except KeyboardInterrupt:
+        pass
+    except RuntimeError as e:
+        say(f"# ✖ 停止:{e} —— 需要安琳确认后再继续")
+        log.write(json.dumps({"ev": "error", "ts": int(time.time()), "err": str(e)}, ensure_ascii=False) + "\n")
+        return 2
+    finally:
+        q = stats["queries"]
+        summary = {"ev": "stop", "ts": int(time.time()), "adb_calls": dev.calls, "polls": stats["polls"],
+                   "queries": q, "avg_query_s": round(stats["qcost"] / q, 3) if q else None,
+                   "msgs": stats["msgs"], "undecoded": stats["undecoded"], "tables": len(marks)}
+        log.write(json.dumps(summary) + "\n")
+        say(f"# 结束 {summary}")
+        log.close()
+        live.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

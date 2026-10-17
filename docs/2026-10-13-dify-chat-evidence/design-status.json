@@ -1,0 +1,19 @@
+{
+  "status": "待安琳评审；未实施",
+  "date": "2026-10-13",
+  "chat_app": "Chatflow+经典Agent，经chat-messages",
+  "current_dify": "0.15.3",
+  "candidate_dify": "1.17.1，待隔离能力验证",
+  "confirmed_goal": "实价且gap>0继续授权内谈；gap<=0或触停转人工；不可成交",
+  "social": "已授权对手可被动闲聊，停止/接管优先",
+  "ambiguity": "服务端每稳定事项最多一次自动中性澄清，仍不明转人工",
+  "master_data": "现场接库，当前留插口，不补模拟值",
+  "sts": "https://nytoken.yingmi.com/api/sts；SM4-CBC认证；OSS正文仍AES-GCM；仅文档预留",
+  "new_agents": [
+    "dify_chat_capabilities",
+    "dealing_chat_design",
+    "bond_tools_design"
+  ],
+  "review": "三项Chat设计缺口关闭，限定复核APPROVE；非运行验收",
+  "implementation_started": false
+}

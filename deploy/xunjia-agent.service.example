@@ -1,0 +1,19 @@
+[Unit]
+Description=Xunjia Agent (separate from njcb-all)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/xunjia/app
+ExecStart=/home/xunjia/app/deploy/start.sh
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

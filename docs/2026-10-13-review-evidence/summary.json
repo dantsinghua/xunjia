@@ -1,0 +1,28 @@
+{
+  "review_date": "2026-10-13",
+  "head": "26acaa0",
+  "scope": "current working tree including uncommitted and untracked sources",
+  "recommendation": "REQUEST CHANGES",
+  "architecture": "BLOCK",
+  "findings": {
+    "CRITICAL": 1,
+    "HIGH": 22,
+    "MEDIUM": 16,
+    "LOW": 1
+  },
+  "pytest": {
+    "passed": 121,
+    "failed": 10,
+    "total": 131
+  },
+  "frontend_build": {
+    "passed": false,
+    "typescript_errors": 8
+  },
+  "frontend_unit_tests": {
+    "passed": 8,
+    "failed": 0
+  },
+  "real_external_delivery_tested": false,
+  "business_source_changed": false
+}

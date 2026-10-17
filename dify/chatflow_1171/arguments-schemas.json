@@ -1,0 +1,821 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "bond_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "enum": [
+            "1"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "search",
+            "get"
+          ]
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "bond_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "market": {
+          "type": "string",
+          "enum": [
+            "IB",
+            "SH",
+            "SZ",
+            "BJ"
+          ]
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "master",
+              "valuation",
+              "quotes"
+            ]
+          },
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "schema_version",
+        "mode"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "search"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "query"
+            ],
+            "not": {
+              "required": [
+                "bond_id"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "bond_id"
+            ],
+            "not": {
+              "required": [
+                "query"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "similar_bonds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "enum": [
+            "1"
+          ]
+        },
+        "anchor_bond_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "as_of_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "tenor_basis": {
+          "type": "string",
+          "enum": [
+            "maturity",
+            "exercise"
+          ]
+        },
+        "remaining_days": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ]
+        },
+        "issuer_scope": {
+          "type": "string",
+          "enum": [
+            "same",
+            "different",
+            "any"
+          ]
+        },
+        "industry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scheme": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "level": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "codes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "scheme",
+            "level",
+            "codes"
+          ]
+        },
+        "bond_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "maxItems": 20
+        },
+        "rating": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scope": {
+              "type": "string",
+              "enum": [
+                "bond",
+                "issuer"
+              ]
+            },
+            "agency": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "scale": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "allowed_values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "scope",
+            "agency",
+            "scale",
+            "allowed_values"
+          ]
+        },
+        "compare_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "remaining_days",
+              "balance",
+              "coupon_rate_pct",
+              "valuation_yield_pct",
+              "bid_yield_pct",
+              "ofr_yield_pct",
+              "bond_rating",
+              "issuer_rating",
+              "industry",
+              "bond_type"
+            ]
+          },
+          "maxItems": 20
+        },
+        "sort": {
+          "enum": [
+            [
+              "tenor_distance",
+              "code"
+            ],
+            [
+              "code"
+            ]
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "schema_version",
+        "anchor_bond_id",
+        "tenor_basis",
+        "remaining_days",
+        "issuer_scope",
+        "compare_fields"
+      ]
+    },
+    "issuer_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "enum": [
+            "1"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "search",
+            "get"
+          ]
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "issuer_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        }
+      },
+      "required": [
+        "schema_version",
+        "mode"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "search"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "query"
+            ],
+            "not": {
+              "required": [
+                "issuer_id"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "issuer_id"
+            ],
+            "not": {
+              "required": [
+                "query"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "bond_calc": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "yield_gap"
+              ]
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hypothetical": {
+                  "type": "boolean"
+                },
+                "bond_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "terms_snapshot_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "our_side": {
+                  "type": "string",
+                  "enum": [
+                    "BUY",
+                    "SELL"
+                  ]
+                },
+                "peer_side": {
+                  "type": "string",
+                  "enum": [
+                    "bid",
+                    "ofr"
+                  ]
+                },
+                "limit_yield_pct": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "peer_yield_pct": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "same_basis": {
+                  "type": "boolean"
+                },
+                "quote_type": {
+                  "type": "string",
+                  "enum": [
+                    "yield",
+                    "clean_price",
+                    "dirty_price",
+                    "spread",
+                    "unknown"
+                  ]
+                },
+                "yield_basis": {
+                  "type": "string",
+                  "enum": [
+                    "maturity",
+                    "exercise",
+                    "recommended",
+                    "unknown"
+                  ]
+                },
+                "peer_yield_basis": {
+                  "type": "string",
+                  "enum": [
+                    "maturity",
+                    "exercise",
+                    "recommended",
+                    "unknown"
+                  ]
+                },
+                "settlement_date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "peer_settlement_date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "source_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "authorization_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              },
+              "required": []
+            }
+          },
+          "required": [
+            "schema_version",
+            "operation",
+            "inputs"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "clean_dirty"
+              ]
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hypothetical": {
+                  "type": "boolean"
+                },
+                "bond_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "terms_snapshot_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "clean_price_per_100": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "dirty_price_per_100": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "accrued_interest_per_100": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "settlement_date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "accrued_interest_settlement_date": {
+                  "type": "string",
+                  "format": "date"
+                }
+              },
+              "required": []
+            }
+          },
+          "required": [
+            "schema_version",
+            "operation",
+            "inputs"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "current_yield"
+              ]
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hypothetical": {
+                  "type": "boolean"
+                },
+                "bond_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "terms_snapshot_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "annual_coupon_per_100": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "clean_price_per_100": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "coupon_basis": {
+                  "type": "string",
+                  "enum": [
+                    "fixed_annual"
+                  ]
+                }
+              },
+              "required": []
+            }
+          },
+          "required": [
+            "schema_version",
+            "operation",
+            "inputs"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "price_from_yield"
+              ]
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hypothetical": {
+                  "type": "boolean"
+                },
+                "bond_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "terms_snapshot_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "bond_type": {
+                  "type": "string",
+                  "enum": [
+                    "fixed",
+                    "zero_coupon"
+                  ]
+                },
+                "settlement_date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "cashflows": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "payment_date": {
+                        "type": "string",
+                        "format": "date"
+                      },
+                      "amount_per_100": {
+                        "type": "string",
+                        "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                      }
+                    },
+                    "required": [
+                      "payment_date",
+                      "amount_per_100"
+                    ]
+                  }
+                },
+                "convention": {
+                  "type": "string",
+                  "enum": [
+                    "ACT/365F-compounded-v1"
+                  ]
+                },
+                "compounding_frequency": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                },
+                "yield_basis": {
+                  "type": "string",
+                  "enum": [
+                    "maturity"
+                  ]
+                },
+                "settlement_cashflow": {
+                  "type": "string",
+                  "enum": [
+                    "include",
+                    "exclude"
+                  ]
+                },
+                "accrued_interest_per_100": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "accrued_interest_settlement_date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "yield_pct": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                }
+              },
+              "required": []
+            }
+          },
+          "required": [
+            "schema_version",
+            "operation",
+            "inputs"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "yield_from_price"
+              ]
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hypothetical": {
+                  "type": "boolean"
+                },
+                "bond_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "terms_snapshot_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "bond_type": {
+                  "type": "string",
+                  "enum": [
+                    "fixed",
+                    "zero_coupon"
+                  ]
+                },
+                "settlement_date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "cashflows": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "payment_date": {
+                        "type": "string",
+                        "format": "date"
+                      },
+                      "amount_per_100": {
+                        "type": "string",
+                        "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                      }
+                    },
+                    "required": [
+                      "payment_date",
+                      "amount_per_100"
+                    ]
+                  }
+                },
+                "convention": {
+                  "type": "string",
+                  "enum": [
+                    "ACT/365F-compounded-v1"
+                  ]
+                },
+                "compounding_frequency": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                },
+                "yield_basis": {
+                  "type": "string",
+                  "enum": [
+                    "maturity"
+                  ]
+                },
+                "settlement_cashflow": {
+                  "type": "string",
+                  "enum": [
+                    "include",
+                    "exclude"
+                  ]
+                },
+                "accrued_interest_per_100": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                },
+                "accrued_interest_settlement_date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "price_type": {
+                  "type": "string",
+                  "enum": [
+                    "clean",
+                    "dirty"
+                  ]
+                },
+                "price_per_100": {
+                  "type": "string",
+                  "pattern": "^-?\\d{1,12}(?:\\.\\d{1,40})?$"
+                }
+              },
+              "required": []
+            }
+          },
+          "required": [
+            "schema_version",
+            "operation",
+            "inputs"
+          ]
+        }
+      ]
+    }
+  }
+}

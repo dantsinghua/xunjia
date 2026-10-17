@@ -1,0 +1,35 @@
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+web/dist/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.log
+*.pid
+logs/
+relay/side_a/bin/adb
+.omc/
+.DS_Store
+data/im_link.json
+data/im_link.json.tmp
+data/oss_commands.json
+data/oss_commands.json.tmp
+data/rfq_status.json
+data/rfq_status.json.tmp
+
+mock/data/*.db
+mock/data/*.db-wal
+mock/data/*.db-shm
+
+# Real deployment env is local-only; the package includes a clean initialized copy.
+config/xunjia.env
+# Local operational records and external tool binaries stay on this workstation.
+/data/
+/relay/side_a/state/
+/relay/side_b/state/
+/relay/side_a/frida/
+/web/tests/out/
+/docs/implementation/test-logs/
+*.incomplete

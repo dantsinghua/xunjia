@@ -1,0 +1,75 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { App } from 'ant-design-vue'
+import { api } from '../api'
+import { imLinks, imBoundAccount, loadImLinks, type ImLink } from '../lib/imLink'
+
+const { message } = App.useApp()
+const editing = ref<string | null>(null)
+const busy = ref(false)
+const steps = ref<{name:string;ok:boolean;detail:string}[]>([])
+const quoteState = ref('尚未读取行情配置')
+type Channel = ImLink & { configured?:boolean; version?:number; state?:string }
+const selected = computed(() => imLinks.value.find(l => l.id === editing.value) as Channel | undefined)
+function fill(link: ImLink) { editing.value = link.id }
+async function reload() {
+  try {
+    await loadImLinks()
+    if (!imLinks.value.some(l => l.id === editing.value)) editing.value = imLinks.value.find(l=>l.active)?.id || imLinks.value[0]?.id || null
+    const r = await api.quoteSource()
+    const data = r.data as unknown as {configured?:boolean}
+    quoteState.value = r.ok ? data?.configured ? '已配置实时行情源' : '实时行情源尚未配置' : '行情配置读取失败'
+  } catch(e) { message.error(e instanceof Error ? e.message : '读取连接状态失败') }
+}
+async function testSelected() {
+  if (!selected.value || busy.value) return
+  const id=selected.value.id; busy.value=true
+  try {
+    const result = await api.imTest(id) as {ok:boolean;hint?:string;data?:{passed:boolean;steps:typeof steps.value}}
+    if (!result.ok) throw Error(result.hint || '检查失败')
+    steps.value=result.data?.steps || []
+    await reload()
+    if (!result.data?.passed) message.warning('只读检查未通过，请核对部署配置和采集端')
+  } catch(e) { message.error(e instanceof Error ? e.message : '检查失败') }
+  finally {busy.value=false}
+}
+async function makeCurrent() {
+  if (!selected.value || selected.value.active || busy.value) return
+  const link=selected.value;busy.value=true
+  try {
+    const result = await api.imActivate(link.id,link.version) as {ok:boolean;hint?:string}
+    if (!result.ok) throw Error(result.hint || '切换未完成')
+    await reload();message.success('已切换主用通道；请重新确认询价授权后启动')
+  } catch(e) {message.error(e instanceof Error ? e.message : '切换未完成')}
+  finally {busy.value=false}
+}
+onMounted(reload)
+</script>
+
+<template>
+  <section class="connections">
+    <h2>本人账号与收发通道</h2>
+    <p v-if="imBoundAccount">企点账号 <b>{{ imBoundAccount.account_uid }}</b> · 工作台 {{ imBoundAccount.workbench_id }}</p>
+    <p v-else>尚未分配本人企点账号，请由管理员完成账号绑定。</p>
+    <p>每人固定一个账号。OSS 与邮件同时接收并去重，发送只使用选定通道；切换前须停止机器人并完成在途命令对账。</p>
+    <div class="channels">
+      <button v-for="link in (imLinks as Channel[])" :key="link.id" class="channel" :class="{ selected:editing===link.id }" type="button" @click="fill(link)">
+        <b>{{ link.mode_label }}</b><span>{{ link.active ? '主用' : '备用' }}</span>
+        <span>{{ link.state || (link.tested ? '只读检查通过' : '未检查') }}</span>
+      </button>
+    </div>
+    <div v-if="selected" class="actions">
+      <button class="btn-ghost" type="button" :disabled="busy || !selected.configured" @click="testSelected">检查目录与通讯录</button>
+      <button class="btn-primary" type="button" :disabled="busy || selected.active || !selected.configured" @click="makeCurrent">切换为主用通道</button>
+    </div>
+    <ul v-if="steps.length"><li v-for="step in steps" :key="step.name">{{ step.ok ? '通过' : '未通过' }} · {{ step.name }}：{{ step.detail }}</li></ul>
+    <p>目录检查不代表消息已发送。发送状态以采集端执行回执为准，结果未知时先对账。</p>
+    <div class="source"><h3>公共行情</h3><p>{{ quoteState }}</p><p>账号归属、认证和服务器连接由部署配置管理，此处不保存个人凭据。</p></div>
+    <button class="btn-ghost" type="button" :disabled="busy" @click="reload">刷新状态</button>
+  </section>
+</template>
+
+<style scoped>
+.connections{max-width:960px;margin:24px auto;padding:24px;background:#fff;border:1px solid #e8e2dc;border-radius:14px}
+h2{margin-top:0}p{color:#70665e;line-height:1.7}.channels{display:flex;gap:16px;margin:24px 0}.channel{display:flex;flex:1;flex-direction:column;gap:10px;padding:20px;text-align:left;border:1px solid #e8e2dc;background:#faf8f5;border-radius:10px;cursor:pointer}.channel.selected{border-color:#b01c24}.actions{display:flex;gap:12px}.source{border-top:1px solid #eee;margin-top:24px;padding-top:12px}li{line-height:1.8}
+</style>

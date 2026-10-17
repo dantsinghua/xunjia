@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.xunjia.mockqidian"
+    android:versionCode="1"
+    android:versionName="0.1">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33" />
+    <application
+        android:label="MockQidian"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:debuggable="true"
+        android:allowBackup="false">
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".ChatActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
+        <!-- 测试钩子:adb shell am broadcast -a com.xunjia.mockqidian.PEER_MSG 带 es 参数 peer / text(见 README) -->
+        <receiver android:name=".PeerMsgReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="com.xunjia.mockqidian.PEER_MSG" />
+                <action android:name="com.xunjia.mockqidian.RESET" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

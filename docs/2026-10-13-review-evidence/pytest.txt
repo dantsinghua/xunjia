@@ -1,0 +1,75 @@
+...........................................F............................ [ 54%]
+...........................F...........FFFFF..F..F.......F.              [100%]
+=================================== FAILURES ===================================
+__________ test_frontend_tree_sorts_and_renders_only_the_open_branch ___________
+tests/test_org_tree_spec.py:565: in test_frontend_tree_sorts_and_renders_only_the_open_branch
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+E   AssertionError: 缺少可单测函数 orgEmptyLabel
+E     
+E   assert 2 == 0
+E    +  where 2 = CompletedProcess(args=['node', '--experimental-strip-types', '/tmp/pytest-of-anlin/pytest-1/test_frontend_tree_sorts_a...f-anlin/pytest-1/test_frontend_tree_sorts_and_r0/org.json'], returncode=2, stdout='', stderr='缺少可单测函数 orgEmptyLabel\n').returncode
+___________________ test_one_bond_two_uins_makes_two_batches ___________________
+tests/test_rfq_assign_spec.py:355: in test_one_bond_two_uins_makes_two_batches
+    assert body["ok"] is True
+E   assert False is True
+_____________ test_send_does_not_change_link_book_or_wechat_groups _____________
+tests/test_rfq_assign_spec.py:427: in test_send_does_not_change_link_book_or_wechat_groups
+    assert response.json()["ok"] is True
+E   assert False is True
+__________________ test_local_file_without_ack_is_not_success __________________
+tests/test_rfq_oss_send.py:126: in test_local_file_without_ack_is_not_success
+    assert list(folder.iterdir())
+E   AssertionError: assert []
+E    +  where [] = list(<generator object Path.iterdir at 0x798dc19a1ff0>)
+E    +    where <generator object Path.iterdir at 0x798dc19a1ff0> = iterdir()
+E    +      where iterdir = PosixPath('/tmp/pytest-of-anlin/pytest-1/test_local_file_without_ack_is0/local-only').iterdir
+_______________ test_edited_text_is_sealed_verbatim_for_one_uin ________________
+tests/test_rfq_oss_send.py:150: in test_edited_text_is_sealed_verbatim_for_one_uin
+    assert body["ok"] is True
+E   assert False is True
+____________________ test_deposit_key_alone_does_not_upload ____________________
+tests/test_rfq_oss_send.py:201: in test_deposit_key_alone_does_not_upload
+    assert body["hint"] == "没有询价密钥"
+E   AssertionError: assert '没有上行，也没有回执' == '没有询价密钥'
+E     
+E     - 没有询价密钥
+E     + 没有上行，也没有回执
+_______________ test_failed_ack_is_not_delivered_and_hides_text ________________
+tests/test_rfq_oss_send.py:225: in test_failed_ack_is_not_delivered_and_hides_text
+    assert "会话不存在" in body["hint"]
+E   AssertionError: assert '会话不存在' in '没有上行，也没有回执'
+________________ test_written_file_is_not_called_upload_failure ________________
+tests/test_rfq_oss_send.py:331: in test_written_file_is_not_called_upload_failure
+    assert body["ok"] is True
+E   assert False is True
+____________________ test_upload_without_receipt_is_not_ok _____________________
+tests/test_rfq_send_gate.py:167: in test_upload_without_receipt_is_not_ok
+    assert body["ok"] is False
+E   assert True is False
+______ test_send_failure_and_delivery_persist_without_touching_live_files ______
+tests/test_rfq_status.py:154: in test_send_failure_and_delivery_persist_without_touching_live_files
+    assert listed.status_code == 200
+E   assert 404 == 200
+E    +  where 404 = <Response [404 Not Found]>.status_code
+=============================== warnings summary ===============================
+../../home/anlin/work/xunjia-agent/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /home/anlin/work/xunjia-agent/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+../../home/anlin/work/xunjia-agent/.venv/lib/python3.12/site-packages/starlette/testclient.py:53
+  /home/anlin/work/xunjia-agent/.venv/lib/python3.12/site-packages/starlette/testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_org_tree_spec.py::test_frontend_tree_sorts_and_renders_only_the_open_branch
+FAILED tests/test_rfq_assign_spec.py::test_one_bond_two_uins_makes_two_batches
+FAILED tests/test_rfq_assign_spec.py::test_send_does_not_change_link_book_or_wechat_groups
+FAILED tests/test_rfq_oss_send.py::test_local_file_without_ack_is_not_success
+FAILED tests/test_rfq_oss_send.py::test_edited_text_is_sealed_verbatim_for_one_uin
+FAILED tests/test_rfq_oss_send.py::test_deposit_key_alone_does_not_upload - A...
+FAILED tests/test_rfq_oss_send.py::test_failed_ack_is_not_delivered_and_hides_text
+FAILED tests/test_rfq_oss_send.py::test_written_file_is_not_called_upload_failure
+FAILED tests/test_rfq_send_gate.py::test_upload_without_receipt_is_not_ok - a...
+FAILED tests/test_rfq_status.py::test_send_failure_and_delivery_persist_without_touching_live_files
+10 failed, 121 passed, 2 warnings in 1.74s

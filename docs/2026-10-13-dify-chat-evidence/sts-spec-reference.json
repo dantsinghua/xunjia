@@ -1,0 +1,11 @@
+{
+  "spec": "/mnt/c/Users/anlin/Desktop/work/STS接口调用说明.html",
+  "sha256": "76cbd94465bdd00f55cd27bf6f8a55fa62a77ad26250cabb2e1440a225f51725",
+  "source_repository": "https://git.frontnode.net/infra/cloud-accesspoint",
+  "source_review_required": false,
+  "authority": "用户明确按HTML准备接口，无需读取源码",
+  "sts_url": "https://nytoken.yingmi.com/api/sts",
+  "sts_auth": "SM4-CBC / PKCS7 / random 16-byte IV / standard padded Base64",
+  "oss_body": "保留既有AES-GCM格式",
+  "live_requests_performed": false
+}
