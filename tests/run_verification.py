@@ -14,17 +14,18 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.process_runner import run_command
 
 
-def run_logged(command, cwd, env, budget, log_path):
-    started = time.monotonic()
-    with log_path.open("w") as log:
-        try:
-            completed = subprocess.run(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=budget)
-            code = completed.returncode
-        except subprocess.TimeoutExpired:
-            code = 124
-    return code, round(time.monotonic() - started, 2)
+def run_logged(command, cwd, env, budget, log_path, *, expected_nodeids=None, details=None):
+    is_pytest = any(command[i:i+2] == ['-m','pytest'] for i in range(len(command)-1))
+    mode = ('collect' if '--collect-only' in command else 'run') if is_pytest else None
+    result = run_command(command,cwd=cwd,env=env,timeout=budget,log_path=log_path,
+                         pytest_mode=mode,expected_nodeids=expected_nodeids)
+    if details is not None:
+        details.update(result)
+    return result['exit_code'],round(result['elapsed_seconds'],2)
 
 
 def collected_nodeids(log_path):
@@ -60,10 +61,13 @@ def main():
     parser.add_argument("--browsers-path", default=os.environ.get("PLAYWRIGHT_BROWSERS_PATH"))
     parser.add_argument("--mysql", action="store_true", help="Include the explicitly isolated MySQL container gate")
     parser.add_argument("--load", action="store_true", help="Include R32 5-owner synthetic SQLite and isolated MySQL load acceptance")
+    parser.add_argument('--output-root',type=Path,default=Path.home()/'.local/state/xunjia-codex/verification',
+                        help='Persistent evidence parent; each invocation creates a new run directory')
     args = parser.parse_args()
     if not args.browsers_path:
         parser.error("--browsers-path must name the isolated installed browser directory")
-    folder = Path(tempfile.mkdtemp(prefix="xunjia-verification-"))
+    args.output_root.mkdir(parents=True,exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix="xunjia-verification-",dir=args.output_root))
     before = manifest()
     (folder / "source-before.json").write_text(json.dumps(before, indent=2), encoding="utf-8")
     env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=args.browsers_path, PYTHONUNBUFFERED="1")
@@ -90,18 +94,35 @@ def main():
             collect_command = [*command, "--collect-only"]
             collect_log = folder / f"{name}.collect.log"
             print(f"Collecting {name}: {shlex.join(collect_command)}", flush=True)
-            collect_code, collect_seconds = run_logged(collect_command, cwd, env, min(budget, 300), collect_log)
-            inventory[name] = collected_nodeids(collect_log)
+            collected = {}
+            collect_code, collect_seconds = run_logged(collect_command, cwd, env, min(budget, 300), collect_log,
+                                                       details=collected)
+            inventory[name] = collected.get('pytest', {}).get('nodeids', [])
             collection = {"command": collect_command, "exit_code": collect_code, "seconds": collect_seconds,
-                          "log": str(collect_log), "count": len(inventory[name])}
+                          "log": str(collect_log), "count": len(inventory[name]),
+                          "execution_evidence": collected.get('evidence')}
             (folder / "pytest-inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+            if collect_code != 0 or not collected.get('passed') or not inventory[name]:
+                item = {"name": name, "cwd": str(cwd), "command": command, "exit_code": collect_code,
+                        "seconds": collect_seconds, "log": str(collect_log), "collection": collection,
+                        "execution_evidence": collected.get('evidence'), "passed": False,
+                        "run_started": False, "cancelled": collected.get('cancelled', False)}
+                results.append(item)
+                print(json.dumps(item), flush=True)
+                break
         print(f"Running {name}: {shlex.join(command)}", flush=True)
-        code, seconds = run_logged(command, cwd, env, budget, log_path)
+        execution = {}
+        code, seconds = run_logged(command, cwd, env, budget, log_path,
+                                   expected_nodeids=inventory.get(name),details=execution)
         item = {"name": name, "cwd": str(cwd), "command": command, "exit_code": code,
                 "seconds": seconds, "log": str(log_path), "collection": collection,
+                "execution_evidence":execution.get('evidence'),
+                "actual_pytest":execution.get('pytest'),
                 "passed": code == 0 and (collection is None or collection["exit_code"] == 0 and collection["count"] > 0)}
         results.append(item)
         print(json.dumps(item), flush=True)
+        if execution.get('cancelled'):
+            break
     after = manifest()
     drift = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
     node_groups = {}
