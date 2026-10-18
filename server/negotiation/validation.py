@@ -11,11 +11,14 @@ NUM = r'-?\d+(?:\.\d+)?'
 QUANTITY = re.compile(r'(?<![\da-zA-Z.])(' + NUM + r')\s*(亿|万|[wW])(?![a-zA-Z])')
 
 
-def economics(text, *, bond_codes=()):
+def economics(text, *, bond_codes=(), identifiers=()):
     """Return classified literal amounts and price spellings, with positions."""
     masked = text
-    for code in sorted(set(bond_codes), key=len, reverse=True):
-        masked = masked.replace(code, ' ' * len(code))
+    for code in sorted(set(bond_codes)|set(identifiers), key=len, reverse=True):
+        if code:
+            masked=re.sub(re.escape(code),lambda m:' '*len(m[0]),masked,flags=re.I)
+    masked=re.sub(r'(?<![a-zA-Z0-9])(?:[a-fA-F0-9]{24,160}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})(?![a-zA-Z0-9])',
+                  lambda m:' '*len(m[0]),masked)
     masked = re.sub(r'\d{4}-\d{2}-\d{2}|T\+[01]', lambda m: ' ' * len(m[0]), masked)
     quantities = []
     for match in QUANTITY.finditer(masked):
@@ -72,6 +75,8 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
     known = {m['message_id']: m for p in snapshot['members'] for m in p['context']}
     known.update({m['message_id']: m for m in snapshot['messages']})
     known.update({m['message_id']: m for m in snapshot.get('correction_context',[])})
+    identifiers=tuple(known)+tuple(str(m[key]) for m in known.values()
+                                  for key in ('native_id','event_id') if m.get(key))
     segments = observation.get('segments', [])
     if not isinstance(segments, list):
         raise InvalidFact('Segments must be actual message fragments')
@@ -93,23 +98,10 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
                 result.append((match.start(), match.end(), next(iter(members))))
         return sorted(result)
 
-    def parts(ref):
+    def source_parts(ref):
         message = known.get(ref)
         if not message:
             raise InvalidFact('Evidence is outside the supplied actual context')
-        if ref in excerpts:
-            selected = excerpts[ref]
-            clarified=any(c['message_id']==ref and mid in c['member_ids'] and
-                          any(mid in {m for _a,_b,m in hits(known[e]['text'])} for e in c['evidence'] if e in known)
-                          for c in snapshot.get('corrections',[]))
-            for fragment in selected:
-                owners = {m for _a, _b, m in hits(fragment)}
-                if owners and owners != {mid}:
-                    raise InvalidFact('Fragment explicitly belongs to a different bond')
-                whole_owners = {m for _a, _b, m in hits(message['text'])}
-                if len(whole_owners) > 1 and not owners and not clarified:
-                    raise InvalidFact('Multibond fragment needs its explicit bond anchor')
-            return selected
         anchors = hits(message['text'])
         if not anchors:
             return [message['text']]
@@ -122,6 +114,28 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
         if not selected:
             raise InvalidFact('Evidence explicitly names another bond')
         return selected
+
+    def clarified_member(ref):
+        return any(c['message_id'] == ref and mid in c['member_ids'] and
+                   any(mid in {m for _a, _b, m in hits(known[e]['text'])} for e in c['evidence'] if e in known)
+                   for c in snapshot.get('corrections', []))
+
+    def parts(ref):
+        message = known.get(ref)
+        if not message:
+            raise InvalidFact('Evidence is outside the supplied actual context')
+        if ref in excerpts:
+            selected = excerpts[ref]
+            clarified = clarified_member(ref)
+            for fragment in selected:
+                owners = {m for _a, _b, m in hits(fragment)}
+                if owners and owners != {mid}:
+                    raise InvalidFact('Fragment explicitly belongs to a different bond')
+                whole_owners = {m for _a, _b, m in hits(message['text'])}
+                if len(whole_owners) > 1 and not owners and not clarified:
+                    raise InvalidFact('Multibond fragment needs its explicit bond anchor')
+            return selected
+        return source_parts(ref)
 
     def texts(field, *, inbound_only=False):
         refs = evidence.get(field)
@@ -189,7 +203,7 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
         candidates = []
         outbound_parts = {part for ref in evidence['price'] if known[ref]['direction']=='out' for part in parts(ref)}
         for text in texts('price'):
-            prices, _quantities = economics(text, bond_codes=tuple(aliases))
+            prices, _quantities = economics(text, bond_codes=tuple(aliases),identifiers=identifiers)
             for raw, start, end in prices:
                 explicit_side=token_side(text,start,end)
                 if text not in outbound_parts and explicit_side not in (None,side):
@@ -207,13 +221,59 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
                              else rounded_yield(raw) == expected) for raw in candidates)
         if not supported:
             raise InvalidFact('Price is not supported by its classified raw evidence')
+        # The model may select a substring without the cash-basis label. Read
+        # the actual bond-scoped source to reject an explicit incompatible
+        # label; never rewrite the price or infer an unstated basis here.
+        ordered_refs = sorted(set(evidence['price']), key=lambda ref: (
+            known[ref]['direction'] != 'in', -known[ref]['ingest_revision']))
+        for ref in ordered_refs:
+            if not re.search(r'净价|全价', known[ref]['text']):
+                continue
+            selected_positions = None
+            if clarified_member(ref) and ref in excerpts:
+                # A correction can change the bond association, not which raw
+                # numeric fragment supplied this price. Expand only around its
+                # unique original position; another old bond is not evidence.
+                selected_positions = []
+                for fragment in excerpts[ref]:
+                    if not any(number(raw) == expected for raw, _start, _end in
+                               economics(fragment, bond_codes=tuple(aliases), identifiers=identifiers)[0]):
+                        continue
+                    matches = list(re.finditer(re.escape(fragment), known[ref]['text']))
+                    if len(matches) != 1:
+                        raise InvalidFact('Corrected price fragment is not unique in its raw message')
+                    selected_positions.append(matches[0].span())
+                basis_parts = [known[ref]['text']]
+            else:
+                basis_parts = source_parts(ref)
+            labelled = set()
+            for text in basis_parts:
+                prices, _ = economics(text, bond_codes=tuple(aliases), identifiers=identifiers)
+                for raw, start, end in prices:
+                    if number(raw) != expected:
+                        continue
+                    if selected_positions is not None and not any(a <= start and end <= b for a, b in selected_positions):
+                        continue
+                    if known[ref]['direction'] == 'in' and token_side(text, start, end) not in (None, side):
+                        continue
+                    label = re.search(r'(净价|全价)\s*[:：]?\s*$', text[:start])
+                    if label is None:
+                        label = re.match(r'\s*(净价|全价)', text[end:])
+                    if label:
+                        labelled.add('NET_PRICE' if label[1] == '净价' else 'DIRTY_PRICE')
+            if labelled:
+                if len(labelled) != 1:
+                    raise InvalidFact('Price evidence has conflicting explicit cash bases')
+                if changes['price']['kind'] not in labelled:
+                    raise InvalidFact('Price kind contradicts the explicit cash basis in its raw evidence')
+                break
         if changes['price']['kind'] == 'YIELD' and re.search(r'净价|全价', '\n'.join(texts('price'))):
             raise InvalidFact('Cash-price evidence cannot be saved as a yield')
     if changes.get('volume_wan') is not None:
         amount = number(changes['volume_wan'])
         amounts = []
         for text in texts('volume_wan', inbound_only=True):
-            for value, start, end in economics(text, bond_codes=tuple(aliases))[1]:
+            for value, start, end in economics(text, bond_codes=tuple(aliases),identifiers=identifiers)[1]:
                 before = list(re.finditer(r'收|出|买|卖|\bbid\b|\bofr\b|\boffer\b', text[:start], re.I))
                 after = re.match(r'\s*(收|出|买|卖)', text[end:])
                 word = before[-1][0].lower() if before else after[1] if after else None

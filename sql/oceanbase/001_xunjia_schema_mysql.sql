@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS xj2_group (
         policy_version BIGINT NOT NULL, control_version BIGINT NOT NULL,
         send_allowed INTEGER NOT NULL, state VARCHAR(32) NOT NULL,
         review_needed INTEGER NOT NULL, handoff_json LONGTEXT NOT NULL,
-        plan_json LONGTEXT NOT NULL DEFAULT '{}', archived INTEGER NOT NULL DEFAULT 0,
+        plan_json LONGTEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
         created_at DOUBLE NOT NULL DEFAULT 0, KEY idx_xj2_owner (owner_id,bond_code)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE IF NOT EXISTS xj2_thread (

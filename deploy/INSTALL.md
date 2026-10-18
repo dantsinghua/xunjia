@@ -1,8 +1,8 @@
-# 第一批交付修复：离线完整更新、共享配置、原子版本切换
+# Xunjia V2.2 独立离线应用包
 ## 本版边界
-只修复交付部署与就绪诊断，不改成交/询价状态机、Dify 应用、公开 Tool 鉴权规则、Nginx 或 njcb-all。
-程序不会执行客户数据库 DDL，也不会自动创建服务或数据库用户。默认停用自动发送。
-公开 Tool 继续免 Token；私有会话接口的已有鉴权不属于本轮变更。
+本包包含现役 V2.2 询价核心、API、构建后的前端、A/B Chatflow 画布、采集端协议 wheel 与宿主接线资料、离线 Python 依赖及包内验收用例。完整 ARM 交付还包含独立 CPython 3.12 运行时；目标机不需要 Node、编译器或公网下载依赖。
+复用客户已有 OceanBase 和 Dify，仅需普通 App API Key，不捆绑或改造这两项服务。安装器不会执行客户数据库 DDL、创建数据库用户、修改 Nginx 或 njcb-all，也不会替运维自动创建服务。新包默认停用后台循环和真实发送。
+公开 Tool 继续免 Token；私有会话接口保留鉴权。部署成功不等于真实采集端、模型和对手外发链已验收。
 ## 目录结构
     PREFIX/                              默认 /home/xunjia
       config/                            真实配置、transport.json、证书；更新/回滚不覆盖
@@ -22,7 +22,9 @@
 新旧版本均使用同一个共享配置目录；回滚程序版本不会倒退现场配置。
 ## 环境与配置
 实际应用运行仍要求 CPython 3.12、glibc >=2.28、x86_64 或 aarch64。
-部署引导可使用 Python 3.9+；ARM64 包内有已批准的 CPython3.12 运行时才可解压使用。
+麒麟参考环境为 V10 SP3 / Halberd / aarch64 / glibc 2.28，已有现场资料中的系统 Python 为 3.7.9。系统 Python 3.7+ 可以通过 `deploy/bootstrap_runtime.py` 引导经校验的包内 ARM64 CPython 3.12；不用替换系统 Python，也不影响依赖系统 Python 的 yum/dnf。
+引导先核实际架构、glibc、运行时压缩包的双清单 SHA256、安全路径/链接及 ARM ELF，再解到本次 0700 临时目录，运行固定部署管理器或包测试器，结束清理临时目录。引导不修改 PATH 或写入安装前缀；真正 `--apply` 时由部署管理器将永久运行时放到 `PREFIX/python`，venv 不依赖稍后删除的临时路径。
+已存在的 CPython 3.12 优先使用；Python 3.9+ 仍可直接运行部署管理器，由其验证和安装包内运行时。ARM64 包没有实际运行时文件或其校验不通过时明确拒绝，不会联网补装。
 x86_64 缺少 Python3.12 时会明确拒绝安装，不访问公网安装解释器。
 包内 config/xunjia.env 是可编辑的初始化文件，不参加不可变内容校验；可以先填写真实值再运行预检。
 config/xunjia.env.example、程序、依赖和建表 SQL 属于不可变内容，修改后仍会被完整性校验拒绝。
@@ -53,7 +55,7 @@ Dify 只使用客户已有 Chatflow URL 与 App API Key；不需要管理员权�
 HTTP 接口：
 - /api/health：兼容历史 200 状态，必须读取 data.ready，不能用它作为严格探活。
 - /api/health/live：进程存活，不访问数据库。
-- /api/health/ready：检查 9 张表的全部预期字段、类型、主键/唯一约束、15 个二级索引及登录配置；不通过返回 503。
+- /api/health/ready：检查 V2.2 的 15 张 `xj2_*` 表全部预期字段、类型、主键/唯一约束、13 个二级索引、登录配置及发布身份；不通过返回 503。
 - /api/health/automation：本轮未接入真实跨端能力验证，明确返回未验证，不把 configured 当成已验证。
 数据库诊断只返回安全错误码、缺失的表/列/索引名，不输出密码或底层异常原文。
 业务就绪并不证明真实 Dify、STS/OSS、企点收发通过；它们仍属于后续联调批次。
@@ -67,11 +69,16 @@ HTTP 接口：
 不要删除 .xunjia-deploy.lock 或 deployments 文件来绕过锁/恢复校验。
 ## 交付包专用测试
     bash deploy/05-test-package.sh
-只使用包内 Python wheels 和 tests/release 及显式列出的协议验收用例，不需要 Node/esbuild 或 web/src。
+仅有系统 Python 3.7.9 的 ARM64 目标上，此入口同样自动引导经校验的包内 3.12，无需手工解压或设置 PATH；已有 `PREFIX/python`、`PREFIX/venv` 或显式 `XUNJIA_QA_PYTHON` 时先核版本再使用。
+只使用包内 Python wheels、tests/release、tests/cutover、tests/negotiation 及显式列出的协议验收用例，不需要 Node/esbuild 或 web/src。创建新临时 venv，离线安装、pip check、先收集再执行全部随包用例；失败返回非零并保留日志。
 开发环境完整 tests/ 另行验收。包专用测试不等于整个源码开发套件，两者结果分开记录。
 测试使用本轮临时目录，结束后删除，不修改现役配置/数据库/服务。
+
+ARM 验证必须记录实际 Python 架构、glibc、依赖导入与包内测试结果。QEMU 用户态在 openEuler/glibc 2.28 环境执行只能证明该 ARM ABI 环境的兼容性，不能改称麒麟原生机器验收；真正麒麟环境和客户具体补丁版本的结果另列。
+
+本版运行时及锁定依赖已在官方 `cr.kylinos.cn/kylin/kylin-server-platform:v10sp3` 的 ARM64 用户态中实际离线安装、pip check、导入与 SM4 运算通过，系统为 V10 SP3 / Lance / glibc 2.28 / Python 3.7.9。`.productinfo` 标识为 `aarch64-Build23.02/20230324`，镜像元数据构建时间为 `2026-10-10T17:22:56.43012458Z`（北京时间 2026-10-11）；与上文历史现场 Halberd 画像分开记录。验证镜像 ARM manifest 为 `sha256:8b0496126f596b44f92da0f117a71e1af290e62037ea577f8b0b388c54d41b30`。该验证由 QEMU 用户态在 WSL/x86_64 宿主内核上执行，不是客户物理 ARM 机器；完整最终包的实际测试结果以对应 build_id 的交付证据为准，不能借用旧包结果。
 ## OceanBase 建表
-保留 sql/oceanbase/001_xunjia_schema_mysql.sql（9 张表、15 个普通索引）。
+使用 sql/oceanbase/001_xunjia_schema_mysql.sql（V2.2 的15张 `xj2_*` 表及声明索引）。旧9表SQL仅作历史对照。
 只供 DBA 审核后在明确选定的 xunjia_* 数据库内执行；安装、回滚、恢复均不自动运行它。
 CREATE TABLE IF NOT EXISTS 不是旧表迁移，数据库升级另行审查。
 ## V2.2 当前接口与采集端配套
@@ -79,6 +86,7 @@ CREATE TABLE IF NOT EXISTS 不是旧表迁移，数据库升级另行审查。
 - 当前生产入口固定为 `server.app:create_app`，必须用本包 `sql/oceanbase/001_xunjia_schema_mysql.sql` 的15张 `xj2_*` 表；旧9表SQL在archive中仅供历史对照，不是升级方案。安装器不执行客户DDL，不覆盖现有现场配置或数据。
 - 客户Dify导入 `dify/negotiation_v22/` 对应版本A/B画布，仅填 `XUNJIA_DIFY_URL`、`XUNJIA_DIFY_ANALYSIS_APP_KEY`、`XUNJIA_DIFY_REPLY_APP_KEY`。旧单APP_KEY不能作为新两阶段合同。公开Tool免Token，客户不需要提供管理权限。
 - `XUNJIA_AGGREGATION_PROFILE` 指向实测报告生成的参数；未测量时不启用自动分析窗口。`XUNJIA_BOND_CONTEXT_MESSAGES` 默认20、范围10..30。`XUNJIA_REFERENCE_CONFIG` 为可选公开资料/发布日历adapter配置，缺少真实源必须显示未配置。
+- `XUNJIA_DIFY_TIMEOUT_SECONDS` 为每次HTTP调用超时（模板90秒、范围1–300秒），`XUNJIA_DIFY_STAGE_BUDGET_SECONDS` 为包含工具/历史补取的阶段总预算（模板150秒、最大540秒）。实际HTTP超时还受当前剩余阶段预算限制；租约为阶段预算加30秒。部署时须显式沿用所选模型报告的HTTP/阶段预算，不能把默认值冒充已验证配置。
 - `XUNJIA_RUN_BACKGROUND=1` 可与 `XUNJIA_ENABLE_LIVE_TRANSPORT=0` 配合，仅接收、分析、对账；新包默认两者均0，不自动向真实对手发送。
 - 构建包先执行 `scripts/build_collector_runtime.py --output <fresh-dir> --wheelhouse <local-build-wheels>`；主包构建增加 `--collector-wheel <fresh-dir>/xunjia_collector_runtime-2.2.0-py3-none-any.whl`。打包会核wheel代码与本版源码逐文件一致。
 - QTrade采集端需先部署本轮 `qtrade_agent/ossbox/xunjia_v22.py`、Bus/UI guard与app互斥接线，再在其**专用Python环境**离线安装包内 `collector-runtime/*.whl`。依赖cryptography与QTrade现有依赖一致；安装前检查 `pip show xunjia-collector-runtime`，安装后检查 `pip check` 和模块路径。不能在其他服务的共用Python环境中覆盖同名server/relay包。该wheel不含Web服务、现场密钥或运行数据。

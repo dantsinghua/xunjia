@@ -11,8 +11,11 @@ elif [ -x "$PREFIX/venv/bin/python" ]; then
   PY="$PREFIX/venv/bin/python"
 elif command -v python3 >/dev/null 2>&1 && python3 -c "import sys; assert sys.version_info >= (3,9)" >/dev/null 2>&1; then
   PY="$(command -v python3)"
+elif command -v python3 >/dev/null 2>&1 && python3 -c "import sys; assert sys.version_info >= (3,7)" >/dev/null 2>&1; then
+  export PYTHONDONTWRITEBYTECODE=1
+  exec python3 "$HERE/bootstrap_runtime.py" "$@"
 else
-  echo "DEPLOY_BOOTSTRAP_PYTHON_MISSING: use CPython 3.12 or Python 3.9+ to validate/install the bundled ARM64 runtime" >&2
+  echo "DEPLOY_BOOTSTRAP_PYTHON_MISSING: bundled ARM64 runtime bootstrap requires Python 3.7 or newer" >&2
   exit 2
 fi
 export PYTHONDONTWRITEBYTECODE=1

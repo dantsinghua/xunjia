@@ -16,6 +16,11 @@ class FlowUnavailable(RuntimeError):
     def __init__(self,code,status=None):
         self.code,self.status=code,status
         super().__init__(code+(f' HTTP {status}' if status else ''))
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,request,fp,code,message,headers,newurl):
+        # An App API key is scoped to the exact configured origin. Require the
+        # operator to configure the final endpoint instead of forwarding it.
+        return None
 def json_object(text):
     if not isinstance(text,str) or len(text)>1024*1024:raise InvalidFact('Chatflow JSON response exceeds contract')
     text=text.strip()
@@ -41,11 +46,11 @@ class ChatflowClient:
             raise ValueError('Dify API URL must be a full http(s) address without query or fragment')
         if not isinstance(app_key,str) or not app_key.strip():raise ValueError('Dify stage App API Key missing')
         if stage not in ('analysis','reply'):raise ValueError('Unknown Chatflow stage')
-        if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 1<=timeout<=180:raise ValueError('Invalid Dify request timeout')
+        if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 1<=timeout<=300:raise ValueError('Invalid Dify request timeout')
         base=base_url.rstrip('/')
         self.url=(base if base.endswith('/v1') else base+'/v1')+'/chat-messages'
         self._key=app_key;self.stage=stage;self.timeout=timeout
-        self.opener=opener or urllib.request.build_opener();self.clock=clock
+        self.opener=opener or urllib.request.build_opener(_NoRedirect());self.clock=clock
         self.last_evidence={}
     def call(self,context):
         context={**context,'schema_version':'2.2','stage':self.stage}

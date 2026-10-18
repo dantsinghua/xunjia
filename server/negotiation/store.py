@@ -69,6 +69,13 @@ class Store:
     def _save_quote(self, tx, member_id, quote, analysis_id):
         tx.execute("INSERT INTO xj2_quote(quote_id,member_id,side,revision,analysis_id,state_json,created_at) VALUES(?,?,?,?,?,?,?)",
                    (new_id(), member_id, quote.side, quote.revision, analysis_id, encoded(quote.dump()), self.clock()))
+    def _evidence_dependents(self, tx, thread_id, message_id):
+        # A later round can cite an earlier round's actual chat without copying
+        # its scope. Discover dependencies from current field evidence itself.
+        members = tx.execute('SELECT * FROM xj2_peer WHERE thread_id=?', (thread_id,)).fetchall()
+        return [member for member in members if any(
+            message_id in refs for side in ('bid', 'ofr')
+            for refs in self._quote(tx, member['member_id'], side).evidence.values())]
     def _recompute_evidence(self, tx, member_id, *, reason, withdrawn=False):
         """Replay affected fields from still-valid evidence, never add quantities.
 
@@ -76,13 +83,15 @@ class Store:
         can recover the earlier size without erasing an unrelated valid price.
         """
         changed = False
+        through = tx.execute('SELECT t.ingest_revision FROM xj2_thread t JOIN xj2_peer p ON p.thread_id=t.thread_id WHERE p.member_id=?',
+                             (member_id,)).fetchone()['ingest_revision']
         def valid(refs):
             if not refs:
                 return False
             for ref in refs:
-                scope = tx.execute("SELECT relation FROM xj2_scope WHERE message_id=? AND member_id=?", (ref, member_id)).fetchone()
+                scope = self._history_message(tx, member_id, ref, through, allow_invalid=True)
                 replaced = tx.execute("SELECT message_id FROM xj2_message WHERE target_id=? AND historical=0 LIMIT 1", (ref,)).fetchone()
-                if not scope or scope['relation'] not in ('MENTION','INVALID') or replaced:
+                if not scope or replaced:
                     return False
             return True
         for side in ('bid', 'ofr'):
@@ -127,7 +136,7 @@ class Store:
                 tx.execute("UPDATE xj2_scope SET relation='MENTION' WHERE message_id=? AND member_id=?", (message_id, mid))
             else:
                 tx.execute("INSERT INTO xj2_scope(message_id,member_id,relation) VALUES(?,?,'MENTION')", (message_id, mid))
-        groups = []
+        groups, touched = [], set()
         for mid in set(old) | set(member_ids):
             if old.get(mid) == ('MENTION' if mid in member_ids else 'REMOVED'):
                 continue
@@ -136,6 +145,13 @@ class Store:
             tx.execute('UPDATE xj2_peer SET version=version+1 WHERE member_id=?', (mid,))
             self._cancel_commands(tx, member_id=mid, reason='ASSOCIATION_CORRECTED')
             groups.append(member['group_id'])
+            touched.add(mid)
+        for member in self._evidence_dependents(tx, thread_id, message_id):
+            mid = member['member_id']
+            if mid not in touched and self._recompute_evidence(tx, mid, reason=reason):
+                tx.execute('UPDATE xj2_peer SET version=version+1 WHERE member_id=?', (mid,))
+                self._cancel_commands(tx, member_id=mid, reason='ASSOCIATION_CORRECTED')
+                groups.append(member['group_id'])
         self._refresh_groups(tx, owner, groups)
         tx.execute('INSERT INTO xj2_audit(audit_id,owner_id,kind,entity_id,created_at,data_json) VALUES(?,?,?,?,?,?)',
                    (new_id(),owner,'association_corrected',message_id,self.clock(),encoded({'previous':old,'members':member_ids,'reason':reason})))
@@ -242,7 +258,7 @@ class Store:
                 tx.execute("UPDATE xj2_thread SET source_watermark=CASE WHEN source_watermark<? THEN ? ELSE source_watermark END WHERE thread_id=?",(source_seq,source_seq,thread_id))
             if target_id and not historical:
                 touched=[]
-                members=tx.execute('SELECT p.* FROM xj2_scope s JOIN xj2_peer p ON p.member_id=s.member_id WHERE s.message_id=? AND p.thread_id=?',(target_id,thread_id)).fetchall()
+                members=self._evidence_dependents(tx,thread_id,target_id)
                 for member in members:
                     changed=self._recompute_evidence(tx,member['member_id'],reason='correction-'+message_id,withdrawn=kind=='retract')
                     if changed:
@@ -321,20 +337,43 @@ class Store:
                 tx.execute("UPDATE xj2_group SET version=version+1 WHERE group_id=?", (gid,))
 
     def _context(self, tx, member_id, through_revision):
-        rows = tx.execute("SELECT m.* FROM xj2_message m JOIN xj2_scope s ON s.message_id=m.message_id WHERE s.member_id=? AND s.relation IN ('MENTION','UNRESOLVED','INVALID') AND m.ingest_revision<=? AND (m.direction='in' OR m.native_id IS NOT NULL) ORDER BY m.occurred_at DESC,m.ingest_revision DESC LIMIT ?",
+        # A new authorization round does not erase actual chat history. Scope
+        # history by owner + physical thread + bond, while facts stay per round.
+        rows = tx.execute("""SELECT m.* FROM xj2_message m
+            JOIN xj2_peer cp ON cp.member_id=? JOIN xj2_group cg ON cg.group_id=cp.group_id
+            WHERE m.thread_id=cp.thread_id AND m.ingest_revision<=?
+            AND (m.direction='in' OR m.native_id IS NOT NULL)
+            AND EXISTS (SELECT 1 FROM xj2_scope s JOIN xj2_peer hp ON hp.member_id=s.member_id
+                JOIN xj2_group hg ON hg.group_id=hp.group_id WHERE s.message_id=m.message_id
+                AND hp.thread_id=cp.thread_id AND hg.owner_id=cg.owner_id AND hg.bond_code=cg.bond_code
+                AND s.relation IN ('MENTION','UNRESOLVED','INVALID'))
+            ORDER BY m.occurred_at DESC,m.ingest_revision DESC LIMIT ?""",
                           (member_id, through_revision, self.settings.context_messages)).fetchall()
         return [dict(row) for row in reversed(rows)]
-    def context(self, owner, member_id, *, anchors=()):
+    def _history_message(self, tx, member_id, message_id, through_revision, *, allow_invalid=False):
+        return tx.execute("""SELECT m.* FROM xj2_message m
+            JOIN xj2_peer cp ON cp.member_id=? JOIN xj2_group cg ON cg.group_id=cp.group_id
+            WHERE m.message_id=? AND m.thread_id=cp.thread_id AND m.ingest_revision<=?
+            AND (m.direction='in' OR m.native_id IS NOT NULL)
+            AND EXISTS (SELECT 1 FROM xj2_scope s JOIN xj2_peer hp ON hp.member_id=s.member_id
+                JOIN xj2_group hg ON hg.group_id=hp.group_id WHERE s.message_id=m.message_id
+                AND hp.thread_id=cp.thread_id AND hg.owner_id=cg.owner_id AND hg.bond_code=cg.bond_code
+                AND (s.relation='MENTION' OR (?=1 AND s.relation='INVALID')))""",
+                          (member_id,message_id,through_revision,int(allow_invalid))).fetchone()
+    def context(self, owner, member_id, *, anchors=(), through_revision=None):
         """One global last-N window; explicit references are added, not guessed."""
         with self.db.transaction(write=False) as tx:
             member = self._member(tx, owner, member_id)
             thread = self._thread(tx, owner, member["thread_id"])
-            rows = self._context(tx, member_id, thread["ingest_revision"])
+            through=thread['ingest_revision'] if through_revision is None else through_revision
+            if type(through) is not int or not 0<=through<=thread['ingest_revision']:
+                raise InvalidFact('Invalid fixed history watermark')
+            rows = self._context(tx, member_id, through)
             seen = {m["message_id"] for m in rows}
             if len(anchors) > 30:
                 raise InvalidFact("Too many explicit context anchors")
             for anchor in anchors:
-                row = tx.execute("SELECT m.* FROM xj2_message m JOIN xj2_scope s ON s.message_id=m.message_id WHERE m.message_id=? AND s.member_id=? AND s.relation='MENTION' AND (m.direction='in' OR m.native_id IS NOT NULL)", (anchor, member_id)).fetchone()
+                row = self._history_message(tx,member_id,anchor,through)
                 if not row:
                     raise InvalidFact("Context anchor belongs to a different bond/counterparty or lacks native send evidence")
                 if anchor not in seen:
@@ -367,7 +406,15 @@ class Store:
                 return None
             raw = [dict(r) for r in tx.execute("SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>? ORDER BY ingest_revision LIMIT 100", (thread_id, thread["analyzed_revision"])).fetchall()]
             through = raw[-1]["ingest_revision"]
-            peers = [dict(r) for r in tx.execute("SELECT p.*,g.bond_code,g.trade_day,g.plan_json,g.our_side FROM xj2_peer p JOIN xj2_group g ON g.group_id=p.group_id WHERE p.thread_id=? ORDER BY p.member_id", (thread_id,)).fetchall()]
+            peers = [dict(r) for r in tx.execute("""SELECT p.*,g.bond_code,g.trade_day,g.plan_json,g.our_side
+                FROM xj2_peer p JOIN xj2_group g ON g.group_id=p.group_id
+                WHERE p.thread_id=? AND g.archived=0 AND NOT EXISTS (
+                    SELECT 1 FROM xj2_peer np JOIN xj2_group ng ON ng.group_id=np.group_id
+                    WHERE np.thread_id=p.thread_id AND ng.owner_id=g.owner_id AND ng.bond_code=g.bond_code
+                    AND ng.archived=0 AND ((ng.state='OPEN' AND g.state<>'OPEN') OR
+                        (ng.state=g.state AND (ng.created_at>g.created_at OR
+                            (ng.created_at=g.created_at AND ng.group_id>g.group_id)))))
+                ORDER BY p.member_id""", (thread_id,)).fetchall()]
             for peer in peers:
                 peer["plan"]=json.loads(peer.pop("plan_json"))
                 peer["context"] = self._context(tx, peer["member_id"], thread["analyzed_revision"])
@@ -401,14 +448,15 @@ class Store:
         for key, refs in evidence.items():
             messages = []
             for ref in refs:
-                row = tx.execute("SELECT m.* FROM xj2_message m JOIN xj2_scope s ON s.message_id=m.message_id WHERE m.message_id=? AND s.member_id=? AND s.relation='MENTION' AND m.thread_id=? AND m.ingest_revision<=?",
-                                 (ref, member["member_id"], member["thread_id"], analysis["through_revision"])).fetchone()
+                row = self._history_message(tx,member['member_id'],ref,analysis['through_revision'])
                 if row is None:
                     raise InvalidFact("Field evidence is not scoped to this bond/counterparty snapshot")
                 messages.append(dict(row))
             fresh = [m for m in messages if m["direction"] == "in" and not m["historical"] and m["ingest_revision"] > analysis["from_revision"]]
             for message in messages:
-                newer=tx.execute("SELECT message_id FROM xj2_message WHERE target_id=? AND historical=0 AND ingest_revision<=? LIMIT 1",(message['message_id'],analysis['through_revision'])).fetchone()
+                # A frozen analysis can use older input, but it cannot revive a
+                # source already edited or withdrawn while the model was running.
+                newer=tx.execute("SELECT message_id FROM xj2_message WHERE target_id=? AND historical=0 LIMIT 1",(message['message_id'],)).fetchone()
                 if newer:raise InvalidFact('Evidence has been edited or withdrawn')
             if not fresh:
                 raise InvalidFact("Current counterpart fields require a new inbound message, not history or our draft")
@@ -428,7 +476,8 @@ class Store:
                     previous_sequence = max(previous_sequence, old["source_seq"])
             if max(m["source_seq"] for m in fresh) < previous_sequence:
                 raise InvalidFact("Late older evidence cannot overwrite a newer field value")
-    def commit_analysis(self, owner, analysis_id, token, *, scopes, observations, unresolved=None, corrections=None):
+    def commit_analysis(self, owner, analysis_id, token, *, scopes, observations, unresolved=None, corrections=None,
+                        public_tool_results=None):
         """Transaction A: valid facts survive independently of any later reply.
         A malformed observation is reported without discarding valid observations
         for other bonds/sides. The Chatflow's semantic interpretation is NOT
@@ -440,7 +489,17 @@ class Store:
         corrections = [] if corrections is None else corrections
         if not isinstance(corrections,list) or len(corrections)>100:
             raise InvalidFact('Invalid association corrections')
-        digest = hashlib.sha256(encoded([scopes, observations, unresolved, corrections]).encode()).hexdigest()
+        public_tool_results=[] if public_tool_results is None else public_tool_results
+        if (not isinstance(public_tool_results,list) or len(public_tool_results)>6
+                or any(not isinstance(entry,dict) or set(entry)!={'request','result'}
+                    or not isinstance(entry['request'],dict) or not isinstance(entry['result'],dict)
+                    for entry in public_tool_results)):
+            raise InvalidFact('Invalid captured public tool results')
+        public_tool_results=json.loads(encoded(public_tool_results))
+        inputs=[scopes,observations,unresolved,corrections]
+        # Retain the existing replay digest for analyses without public calls.
+        if public_tool_results:inputs.append(public_tool_results)
+        digest = hashlib.sha256(encoded(inputs).encode()).hexdigest()
         with self.write(owner) as tx:
             analysis = self._analysis(tx, owner, analysis_id, token)
             if analysis["state"] == "COMMITTED":
@@ -450,6 +509,8 @@ class Store:
                 return saved
             snapshot = json.loads(analysis["snapshot_json"])
             raw_ids = {m["message_id"] for m in snapshot["messages"]}
+            raw_messages={m['message_id']:m for m in snapshot['messages']}
+            current_members={p['member_id'] for p in snapshot['members']}
             if set(scopes) != raw_ids or set(unresolved) - raw_ids:
                 raise InvalidFact("Each raw message needs an explicit bond association (possibly empty)")
             thread = self._thread(tx, owner, analysis["thread_id"])
@@ -462,6 +523,9 @@ class Store:
                         or len(members) + len(unclear) > 100 or set(members) & set(unclear)):
                     raise InvalidFact("Invalid message-to-bond associations")
                 for member_id, relation in [(m, "MENTION") for m in set(members)] + [(m, "UNRESOLVED") for m in set(unclear)]:
+                    message=raw_messages[message_id]
+                    if member_id not in current_members and (message['direction']!='out' or not message['native_id']):
+                        raise InvalidFact('Current inbound associations cannot target a retired round')
                     member = self._member(tx, owner, member_id)
                     if member["thread_id"] != analysis["thread_id"]:
                         raise InvalidFact("Message cannot be assigned to a different counterparty")
@@ -488,6 +552,8 @@ class Store:
                     if not isinstance(observation, dict) or set(observation) != {"member_id", "side", "changes", "evidence"}:
                         raise InvalidFact("Invalid quote observation fields")
                     mid = observation["member_id"]
+                    if mid not in current_members:
+                        raise InvalidFact('Current quote facts cannot update a retired round')
                     member = self._member(tx, owner, mid)
                     if member["thread_id"] != analysis["thread_id"]:
                         raise InvalidFact("Quote cannot cross counterparty threads")
@@ -529,6 +595,8 @@ class Store:
             tx.execute("UPDATE xj2_thread SET analyzed_revision=?,pending_since=? WHERE thread_id=?", (analysis["through_revision"], following, analysis["thread_id"]))
             result = {"input_hash": digest, "accepted": accepted, "rejected": rejected, "unresolved": unresolved,
                       "through_revision": analysis["through_revision"], "facts_committed": True}
+            if public_tool_results:
+                result['public_tool_results']=public_tool_results
             tx.execute("UPDATE xj2_analysis SET state='COMMITTED',result_json=?,committed_at=? WHERE analysis_id=?", (encoded(result), self.clock(), analysis_id))
             return result
     def rollover(self, owner, group_id, *, trade_day, valuation=None, expected_valuation_date=None):

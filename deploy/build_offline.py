@@ -31,7 +31,7 @@ def template_is_clean(path):
            'XUNJIA_RUN_BACKGROUND','XUNJIA_ENABLE_LIVE_TRANSPORT','XUNJIA_QUOTE_SOURCE',
            'XUNJIA_TRANSPORT_CONFIG','XUNJIA_DIFY_URL','XUNJIA_ALLOWED_ORIGINS',
            'XUNJIA_ALLOW_INSECURE_MQ_HTTP','XUNJIA_AGGREGATION_PROFILE','XUNJIA_REFERENCE_CONFIG',
-           'XUNJIA_BOND_CONTEXT_MESSAGES',*secrets}
+           'XUNJIA_BOND_CONTEXT_MESSAGES','XUNJIA_DIFY_STAGE_BUDGET_SECONDS','XUNJIA_DIFY_TIMEOUT_SECONDS',*secrets}
     if set(values)-known:raise DeployError('UNKNOWN_TEMPLATE_FIELD')
     if any(values.get(k)!='0' for k in ('XUNJIA_RUN_BACKGROUND','XUNJIA_ENABLE_LIVE_TRANSPORT')):
         raise DeployError('TEMPLATE_AUTOMATION_ENABLED')
@@ -51,12 +51,16 @@ def input_files(root):
                 # the measured production A/B package is negotiation_v22.
                 if folder=='dify' and source.relative_to(root/folder).parts[0]=='chatflow_v22':continue
                 files[source.relative_to(root).as_posix()]=source
+    collector_source_manifest=root/'deploy/collector-qtrade-v22/manifest.json'
+    if collector_source_manifest.is_file():
+        files['deploy/collector-qtrade-v22/manifest.json']=collector_source_manifest
     for name in ('requirements.lock','requirements-dev.lock','config/xunjia.env.example',
                  'config/README.md','config/transport.example.json'):
         files[name]=root/name
     for source in sorted((root/'web/dist').rglob('*')):
         if source.is_file():files['frontend/dist/'+source.relative_to(root/'web/dist').as_posix()]=source
     # The deployable regression suite intentionally does NOT need web/src, Node or esbuild.
+    files['tests/conftest.py']=root/'tests/conftest.py'
     for source in sorted((root/'tests/release').glob('*.py')):
         files['tests/release/'+source.name]=source
     for folder in ('cutover','negotiation'):

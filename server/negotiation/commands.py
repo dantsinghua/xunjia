@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from .prices import InvalidFact, Price
+from .prices import InvalidFact, Price, StaleDecision
 from .store import encoded, identity, new_id
 class Commands:
     def __init__(self, store, *, current_day=None):
@@ -111,13 +111,27 @@ class Commands:
             tx.execute('INSERT INTO xj2_command_member(command_id,member_id) VALUES(?,?)',(command_id,mid))
             tx.execute('UPDATE xj2_peer SET pending_command_id=? WHERE member_id=?',(command_id,mid))
         return command_id
-    def propose(self, owner, member_id, *, basis, request_id, proposal, validator, expires_at):
+    def _require_reply_lease(self, tx, owner, member_id, request_id, job_id, token):
+        """Fence asynchronous B work inside the transaction that writes its outcome."""
+        row=tx.execute("""SELECT j.state,j.lease_token,j.lease_until FROM xj2_reply_job j
+            JOIN xj2_peer p ON p.member_id=j.member_id JOIN xj2_group g ON g.group_id=p.group_id
+            WHERE j.job_id=? AND j.member_id=? AND j.request_id=? AND g.owner_id=?""",
+            (job_id,member_id,request_id,owner)).fetchone()
+        if (not row or row['state']!='RUNNING' or row['lease_token']!=token
+                or row['lease_until']<=self.store.clock()):
+            raise StaleDecision('Reply job lease is expired, replaced, or outside this request')
+
+    def propose(self, owner, member_id, *, basis, request_id, proposal, validator, expires_at,
+                reply_job_id=None, reply_lease_token=None):
         """Transaction B. A server-supplied validator runs BEFORE the DB lock.
         A failure creates an inspectable decision record, not a rollback of
         transaction A. Tests may supply a synthetic validator; production must
         provide actual semantic/price/quantity/text validation before wiring.
         """
         identity(request_id, "request id")
+        if reply_job_id is not None or reply_lease_token is not None:
+            identity(reply_job_id, 'reply job id')
+            identity(reply_lease_token, 'reply lease token')
         if not callable(validator) or not isinstance(basis, dict):
             raise InvalidFact("A server-side validator and fixed decision basis are required")
         if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) or not math.isfinite(expires_at) or expires_at <= self.store.clock():
@@ -129,6 +143,8 @@ class Commands:
             error = {"reason": "REPLY_VALIDATION_FAILED", "error_type": type(exc).__name__}
         with self.store.write(owner) as tx:
             member = self.store._member(tx, owner, member_id)
+            if reply_job_id is not None:
+                self._require_reply_lease(tx,owner,member_id,request_id,reply_job_id,reply_lease_token)
             digest = hashlib.sha256(encoded(body).encode()).hexdigest() if body else None
             previous = tx.execute("SELECT command_id,content_hash,basis_json,state FROM xj2_command WHERE member_id=? AND request_id=?", (member_id, request_id)).fetchone()
             if previous:

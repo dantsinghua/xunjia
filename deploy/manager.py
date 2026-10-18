@@ -42,7 +42,9 @@ class SystemService:
                                 capture_output=True, text=True)
         return result.returncode == 0 and result.stdout.strip() == 'loaded'
     def active(self):
-        if not shutil.which('systemctl'): return False
+        # systemctl may return zero after ignoring a request inside a chroot.
+        # Only an explicitly loaded unit can be considered active.
+        if not shutil.which('systemctl') or not self.exists(): return False
         return subprocess.run(['systemctl','is-active','--quiet',self.name],
                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode == 0
     def validate(self):
@@ -289,6 +291,8 @@ class Manager:
         shutil.copytree(self.bundle/'app',app)
         for name in ('deploy','scripts','sql'):
             shutil.copytree(self.bundle/name,app/name)
+        if (self.bundle/'dify').is_dir():
+            shutil.copytree(self.bundle/'dify',app/'dify')
         shutil.copytree(self.bundle/'frontend',app/'frontend')
         (app/'config').symlink_to(self.prefix/'config',target_is_directory=True)
         shutil.copy2(self.bundle/'VERSION.json',app/'VERSION.json')

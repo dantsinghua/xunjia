@@ -17,7 +17,7 @@ from .negotiation.runtime import Inbox,Dispatcher
 from .negotiation.settings import Settings,Aggregation
 def create_app(*,database_url=None,auth_config=None,enable_background=None,transport=None,
                chat_client=None,chatflows=None,market=None,reference_provider=None,calendar=None,
-               agent_service_token=None,aggregation=None,enable_live_transport=None):
+               agent_service_token=None,aggregation=None,enable_live_transport=None,stage_budget_seconds=None):
     url=database_url or os.environ.get('XUNJIA_DATABASE_URL','')
     if not url:raise ValueError('尚未配置XUNJIA_DATABASE_URL')
     auth=AuthService(auth_config or AuthConfig.from_env())
@@ -62,7 +62,8 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
         transport=load_transports(store,os.environ['XUNJIA_TRANSPORT_CONFIG'],os.environ['XUNJIA_STATE_DIR'])
     service=Inquiry(store,reference_provider=reference_provider,calendar=calendar)
     tools=BondTools(provider=reference_provider)
-    engine=Engine(service,client,tools,aggregation=aggregation)
+    stage_budget=float(os.environ.get('XUNJIA_DIFY_STAGE_BUDGET_SECONDS','150')) if stage_budget_seconds is None else stage_budget_seconds
+    engine=Engine(service,client,tools,aggregation=aggregation,stage_budget_seconds=stage_budget)
     inbox=Inbox(service,transport)
     dispatcher=Dispatcher(service,transport,live_enabled=live)
     hub=QuoteHub();runtime={'engine':'v22','background_errors':{},'analysis_enabled':client is not None and aggregation is not None,'send_enabled':live}

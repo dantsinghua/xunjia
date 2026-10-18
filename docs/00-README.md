@@ -1,4 +1,4 @@
-> 2026-10-13实施更新：mock服务已删除。以下历史设计中的mock路径和旧流程不再是启动入口；当前运行、权限与接口以[部署说明](implementation/deployment.md)、[Chat设计](2026-10-13-dify-chat-agent-design.md)及server实现为准。
+> 2026-10-18 V2.2更新：现役入口固定新核心，公开Tool免Token，Dify使用普通A/B App Key。以下历史设计中的mock路径、旧表和单Agent流程不是启动入口；当前运行与交付以[部署说明](implementation/deployment.md)、[切换进度](implementation/2026-10-17-v22-cutover-progress.md)及[离线安装说明](../deploy/INSTALL.md)为准。
 
 # 现券询价谈价机器人 —— 架构设计(v1.0 重设计)
 

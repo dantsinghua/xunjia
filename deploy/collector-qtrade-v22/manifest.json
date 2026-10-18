@@ -1,0 +1,161 @@
+{
+  "format_version": 1,
+  "delivery_kind": "new_sources_and_manual_integration_reference",
+  "business_version": "2.2",
+  "created_at": "2026-10-17T13:43:11.333840+00:00",
+  "qtrade_context": {
+    "head_commit": "f87304bfb1f63482e1d999f6b507a346537c28f7",
+    "branch": "claude/lucid-dijkstra-uu5max",
+    "worktree_was_dirty_before_implementation": true,
+    "head_is_not_an_exact_worktree_preimage": true
+  },
+  "preimage_available": false,
+  "patch_available": false,
+  "automatic_application_supported": false,
+  "preimage_limitation": "No original QTrade worktree backup was retained. Final verification snapshots contain hashes only. The wiring script has no backup step. Existing-file base_sha256 values are unknown, not equal to HEAD by assumption.",
+  "files": [
+    {
+      "target_path": "src/qtrade_agent/bus/native_guard.py",
+      "delivery_path": "source/src/qtrade_agent/bus/native_guard.py",
+      "role": "new_runtime_module",
+      "base_state": "created_in_this_batch",
+      "base_sha256": null,
+      "result_sha256": "ee9e8983dbc236b4f3c3b86f79443867ef91786c4955b219ab25f69e46eafe3c",
+      "size_bytes": 756,
+      "freeze_evidence": "collector-freeze.json"
+    },
+    {
+      "target_path": "src/qtrade_agent/ossbox/xunjia_v22.py",
+      "delivery_path": "source/src/qtrade_agent/ossbox/xunjia_v22.py",
+      "role": "new_runtime_module",
+      "base_state": "created_in_this_batch",
+      "base_sha256": null,
+      "result_sha256": "3099aca903e6d6cf427f12a2b62253fccd423b47307df4d64388f313e14f827f",
+      "size_bytes": 16225,
+      "freeze_evidence": "collector-freeze.json"
+    },
+    {
+      "target_path": "tests/acceptance/test_xunjia_v22_native_guard.py",
+      "delivery_path": "source/tests/acceptance/test_xunjia_v22_native_guard.py",
+      "role": "independent_acceptance",
+      "base_state": "created_in_this_batch",
+      "base_sha256": null,
+      "result_sha256": "eecca27e773796515f3a37990da2251a50423173e04516f423cd557a79be3372",
+      "size_bytes": 5736,
+      "freeze_evidence": "collector-all-final-before.json"
+    },
+    {
+      "target_path": "tests/acceptance/test_xunjia_v22_host.py",
+      "delivery_path": "source/tests/acceptance/test_xunjia_v22_host.py",
+      "role": "independent_acceptance",
+      "base_state": "created_in_this_batch",
+      "base_sha256": null,
+      "result_sha256": "122d37326a3d249973699799c3d93d0094be102a0c65093aaa5fe72af8c01310",
+      "size_bytes": 11780,
+      "freeze_evidence": "collector-all-final-before.json"
+    },
+    {
+      "target_path": "tests/acceptance/test_xunjia_v22_app_wiring.py",
+      "delivery_path": "source/tests/acceptance/test_xunjia_v22_app_wiring.py",
+      "role": "independent_acceptance",
+      "base_state": "created_in_this_batch",
+      "base_sha256": null,
+      "result_sha256": "f5abb565041bb293dfc0b84c426ccb137e7446dda7febad1fe6ee7f4967efd40",
+      "size_bytes": 4308,
+      "freeze_evidence": "collector-all-final-before.json"
+    },
+    {
+      "target_path": "tests/acceptance/test_init_db_permissions.py",
+      "delivery_path": "source/tests/acceptance/test_init_db_permissions.py",
+      "role": "independent_acceptance",
+      "base_state": "created_in_this_batch",
+      "base_sha256": null,
+      "result_sha256": "4811a9cd805165668bc4f2d95494c24127afbad79917c467442b48146f560774",
+      "size_bytes": 1953,
+      "freeze_evidence": "collector-all-final-before.json"
+    }
+  ],
+  "existing_file_integration": [
+    {
+      "target_path": "src/qtrade_agent/app.py",
+      "symbols": [
+        "AgentApp.open",
+        "AgentApp.xunjia_inbox_tick",
+        "AgentApp._fanout_webhooks",
+        "AgentApp.start",
+        "AgentApp._configure_saved_ossbox",
+        "AgentApp._xunjia_v22_contacts",
+        "AgentApp._configure_xunjia_v22",
+        "AgentApp.stop"
+      ],
+      "base_sha256": null,
+      "result_sha256": "c0c00d56702198db7f1b0dfafd4f3d069d87fe5dd4939aa26c1225b28d77e9d9",
+      "full_file_delivered": false,
+      "freeze_evidence": "collector-freeze.json"
+    },
+    {
+      "target_path": "src/qtrade_agent/bus/bus.py",
+      "symbols": [
+        "Bus.supports_xunjia_v22_guard",
+        "Bus._execute"
+      ],
+      "base_sha256": null,
+      "result_sha256": "9540d85beedaaa31c044e881c424fa7c7cbc35171a733268e3ea8258c5f1ade0",
+      "full_file_delivered": false,
+      "freeze_evidence": "collector-freeze.json"
+    },
+    {
+      "target_path": "src/qtrade_agent/adapters/qidian/ui.py",
+      "symbols": [
+        "QidianUi._tap_anchor"
+      ],
+      "base_sha256": null,
+      "result_sha256": "48a6b3279bcb8f7e98a6fe989f974397c4520b4979aecf79008109d19d0e43ce",
+      "full_file_delivered": false,
+      "freeze_evidence": "collector-freeze.json"
+    },
+    {
+      "target_path": "src/qtrade_agent/ossbox/routes.py",
+      "symbols": [
+        "register_ossbox_settings.view"
+      ],
+      "base_sha256": null,
+      "result_sha256": "bf9867fb7e054d98eaedd19d3c56e84b16af43d809e7f239c7fda7f5cc5b3cd0",
+      "full_file_delivered": false,
+      "freeze_evidence": "collector-freeze.json"
+    },
+    {
+      "target_path": "src/qtrade_agent/main.py",
+      "symbols": [
+        "init_db"
+      ],
+      "base_sha256": null,
+      "result_sha256": "2f757b49a9a2031300bba6f6d8e638f00b7a78069deb7aba66decbef18d78f85",
+      "full_file_delivered": false,
+      "freeze_evidence": "collector-freeze.json"
+    }
+  ],
+  "historical_validation": {
+    "qtrade_agent_full_suite": {
+      "passed": 3309,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 480.79,
+      "scope": "Exact final local QTrade worktree, including pre-existing changes; not this partial delivery in isolation"
+    },
+    "independent_collector_suite": {
+      "passed": 22,
+      "failed": 0
+    },
+    "independent_init_db_permissions": {
+      "passed": 4,
+      "failed": 0
+    },
+    "installed_protocol_wheel_joint_contracts": {
+      "passed": 3,
+      "failed": 0
+    },
+    "real_account_or_native_send_verified": false,
+    "qtrade_installer_verified": false
+  }
+}

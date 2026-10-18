@@ -119,6 +119,14 @@ class Inquiry:
             if row['binding_version']!=b['version']:raise InvalidFact('Account binding changed since preview')
             if self.clock()-row['created_at']>900:raise InvalidFact('Preview expired; review a fresh preview')
             if digest(json.loads(b['config_json']))!=preview['preferences_hash']:raise InvalidFact('Saved pricing settings changed; regenerate preview')
+            control=tx.execute('SELECT send_allowed FROM xj2_owner WHERE owner_id=?',(owner,)).fetchone()
+            if not control['send_allowed']:
+                # Confirm authorizes only this batch. Preserve the existing
+                # global pause on old groups before opening the new groups.
+                paused=tx.execute("SELECT group_id FROM xj2_group WHERE owner_id=? AND state='OPEN' AND send_allowed=1",(owner,)).fetchall()
+                for group in paused:
+                    tx.execute('UPDATE xj2_group SET send_allowed=0,control_version=control_version+1 WHERE group_id=?',(group['group_id'],))
+                    self.repo._cancel_commands(tx,group_id=group['group_id'],reason='PRESERVE_PREVIOUS_BATCH_PAUSE')
             grouped=defaultdict(list);group_ids=[]
             for item in preview['items']:
                 plan=item['plan'];code=plan['code']

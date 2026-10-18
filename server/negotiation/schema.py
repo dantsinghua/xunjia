@@ -11,6 +11,7 @@ TABLES = ("xj2_owner", "xj2_group", "xj2_thread", "xj2_peer", "xj2_message",
 
 def statements(mysql: bool = False) -> list[str]:
     text = "LONGTEXT" if mysql else "TEXT"
+    plan_default = "" if mysql else " DEFAULT '{}'"
     ddl = [
         """CREATE TABLE IF NOT EXISTS xj2_owner (
         owner_id VARCHAR(160) PRIMARY KEY, control_version BIGINT NOT NULL,
@@ -24,7 +25,7 @@ def statements(mysql: bool = False) -> list[str]:
         policy_version BIGINT NOT NULL, control_version BIGINT NOT NULL,
         send_allowed INTEGER NOT NULL, state VARCHAR(32) NOT NULL,
         review_needed INTEGER NOT NULL, handoff_json {text} NOT NULL,
-        plan_json {text} NOT NULL DEFAULT '{{}}', archived INTEGER NOT NULL DEFAULT 0,
+        plan_json {text} NOT NULL{plan_default}, archived INTEGER NOT NULL DEFAULT 0,
         created_at DOUBLE NOT NULL DEFAULT 0)""",
         """CREATE TABLE IF NOT EXISTS xj2_thread (
         thread_id VARCHAR(64) PRIMARY KEY, owner_id VARCHAR(160) NOT NULL,
