@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "measurement_id": "r20-full47-synthetic-arrival-grid-v1",
+  "profile_sha256": "2135405ad7963e12a078150a4e6cacb085b831a38dfd0bae988ecd85e2d1d1fa",
+  "selection": "measured-service/synthetic-arrival-grid",
+  "status": "PASS",
+  "runtime_source_manifest_sha256": "04842256b181def1314b8d5111bee62e66483feae954043fa65e2bd492eebebd",
+  "model": "qwen-max",
+  "dify_version": "0.15.3",
+  "context_policy_revision": "latest_quote_confirmation_v1",
+  "context_messages": 20,
+  "http_timeout_seconds": 90,
+  "stage_budget_seconds": 150,
+  "workers": 1,
+  "real_cases": 47,
+  "successful_cases": 47,
+  "clean_pairs": 46,
+  "public_tool_answers": 4,
+  "analysis": {
+    "count": 47,
+    "mean_ms": 8491.863957446809,
+    "p50_ms": 7795.565,
+    "p95_ms": 12096.464,
+    "max_ms": 16913.66,
+    "below_ten_seconds": 40,
+    "failed_cases": 0
+  },
+  "reply": {
+    "count": 47,
+    "mean_ms": 4566.11429787234,
+    "p50_ms": 4106.731,
+    "p95_ms": 9061.685,
+    "max_ms": 9394.399,
+    "below_ten_seconds": 47,
+    "failed_cases": 0
+  },
+  "reference_ms": 11706.479666666666,
+  "candidate_windows": 15,
+  "synthetic_simulations": 8280,
+  "phase_winners": {
+    "0": [
+      1463,
+      4389
+    ],
+    "125": [
+      1463,
+      4389
+    ]
+  },
+  "evidence_sha256": {
+    "full47_report": "8edded397b32034c02c17f76152f6688694a7e2c61f9238b93dc2f80fa6acc50",
+    "full47_independent": "bc234af527f2ae1249aca8af9a3a68972fe8253cb81f0837d8f519497c5d5e95",
+    "evaluation_spec": "f13284c51e740ceb4520c242881e7e9da278a44773c0af56f47babf6d9a06e32",
+    "evaluation": "81e5362b023e8758546c4b2a45588ff748ad63fa272c634a2a9fb585ea0e2036",
+    "events": "d10720770f8846266d946f37c6fde67789b4be90d602b2203ed7c7a4e8bc4a3c",
+    "independent_evaluation": "06c19fdd1ea733113d4f23e959a629c6fbdc5d54eccf4ea53895fc38c4f4e934"
+  },
+  "scope": "Real local qwen-max through the existing Dify shim; fixed synthetic arrival traces, one analysis loop, WAIT and no pending command",
+  "limits": [
+    "Not a customer-arrival optimum or a guarantee of merged-prompt latency",
+    "The cap bounds aggregation readiness; busy-loop queueing is additional",
+    "Raw messages remain visible independently of analysis",
+    "Enable the profile explicitly for the intended model/runtime; retain site configuration"
+  ]
+}

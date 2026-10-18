@@ -9,6 +9,7 @@ from dataclasses import asdict, replace
 import hashlib
 import json
 import math
+import re
 import time
 import uuid
 from ..db import Database
@@ -16,6 +17,7 @@ from .facts import Quote, apply_patch, group_summary
 from .prices import InvalidFact, LimitPolicy, Price, StaleDecision, Valuation, iso_day, number
 from .schema import statements
 from .settings import Aggregation, Settings
+from .text_roles import non_trading_spans
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 def identity(value, label="identifier", size=160):
@@ -379,13 +381,122 @@ class Store:
                 if anchor not in seen:
                     rows.append(dict(row)); seen.add(anchor)
             return sorted(rows, key=lambda r: (r["occurred_at"], r["ingest_revision"]))
+    def _settlement_question(self, tx, owner, member):
+        """Read actual command evidence, independently of the generic waiting pointer."""
+        group=self._group(tx,owner,member['group_id'])
+        side='ofr' if group['our_side']=='BUY' else 'bid'
+        quote=self._quote(tx,member['member_id'],side)
+        if (member['reconfirm_day'] or group['archived'] or quote.price is None
+                or quote.price.kind not in ('NET_PRICE','DIRTY_PRICE') or quote.validity!='ACTIVE'
+                or quote.assertion!='QUOTE' or quote.confirmed_day!=group['trade_day']):
+            return None
+        # A bounded command index is sufficient; exhaustion remains a gap, not
+        # permission to pick an older question or retrieve older chat messages.
+        rows=[dict(row) for row in tx.execute("SELECT * FROM xj2_command WHERE thread_id=? ORDER BY created_at DESC,command_id DESC LIMIT 100",
+                                            (member['thread_id'],)).fetchall()]
+        if len(rows)==100:return None
+        target={'side':side,'quote_revision':quote.revision}
+        candidates=[]; live=[]
+        for row in rows:
+            body=json.loads(row['body_json']);basis=json.loads(row['basis_json'])
+            if basis.get('trade_day')!=group['trade_day'] or row['state'] not in ('SENT','PENDING','UNKNOWN'):
+                continue
+            row['body']=body;live.append(row)
+            if (row['member_id']==member['member_id'] and body.get('settlement_question')==target
+                    and row['state']=='SENT' and row['sent_at'] is not None and row['native_id']):
+                sent=tx.execute("SELECT message_id FROM xj2_message WHERE thread_id=? AND direction='out' AND native_id=? AND text=?",
+                                (member['thread_id'],row['native_id'],body['text'])).fetchone()
+                if sent and not tx.execute("SELECT message_id FROM xj2_message WHERE target_id=? AND historical=0 LIMIT 1",
+                                           (sent['message_id'],)).fetchone():
+                    candidates.append(row)
+        if not candidates:return None
+        chosen=max(candidates,key=lambda row:(row['sent_at'],row['command_id']))
+        ambiguous=False
+        for row in live:
+            marker=row['body'].get('settlement_question')
+            if row['member_id']==member['member_id'] and marker==target:continue
+            if row['body'].get('kind')=='SOCIAL':continue
+            if row['state'] in ('PENDING','UNKNOWN'):
+                ambiguous=True
+            elif marker:
+                other=self._member(tx,owner,row['member_id'])
+                other_group=self._group(tx,owner,other['group_id'])
+                other_quote=self._quote(tx,row['member_id'],marker['side'])
+                if (not other_group['archived'] and other_quote.revision==marker['quote_revision']
+                        and other_quote.validity=='ACTIVE' and other_quote.confirmed_day==group['trade_day']):
+                    ambiguous=True
+            elif row['sent_at'] is not None and row['sent_at']>=chosen['sent_at']:
+                ambiguous=True
+        return {'command_id':chosen['command_id'],**target,'trade_day':group['trade_day'],
+                'sent_at':chosen['sent_at'],'ambiguous':ambiguous}
+
+    @staticmethod
+    def _settlement_sources(snapshot, observation, question):
+        """Reused before calculation and inside commit; no calendar or network I/O."""
+        binding=observation.get('settlement_binding')
+        if (not question or not isinstance(binding,dict) or set(binding)!={'command_id','quote_revision'}
+                or binding!={key:question[key] for key in ('command_id','quote_revision')}
+                or observation.get('side')!=question['side']):
+            raise InvalidFact('Settlement answer does not match an actual current sent question')
+        changes=observation.get('changes',{});evidence=observation.get('evidence',{})
+        if set(changes)!={'price','finality'} or changes['finality']!='UNKNOWN' or set(evidence)!=set(changes):
+            raise InvalidFact('Settlement answer may only supplement conditions, not reconfirm price or quantity')
+        refs=evidence.get('price')
+        if not isinstance(refs,list) or not refs or len(refs)>30 or evidence.get('finality')!=refs:
+            raise InvalidFact('Settlement answer requires current source references')
+        current={row['message_id']:row for row in snapshot['messages']}
+        for ref in refs:
+            message=current.get(ref)
+            if (not message or message['direction']!='in' or message['historical']
+                    or message['trade_day']!=question['trade_day']
+                    or not isinstance(message.get('occurred_at'),(int,float))
+                    or not math.isfinite(message['occurred_at'])
+                    or message['occurred_at']<question['sent_at'] or message['received_at']<message['occurred_at']):
+                raise InvalidFact('Settlement reply must occur after the actual question on the same trading day')
+            def named_in(text):
+                return {member['member_id'] for member in snapshot['members'] if member.get('bond_code')
+                        and re.search(r'(?<![a-zA-Z0-9_.-])'+re.escape(member['bond_code'])+r'(?![a-zA-Z0-9_.-])',text,re.I)}
+            named=named_in(message['text'])
+            if named and observation['member_id'] not in named or not named and question['ambiguous']:
+                raise InvalidFact('Settlement reply does not uniquely identify its question')
+            if len(named)>1 and not any(named_in(part)=={observation['member_id']}
+                    and any(role in ('DATE','SETTLEMENT') for _start,_end,role in non_trading_spans(part))
+                    for part in re.split(r'[,，;；。\n]',message['text'])):
+                raise InvalidFact('Multiple named bonds require an unambiguous settlement clause for this member')
+
+    @staticmethod
+    def _known_outbound_scopes(tx, thread_id, messages, members):
+        """Snapshot native-send associations, not current permission to send or confirm."""
+        current={member['member_id'] for member in members}
+        known={}
+        for message in messages:
+            if message['direction']!='out' or message['historical'] or not message['native_id']:
+                continue
+            commands=tx.execute("SELECT command_id,body_json,content_hash,native_id FROM xj2_command WHERE thread_id=? AND native_id=? AND state='SENT'",
+                                (thread_id,message['native_id'])).fetchall()
+            if len(commands)!=1:continue
+            command=commands[0];body=json.loads(command['body_json'])
+            if (body['kind']=='MANUAL' or body['text']!=message['text'] or command['native_id']!=message['native_id']
+                    or hashlib.sha256(encoded(body).encode()).hexdigest()!=command['content_hash']):continue
+            # Captured native events and command bodies hash different objects.
+            # A receipt may reuse an earlier raw row; that raw hash stays intact.
+            scoped=[row['member_id'] for row in tx.execute("""SELECT cm.member_id FROM xj2_command_member cm
+                JOIN xj2_scope s ON s.member_id=cm.member_id AND s.message_id=? AND s.relation='MENTION'
+                WHERE cm.command_id=? ORDER BY cm.member_id""",(message['message_id'],command['command_id'])).fetchall()]
+            all_members=[row['member_id'] for row in tx.execute("SELECT member_id FROM xj2_command_member WHERE command_id=? ORDER BY member_id",
+                                                               (command['command_id'],)).fetchall()]
+            if scoped and scoped==all_members and set(scoped)<=current:
+                known[message['message_id']]=scoped
+        return known
+
     def claim_analysis(self, owner, thread_id, *, aggregation: Aggregation | None = None,
-                       force=False, lease_seconds=60):
+                       force=False, lease_seconds=60, include_known_outbound_scopes=False):
         """A manual explicit force is for tests/recovery, not a latency default.
         Lease recovery reuses the SAME immutable raw-message snapshot. A new
         intake is never skipped when an older model request finishes late.
         """
-        if type(force) is not bool or type(lease_seconds) is not int or not 1 <= lease_seconds <= 600:
+        if (type(force) is not bool or type(include_known_outbound_scopes) is not bool
+                or type(lease_seconds) is not int or not 1 <= lease_seconds <= 600):
             raise InvalidFact("Invalid analysis execution options")
         if aggregation is None and not force:
             raise InvalidFact("No measured aggregation policy; automatic scheduling is not configured")
@@ -419,9 +530,20 @@ class Store:
                 peer["plan"]=json.loads(peer.pop("plan_json"))
                 peer["context"] = self._context(tx, peer["member_id"], thread["analyzed_revision"])
                 peer["quotes"] = {side: self._quote(tx, peer["member_id"], side).dump() for side in ("bid", "ofr")}
+                peer['settlement_question']=self._settlement_question(tx,owner,peer)
+                # Informational snapshot only: commit independently checks the
+                # current receipt in its transaction before deriving a day.
+                peer['reconfirm_sent_at'] = None
+                if peer['reconfirm_day'] and peer['reconfirm_command_id']:
+                    sent = tx.execute("SELECT sent_at FROM xj2_command WHERE command_id=? AND member_id=? AND state='SENT'",
+                                      (peer['reconfirm_command_id'], peer['member_id'])).fetchone()
+                    if sent:
+                        peer['reconfirm_sent_at'] = sent['sent_at']
             snapshot = {"thread_id": thread_id, "from_revision": thread["analyzed_revision"],
                         "through_revision": through, "messages": raw, "members": peers,
                         "context_messages": self.settings.context_messages}
+            known=self._known_outbound_scopes(tx,thread_id,raw,peers) if include_known_outbound_scopes else {}
+            if known:snapshot['known_outbound_scopes']=known
             analysis_id, token = new_id(), new_id()
             tx.execute("INSERT INTO xj2_analysis(analysis_id,thread_id,from_revision,through_revision,state,lease_token,lease_until,attempts,snapshot_json,result_json,created_at) VALUES(?,?,?,?,'RUNNING',?,?,1,?,'{}',?)",
                        (analysis_id, thread_id, thread["analyzed_revision"], through, token, now + lease_seconds, encoded(snapshot), now))
@@ -476,14 +598,39 @@ class Store:
                     previous_sequence = max(previous_sequence, old["source_seq"])
             if max(m["source_seq"] for m in fresh) < previous_sequence:
                 raise InvalidFact("Late older evidence cannot overwrite a newer field value")
+    def _reconfirmed_observation(self, tx, member, analysis, observation, raw_messages):
+        changes, evidence = observation['changes'], observation['evidence']
+        if (not member['reconfirm_day'] or not isinstance(changes, dict) or not isinstance(evidence, dict)
+                or 'confirmed_day' in changes or not changes.get('price')
+                or changes.get('assertion') != 'QUOTE' or changes.get('validity') != 'ACTIVE'):
+            return observation
+        refs = evidence.get('price')
+        if not isinstance(refs, list):
+            return observation  # The normal field validator will report malformed evidence.
+        command = tx.execute("SELECT sent_at FROM xj2_command WHERE command_id=? AND member_id=? AND state='SENT'",
+                             (member['reconfirm_command_id'], member['member_id'])).fetchone()
+        if not command or command['sent_at'] is None:
+            return observation
+        fresh = [ref for ref in refs if isinstance(ref, str) and ref in raw_messages
+                 and raw_messages[ref]['direction'] == 'in' and not raw_messages[ref]['historical']
+                 and raw_messages[ref]['ingest_revision'] > analysis['from_revision']
+                 and raw_messages[ref]['trade_day'] == member['reconfirm_day']
+                 and raw_messages[ref]['received_at'] >= command['sent_at']]
+        if not fresh:
+            return observation
+        return {**observation, 'changes': {**changes, 'confirmed_day': member['reconfirm_day']},
+                'evidence': {**evidence, 'confirmed_day': list(dict.fromkeys(fresh))}}
+
     def commit_analysis(self, owner, analysis_id, token, *, scopes, observations, unresolved=None, corrections=None,
-                        public_tool_results=None):
+                        public_tool_results=None, reconfirm_current_quotes=False):
         """Transaction A: valid facts survive independently of any later reply.
         A malformed observation is reported without discarding valid observations
         for other bonds/sides. The Chatflow's semantic interpretation is NOT
         proven merely by accepting this structural/evidence contract.
         """
         unresolved = {} if unresolved is None else unresolved
+        if type(reconfirm_current_quotes) is not bool:
+            raise InvalidFact('Invalid automatic reconfirmation policy')
         if not isinstance(scopes, dict) or not isinstance(unresolved, dict) or not isinstance(observations, list) or len(observations) > 100:
             raise InvalidFact("Invalid multi-bond analysis envelope")
         corrections = [] if corrections is None else corrections
@@ -499,6 +646,7 @@ class Store:
         inputs=[scopes,observations,unresolved,corrections]
         # Retain the existing replay digest for analyses without public calls.
         if public_tool_results:inputs.append(public_tool_results)
+        if reconfirm_current_quotes:inputs.append({'reconfirm_current_quotes': True})
         digest = hashlib.sha256(encoded(inputs).encode()).hexdigest()
         with self.write(owner) as tx:
             analysis = self._analysis(tx, owner, analysis_id, token)
@@ -513,6 +661,10 @@ class Store:
             current_members={p['member_id'] for p in snapshot['members']}
             if set(scopes) != raw_ids or set(unresolved) - raw_ids:
                 raise InvalidFact("Each raw message needs an explicit bond association (possibly empty)")
+            for ref,expected in snapshot.get('known_outbound_scopes',{}).items():
+                if (not isinstance(scopes[ref],list) or len(scopes[ref])!=len(expected)
+                        or set(scopes[ref])!=set(expected) or unresolved.get(ref)):
+                    raise InvalidFact('Cannot replace the application-owned outbound association')
             thread = self._thread(tx, owner, analysis["thread_id"])
             if thread["analyzed_revision"] != analysis["from_revision"]:
                 raise StaleDecision("This analysis no longer follows the committed message watermark")
@@ -546,10 +698,14 @@ class Store:
                     if msg['direction']!='in' or msg['historical']:
                         raise InvalidFact('Correction requires actual inbound clarification')
                 self._correct_association(tx,owner,analysis['thread_id'],correction['message_id'],correction['member_ids'],'analysis:'+analysis_id)
-            accepted, rejected, invalid_members = [], [], set()
+            accepted, rejected, invalid_members, reconfirmed_members = [], [], set(), set()
             for index, observation in enumerate(observations):
                 try:
-                    if not isinstance(observation, dict) or set(observation) != {"member_id", "side", "changes", "evidence"}:
+                    if isinstance(observation,dict) and isinstance(observation.get('validation_error'),str):
+                        raise InvalidFact(observation['validation_error'])
+                    bound=isinstance(observation,dict) and 'settlement_binding' in observation
+                    fields={"member_id", "side", "changes", "evidence"}|({'settlement_binding'} if bound else set())
+                    if not isinstance(observation, dict) or set(observation) != fields:
                         raise InvalidFact("Invalid quote observation fields")
                     mid = observation["member_id"]
                     if mid not in current_members:
@@ -557,13 +713,28 @@ class Store:
                     member = self._member(tx, owner, mid)
                     if member["thread_id"] != analysis["thread_id"]:
                         raise InvalidFact("Quote cannot cross counterparty threads")
+                    if reconfirm_current_quotes and not bound:
+                        observation = self._reconfirmed_observation(tx, member, analysis, observation, raw_messages)
                     previous = self._quote(tx, mid, observation["side"])
+                    if bound:
+                        self._settlement_sources(snapshot,observation,self._settlement_question(tx,owner,member))
+                        price=Price.load(observation['changes']['price'])
+                        if previous.price is None or (price.kind,price.value)!=(previous.price.kind,previous.price.value):
+                            raise InvalidFact('Settlement answer changed the bound cash price')
+                        for ref in previous.evidence.get('price',[]):
+                            if tx.execute("SELECT message_id FROM xj2_message WHERE target_id=? AND historical=0 LIMIT 1",(ref,)).fetchone():
+                                raise InvalidFact('Settlement question price source has been edited or withdrawn')
                     updated = apply_patch(previous, observation["changes"], evidence=observation["evidence"])
                     self._evidence(tx, member, analysis, observation["changes"], observation["evidence"], previous)
+                    if bound:
+                        updated=replace(updated,evidence={**updated.evidence,'price':list(dict.fromkeys(
+                            previous.evidence.get('price',[])+updated.evidence['price']))})
                 except (InvalidFact, TypeError, KeyError) as exc:
                     mid=observation.get('member_id') if isinstance(observation,dict) else None
                     side=observation.get('side') if isinstance(observation,dict) else None
                     rejected.append({'index':index,'reason':str(exc),'member_id':mid,'side':side})
+                    if isinstance(observation,dict) and isinstance(observation.get('validation_path'),str):
+                        rejected[-1]['validation_path']=observation['validation_path']
                     affected=set(observation.get('affected_members',[])) if isinstance(observation,dict) else set()
                     if mid:affected.add(mid)
                     for bad_member in affected & set(touched):
@@ -577,8 +748,13 @@ class Store:
                     tx.execute("UPDATE xj2_scope SET relation='MENTION' WHERE member_id=? AND relation='INVALID' AND message_id IN (SELECT message_id FROM xj2_message WHERE thread_id=? AND ingest_revision<=?)",(mid,analysis['thread_id'],analysis['from_revision']))
                 touched[mid] = member["group_id"]
                 if "confirmed_day" in observation["changes"] and updated.confirmed_day is not None:
-                    tx.execute("UPDATE xj2_peer SET reconfirm_day=NULL WHERE member_id=?", (mid,))
+                    reconfirmed_members.add(mid)
                 accepted.append({"index": index, "member_id": mid, "side": updated.side, "revision": updated.revision})
+            # Both sides in one analysis must see the same confirmation gate.
+            # Clearing it early can either miss a later valid side or let an
+            # earlier, pre-question reply bypass the gate after its sibling.
+            for mid in sorted(reconfirmed_members):
+                tx.execute("UPDATE xj2_peer SET reconfirm_day=NULL WHERE member_id=?", (mid,))
             # Close automation only after every sibling observation has checked
             # its own evidence. A bad A fragment cannot destroy a valid B fact.
             for bad_member in invalid_members:

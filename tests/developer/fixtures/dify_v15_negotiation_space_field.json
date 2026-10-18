@@ -1,0 +1,103 @@
+{
+  "provenance": {
+    "kind": "real model output on the explicit synthetic v15 fixture; not customer data",
+    "case_id": "ordinary-01",
+    "source_manifest_sha256": "5f97c2d571c750bfc2049cdb7f9ba3c214f425bef76bdd9318a138c71447ef9d",
+    "workflow_run_id": "17d8b94b-2d81-459e-a3d6-dca35e3ccdad",
+    "parsed_response_sha256": "711be9d3728820df70440c249b04ae2b4cb3b92ef078016c44136edcf351379a"
+  },
+  "context": {
+    "schema_version": "2.2",
+    "stage": "analysis",
+    "messages": [
+      {
+        "message_id": "5822e91dc948464cb0b1759a35c3e70c",
+        "direction": "in",
+        "text": "SYN-A 3.10出，500万，还可以谈"
+      }
+    ],
+    "members": [
+      {
+        "member_id": "85cebd6119184e5cb18a9998ba17e4b7",
+        "context": []
+      }
+    ]
+  },
+  "result": {
+    "schema_version": "2.2",
+    "scopes": {
+      "5822e91dc948464cb0b1759a35c3e70c": [
+        "85cebd6119184e5cb18a9998ba17e4b7"
+      ]
+    },
+    "unresolved": {},
+    "observations": [
+      {
+        "member_id": "85cebd6119184e5cb18a9998ba17e4b7",
+        "side": "ofr",
+        "fields": [
+          {
+            "field": "price",
+            "value": {
+              "kind": "YIELD",
+              "value": "3.10",
+              "notation": "ABSOLUTE"
+            },
+            "evidence": [
+              "5822e91dc948464cb0b1759a35c3e70c"
+            ]
+          },
+          {
+            "field": "volume_wan",
+            "value": "500万",
+            "evidence": [
+              "5822e91dc948464cb0b1759a35c3e70c"
+            ]
+          },
+          {
+            "field": "negotiation_space",
+            "value": "NEGOTIABLE",
+            "evidence": [
+              "5822e91dc948464cb0b1759a35c3e70c"
+            ]
+          },
+          {
+            "field": "finality",
+            "value": "UNKNOWN",
+            "evidence": [
+              "5822e91dc948464cb0b1759a35c3e70c"
+            ]
+          },
+          {
+            "field": "assertion",
+            "value": "QUOTE",
+            "evidence": [
+              "5822e91dc948464cb0b1759a35c3e70c"
+            ]
+          },
+          {
+            "field": "validity",
+            "value": "ACTIVE",
+            "evidence": [
+              "5822e91dc948464cb0b1759a35c3e70c"
+            ]
+          }
+        ],
+        "segments": [
+          {
+            "message_id": "5822e91dc948464cb0b1759a35c3e70c",
+            "text": "SYN-A 3.10出，500万，还可以谈"
+          }
+        ],
+        "interpretation": {
+          "quote_owner": "COUNTERPARTY",
+          "intent": "QUOTE",
+          "negotiation_space": "NEGOTIABLE",
+          "reason": "明确报出SYN-A 3.10出价及500万数量，并声明'还可以谈'，表明该报价尚可协商，非最终不可更改。"
+        }
+      }
+    ],
+    "tool_requests": [],
+    "history_requests": []
+  }
+}

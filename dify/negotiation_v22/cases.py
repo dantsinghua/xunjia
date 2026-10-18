@@ -4,8 +4,28 @@ Expected facts are declared separately from both prompts and model output.
 Nothing here creates an IM message, command, account or external trade.
 """
 from server.negotiation.facts import Quote
+from server.reference_data import ReferenceSnapshot
+from datetime import datetime
+import time
+from zoneinfo import ZoneInfo
 
 DAY = '2026-10-17'
+
+
+class FixtureClock:
+    """Synthetic trading-day origin; elapsed lease/backoff time is monotonic."""
+    def __init__(self, *, anchor=None, monotonic=time.monotonic):
+        self.monotonic = monotonic
+        self.anchor = dict(anchor) if anchor is not None else {
+            'epoch': datetime.fromisoformat(DAY + 'T12:00:00').replace(tzinfo=ZoneInfo('Asia/Shanghai')).timestamp(),
+            'monotonic': monotonic(),
+        }
+
+    def __call__(self):
+        elapsed = self.monotonic() - self.anchor['monotonic']
+        if elapsed < 0:
+            raise ValueError('The QA clock cannot resume across a reset monotonic origin')
+        return self.anchor['epoch'] + elapsed
 
 
 def cases():
@@ -45,7 +65,46 @@ def cases():
     # messages; measure that ordinary fastest path as a separate reference.
     for index, ordinary in enumerate(result[:6]):
         result.append({**ordinary,'id':f'fast-initial-{index+1:02}','path':'fast_common','history_count':2})
+    result.append({'id':'explicit-history-over-twenty','path':'history','our_side':'BUY','history_count':22,
+                   'required_history':True,'text':'SYN-A 按消息 {history_anchor_id} 里你报的那个价，我出500万，不能再改善了。',
+                   'expected':[{'member':'a','side':'ofr','price':'3.20','volume':'500','finality':'FINAL'}]})
+    for key,text,tool in [
+        ('tool-bond-info','SYN-A 3.10出500万。另外请查询公开bond_id=SYN-A的债券资料，确认发行主体后回复。','bond_info'),
+        ('tool-similar-bonds','SYN-A 3.10出500万。另外请用相似券工具查询：公开anchor_bond_id=SYN-A，按到期口径剩余0到365天、同发行人，比较剩余天数和估值收益率。','similar_bonds'),
+        ('tool-issuer-info','SYN-A 3.10出500万。另外请查询公开issuer_id=SYN-ISSUER的发行主体资料。','issuer_info'),
+        ('tool-bond-calc','SYN-A 3.10出500万。另外请用债券计算工具核算：假设同一到期收益率口径，3.10和你之前3.20收的差是多少BP？答复不重复这两个原始收益率，不作成交。','bond_calc'),
+    ]:
+        result.append({'id':key,'path':'tools','text':text,'our_side':'BUY','required_tool':tool,
+                       'expected':[{'member':'a','side':'ofr','price':'3.10','volume':'500'}]})
     return result
+
+
+def reference_snapshot(case_id):
+    """Explicit synthetic public master data, distinct from a live customer feed."""
+    source_id='synthetic-measurement'
+    def fact(value):
+        return {'value':value,'quality':'verified','source_ref':source_id,'as_of':DAY,'missing_reason':None}
+    rating={'agency':'Synthetic','scale':'synthetic','value':'AAA','rating_date':DAY}
+    industry={'scheme':'synthetic','level':'1','code':'SYN-INDUSTRY'}
+    bonds=[]
+    for code,issuer,maturity in [('SYN-A','SYN-ISSUER','2027-10-17'),('SYN-B','SYN-ISSUER','2027-09-17'),('SYN-C','SYN-OTHER','2027-08-17')]:
+        value='2.5818' if case_id=='bp-minus' and code=='SYN-A' else '2.9872'
+        master={'remaining_days':365 if code=='SYN-A' else 335 if code=='SYN-B' else 304,'tenor_basis':'maturity',
+                'maturity_date':maturity,'exercise_date':maturity,'balance':'100000','balance_unit':'万','balance_date':DAY,
+                'coupon_type':'fixed','coupon_rate_pct':'3.00','issuer_id':issuer,'bond_type':'fixed','industry':industry,
+                'bond_rating':rating,'issuer_rating':rating}
+        valuation={'provider':'synthetic-valuation','basis':'maturity','yield_pct':value,'clean_price':'100.00',
+                   'dirty_price':'100.50','duration':'1.0','valuation_date':DAY,'published_at':DAY+'T09:00:00+08:00'}
+        bonds.append({'bond_id':code,'code':code,'name':code,'market':'IB','aliases':[],
+                      'valuation_yield_pct':value,'valuation_date':DAY,
+                      'master':{key:fact(v) for key,v in master.items()},'valuation':{key:fact(v) for key,v in valuation.items()},'quotes':[]})
+    issuer={'issuer_id':'SYN-ISSUER',**{key:fact(value) for key,value in {
+        'uscc':'SYNTHETIC-NOT-A-REAL-CREDIT-CODE','full_name':'Synthetic Issuer','short_name':'SYN-ISSUER',
+        'aliases':['SYN-ISSUER'],'former_names':[],'registered_region':'Synthetic Region','region_code':'SYN-REGION',
+        'ownership':'synthetic','industry':industry,'issuer_rating':rating}.items()}}
+    return ReferenceSnapshot('synthetic-measurement-v2',DAY,
+        sources=[{'id':source_id,'origin':'explicit synthetic fixture; not a live customer or valuation feed',
+                  'transport':'in-memory fixture','dataset_version':'2','as_of':DAY}],bonds=bonds,issuers=[issuer])
 
 
 def snapshot(case):

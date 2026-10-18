@@ -68,13 +68,20 @@ class Commands:
         return None
     @staticmethod
     def _body(value):
-        if not isinstance(value, dict) or set(value) - {"kind", "text", "our_price", "scope_members", "scope_prices", "scope_bases"}:
+        if not isinstance(value, dict) or set(value) - {"kind", "text", "our_price", "scope_members", "scope_prices", "scope_bases", "settlement_question"}:
             raise InvalidFact("Invalid validated reply body")
         if value.get("kind") not in ("REPLY", "RECONFIRM", "ASK_VOLUME", "CLARIFY", "SOCIAL", "INITIAL", "MANUAL"):
             raise InvalidFact("Invalid reply action")
         if not isinstance(value.get("text"), str) or not 1 <= len(value["text"].strip()) <= 1500:
             raise InvalidFact("Reply text is empty or too long")
         result = dict(value)
+        if 'settlement_question' in result:
+            question=result['settlement_question']
+            if (result['kind']!='CLARIFY' or result.get('our_price') is not None or 'scope_members' in result
+                    or not isinstance(question,dict) or set(question)!={'side','quote_revision'}
+                    or question['side'] not in ('bid','ofr') or type(question['quote_revision']) is not int
+                    or question['quote_revision']<1):
+                raise InvalidFact('Invalid server-owned settlement question')
         if result.get("our_price") is not None:
             result["our_price"] = Price.load(result["our_price"]).dump()
         if 'scope_members' in result:
@@ -92,6 +99,15 @@ class Commands:
         reason=self._gate(tx,owner,member_id,basis,command_id=command_id,kind=body['kind'])
         if reason:return reason
         first=self.store._member(tx,owner,member_id)
+        question=body.get('settlement_question')
+        if question:
+            group=self.store._group(tx,owner,first['group_id'])
+            quote=self.store._quote(tx,member_id,question['side'])
+            if (question['side']!=('ofr' if group['our_side']=='BUY' else 'bid')
+                    or quote.revision!=question['quote_revision'] or quote.price is None
+                    or quote.price.kind not in ('NET_PRICE','DIRTY_PRICE') or quote.assertion!='QUOTE'
+                    or quote.validity!='ACTIVE' or quote.confirmed_day!=group['trade_day'] or first['reconfirm_day']):
+                return 'STALE_SETTLEMENT_QUESTION'
         for mid in body.get('scope_members',[]):
             member=self.store._member(tx,owner,mid)
             if member['thread_id']!=first['thread_id']:return 'CROSS_COUNTERPARTY_COMMAND'

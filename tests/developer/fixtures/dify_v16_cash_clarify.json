@@ -1,0 +1,68 @@
+[
+  {
+    "provenance": {
+      "kind": "actual v16 model output on synthetic messages",
+      "case_id": "net-price",
+      "source_manifest_sha256": "e40b4f69e6ebde64cdadacebb09be455c376b83ea767c3c99d4b78b96e9817e2"
+    },
+    "context": {
+      "bond_code": "SYN-A",
+      "our_side": "BUY",
+      "reconfirm_day": null,
+      "unresolved_messages": [],
+      "plan": {
+        "code": "SYN-A",
+        "name": "SYN-A",
+        "opening_yield_pct": "3.20",
+        "our_side": "BUY",
+        "step_bp": "2",
+        "trade_day": "2026-10-17",
+        "volume_wan": "20000"
+      }
+    },
+    "result": {
+      "schema_version": "2.2",
+      "action": "SEND",
+      "proposal": {
+        "kind": "CLARIFY",
+        "text": "请确认SYN-A净价34.19对应的结算日期（T+0/T+1/具体日期）及收益率计算依据？"
+      },
+      "trader_view": {
+        "reason": "current_counterparty_quote.price.kind=NET_PRICE but settlement_date, computed_yield and calculation_ref are all null; cannot compare yield or compute gap without source terms"
+      }
+    }
+  },
+  {
+    "provenance": {
+      "kind": "actual v16 model output on synthetic messages",
+      "case_id": "dirty-price",
+      "source_manifest_sha256": "e40b4f69e6ebde64cdadacebb09be455c376b83ea767c3c99d4b78b96e9817e2"
+    },
+    "context": {
+      "bond_code": "SYN-A",
+      "our_side": "BUY",
+      "reconfirm_day": null,
+      "unresolved_messages": [],
+      "plan": {
+        "code": "SYN-A",
+        "name": "SYN-A",
+        "opening_yield_pct": "3.20",
+        "our_side": "BUY",
+        "step_bp": "2",
+        "trade_day": "2026-10-17",
+        "volume_wan": "20000"
+      }
+    },
+    "result": {
+      "schema_version": "2.2",
+      "action": "SEND",
+      "proposal": {
+        "kind": "CLARIFY",
+        "text": "请确认SYN-A全价99.32对应的结算日（T+0/T+1/具体日期）及计算依据？"
+      },
+      "trader_view": {
+        "reason": "current_counterparty_quote.price.kind=DIRTY_PRICE，但settlement_date、computed_yield、calculation_ref均为空，无法校验收益率或比价"
+      }
+    }
+  }
+]

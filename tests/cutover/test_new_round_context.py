@@ -107,7 +107,7 @@ def test_new_round_default_twenty_is_global_same_bond_same_peer_not_member_id(de
 
 
 @pytest.mark.parametrize("archived", [False, True])
-def test_new_round_can_fetch_old_native_anchor_and_confirm_it_without_old_round_write(desk, archived):
+def test_new_round_can_fetch_old_native_anchor_and_confirm_it_without_old_round_write(desk, archived, monkeypatch):
     app, _, flows, _, _ = desk
     _, old_peer, anchor, _ = completed_round(desk, archived=archived)
     old_quote = current(app, old_peer).dump()
@@ -126,6 +126,9 @@ def test_new_round_can_fetch_old_native_anchor_and_confirm_it_without_old_round_
         return {"schema_version": "2.2", "scopes": {m["message_id"]: [new_peer["member_id"]] for m in snapshot["messages"]},
                 "observations": [value], "unresolved": {}}
     flows.analyze = analyze
+    # Reproduce this historical positive without changing current-round policy.
+    monkeypatch.setattr(app.state.negotiation_engine, 'context_policy_revision',
+                        'explicit_anchors_v0')
     saved = app.state.negotiation_engine.analyze_thread(OWNER, new_peer["thread_id"])
     assert saved["facts_committed"] and not saved["rejected"], saved
     assert len(calls) == 2
@@ -153,7 +156,16 @@ def seed_cross_round_dependency(desk, *, final=False):
         return {"schema_version": "2.2", "scopes": {m["message_id"]: [peer["member_id"]] for m in snapshot["messages"]},
                 "observations": [value], "unresolved": {}}
     flows.analyze = analyze
-    saved = app.state.negotiation_engine.analyze_thread(OWNER, peer["thread_id"])
+    engine = app.state.negotiation_engine
+    policy = engine.context_policy_revision
+    assert policy == 'latest_quote_confirmation_v1'
+    try:
+        # Seed an actually committed historical dependency under its own policy.
+        engine.context_policy_revision = 'explicit_anchors_v0'
+        saved = engine.analyze_thread(OWNER, peer["thread_id"])
+    finally:
+        engine.context_policy_revision = policy
+    assert engine.context_policy_revision == 'latest_quote_confirmation_v1'
     assert saved["facts_committed"] and not saved["rejected"], saved
     assert current(app, peer).price.value == "3.20"
     # The anchor remains scoped to its old round. This is a real logical-history

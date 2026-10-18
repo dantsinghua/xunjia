@@ -1,0 +1,555 @@
+[
+  {
+    "case_id": "dirty-price",
+    "source": "v20 actual original typed model output; synthetic messages; ChatflowClient stage envelope",
+    "context": {
+      "from_revision": 20,
+      "through_revision": 21,
+      "messages": [
+        {
+          "message_id": "3cf57828beae473bbea17085a20c8bf0",
+          "ingest_revision": 21,
+          "direction": "in",
+          "text": "SYN-A 全价99.32出500万",
+          "native_id": null,
+          "trade_day": "2026-10-17",
+          "historical": 0
+        }
+      ],
+      "members": [
+        {
+          "member_id": "ad27296121dc430196c34ba6726ee7ce",
+          "bond_code": "SYN-A",
+          "trade_day": "2026-10-17",
+          "context": [
+            {
+              "message_id": "8c3cab7e979047729a8d109abdb27971",
+              "ingest_revision": 1,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-1",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "e02aa3d64398496d94c67969ba1eb130",
+              "ingest_revision": 2,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "83fac24c93a1447480723cd04346e5b5",
+              "ingest_revision": 3,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-3",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "94624007ffc04dc0bdf4b420e8925777",
+              "ingest_revision": 4,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "7d769e1bc0e14a83a06c30f5ab3fb06d",
+              "ingest_revision": 5,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-5",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "ad8cd267cef3442f87e869e792192f7f",
+              "ingest_revision": 6,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "dc499b3d6e3648109c7e7cf224d0ba08",
+              "ingest_revision": 7,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-7",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "a474bd31ae914d2ea754aba7cb8005b7",
+              "ingest_revision": 8,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "d5d9e22ec5fa4bf9ac5a339918a93e41",
+              "ingest_revision": 9,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-9",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "fe13e64010c3401c8fecf8e27cf1ff95",
+              "ingest_revision": 10,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "bb7aff282b864d5e9bc2e3aece6a13c0",
+              "ingest_revision": 11,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-11",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "cce0d479b644423a8e27e8f3191b1286",
+              "ingest_revision": 12,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "755e1ab78ffb477c9b953d0e9286e399",
+              "ingest_revision": 13,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-13",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "26b5d97bc28b4a6e98d5ba5675afae80",
+              "ingest_revision": 14,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "1c698bcb756f48f9892c6b29ada59b84",
+              "ingest_revision": 15,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-15",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "6d5a90821bd040c881d3ac80b1adb6af",
+              "ingest_revision": 16,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "321bb37d572648d4b34fe61cee12c4a6",
+              "ingest_revision": 17,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-17",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "4e5a66876ab049a1afe49b2ab04647a3",
+              "ingest_revision": 18,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "401d0590f62e48cd81e18a93ba617691",
+              "ingest_revision": 19,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-19",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "236fc0080f4b4e69be58afbf1b85df02",
+              "ingest_revision": 20,
+              "direction": "in",
+              "text": "SYN-A 3.10出500万",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            }
+          ]
+        }
+      ],
+      "schema_version": "2.2",
+      "stage": "analysis"
+    },
+    "result": {
+      "schema_version": "2.2",
+      "scopes": {
+        "3cf57828beae473bbea17085a20c8bf0": [
+          "ad27296121dc430196c34ba6726ee7ce"
+        ]
+      },
+      "unresolved": {},
+      "observations": [
+        {
+          "member_id": "ad27296121dc430196c34ba6726ee7ce",
+          "side": "ofr",
+          "fields": [
+            {
+              "field": "price",
+              "value": {
+                "kind": "NET_PRICE",
+                "value": "99.32",
+                "notation": "ABSOLUTE"
+              },
+              "evidence": [
+                "3cf57828beae473bbea17085a20c8bf0"
+              ]
+            },
+            {
+              "field": "volume_wan",
+              "value": "500万",
+              "evidence": [
+                "3cf57828beae473bbea17085a20c8bf0"
+              ]
+            },
+            {
+              "field": "assertion",
+              "value": "QUOTE",
+              "evidence": [
+                "3cf57828beae473bbea17085a20c8bf0"
+              ]
+            },
+            {
+              "field": "validity",
+              "value": "ACTIVE",
+              "evidence": [
+                "3cf57828beae473bbea17085a20c8bf0"
+              ]
+            },
+            {
+              "field": "finality",
+              "value": "NEGOTIABLE",
+              "evidence": [
+                "3cf57828beae473bbea17085a20c8bf0"
+              ]
+            },
+            {
+              "field": "confirmed_day",
+              "value": "2026-10-17",
+              "evidence": [
+                "3cf57828beae473bbea17085a20c8bf0"
+              ]
+            }
+          ],
+          "segments": [
+            {
+              "message_id": "3cf57828beae473bbea17085a20c8bf0",
+              "text": "SYN-A 全价99.32出500万"
+            }
+          ],
+          "interpretation": {
+            "quote_owner": "COUNTERPARTY",
+            "intent": "QUOTE",
+            "negotiation_space": "NEGOTIABLE",
+            "reason": "对手明确报出SYN-A全价99.32及数量500万，未声明不可谈，且此前已报过3.10%出价，本次为新报价形式（全价），属可议价实报"
+          }
+        }
+      ],
+      "tool_requests": [],
+      "history_requests": []
+    }
+  },
+  {
+    "case_id": "bp-minus",
+    "source": "v20 actual original typed model output; synthetic messages; ChatflowClient stage envelope",
+    "context": {
+      "from_revision": 20,
+      "through_revision": 21,
+      "messages": [
+        {
+          "message_id": "b6e58e50daa4452c8b2dcb3bfdba5c28",
+          "ingest_revision": 21,
+          "direction": "in",
+          "text": "SYN-A 中债估值减5BP收1000万",
+          "native_id": null,
+          "trade_day": "2026-10-17",
+          "historical": 0
+        }
+      ],
+      "members": [
+        {
+          "member_id": "559369bdca364661a03f16805baffd3c",
+          "bond_code": "SYN-A",
+          "trade_day": "2026-10-17",
+          "context": [
+            {
+              "message_id": "96fbfbbc48db4cb1bb89de0448adb52e",
+              "ingest_revision": 1,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-1",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "1168ec871ae64445b1714d542ee31264",
+              "ingest_revision": 2,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "ecfc233a2afb412fa498e7b760613649",
+              "ingest_revision": 3,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-3",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "c086d72477fa410cab21031433266c94",
+              "ingest_revision": 4,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "f81949a3d652425aa2e68e9eec9394a5",
+              "ingest_revision": 5,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-5",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "0056882004cd4a5397d8fa5b31bdb0a7",
+              "ingest_revision": 6,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "6162d2b40d974b2a99cc7bdf2ca0e377",
+              "ingest_revision": 7,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-7",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "63139fec139d423280ffde935d695051",
+              "ingest_revision": 8,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "4c0cec23b36642748cfbc8e3b6734a99",
+              "ingest_revision": 9,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-9",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "48aa1561141a44e2b60fe001d6345660",
+              "ingest_revision": 10,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "bab4159c387b45b790ea27e32505c4e0",
+              "ingest_revision": 11,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-11",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "bc35d81d180043cb975d4e96bb1e0be7",
+              "ingest_revision": 12,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "b2ab4f08874442f5b88d5b7c80952d20",
+              "ingest_revision": 13,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-13",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "4abb5430b77e4b4fb17e1ebf52051eb8",
+              "ingest_revision": 14,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "69da27910adc4e88af81a7bab329c346",
+              "ingest_revision": 15,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-15",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "eec1d8adae4f45809383dbcbaf268cb0",
+              "ingest_revision": 16,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "55d0fffb079a4d97a5e30ac9a3c80a53",
+              "ingest_revision": 17,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-17",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "0b28a162c9b749e081c2cc3b49918976",
+              "ingest_revision": 18,
+              "direction": "in",
+              "text": "SYN-A 稍后回复",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "8a54b4910dd946f0af147c2c350a1dd8",
+              "ingest_revision": 19,
+              "direction": "out",
+              "text": "SYN-A 3.20%收，请报可做价量，数量按万沟通",
+              "native_id": "synthetic-native-19",
+              "trade_day": "2026-10-17",
+              "historical": 0
+            },
+            {
+              "message_id": "a73bd8ebf1594632a151bf32c4eeffcd",
+              "ingest_revision": 20,
+              "direction": "in",
+              "text": "SYN-A 3.10出500万",
+              "native_id": null,
+              "trade_day": "2026-10-17",
+              "historical": 0
+            }
+          ]
+        }
+      ],
+      "schema_version": "2.2",
+      "stage": "analysis"
+    },
+    "result": {
+      "schema_version": "2.2",
+      "scopes": {
+        "b6e58e50daa4452c8b2dcb3bfdba5c28": [
+          "559369bdca364661a03f16805baffd3c"
+        ]
+      },
+      "unresolved": {},
+      "observations": [
+        {
+          "member_id": "559369bdca364661a03f16805baffd3c",
+          "side": "bid",
+          "fields": [
+            {
+              "field": "price",
+              "value": {
+                "kind": "YIELD",
+                "value": "5",
+                "notation": "CHINABOND_BP"
+              },
+              "evidence": [
+                "b6e58e50daa4452c8b2dcb3bfdba5c28"
+              ]
+            },
+            {
+              "field": "volume_wan",
+              "value": "1000万",
+              "evidence": [
+                "b6e58e50daa4452c8b2dcb3bfdba5c28"
+              ]
+            },
+            {
+              "field": "finality",
+              "value": "NEGOTIABLE",
+              "evidence": [
+                "b6e58e50daa4452c8b2dcb3bfdba5c28"
+              ]
+            }
+          ],
+          "segments": [
+            {
+              "message_id": "b6e58e50daa4452c8b2dcb3bfdba5c28",
+              "text": "SYN-A 中债估值减5BP收1000万"
+            }
+          ],
+          "interpretation": {
+            "quote_owner": "COUNTERPARTY",
+            "intent": "QUOTE",
+            "negotiation_space": "NEGOTIABLE",
+            "reason": "明确报价动作，含券、方向（收）、价格表达（中债估值减5BP）、数量（1000万），未声明不可谈"
+          }
+        }
+      ],
+      "tool_requests": [],
+      "history_requests": []
+    }
+  }
+]

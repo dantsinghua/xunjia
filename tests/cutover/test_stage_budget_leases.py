@@ -45,6 +45,8 @@ def test_360_second_budget_preserves_lease_after_181_seconds_and_history_round(d
             "kind": "REPLY", "text": "3.19%收500万", "our_price": {"kind": "YIELD", "value": "3.19"}}}
     setattr(flows, "analyze" if stage == "analysis" else "decide", call)
     engine = configured(app, flows, 360)
+    # This two-round lease regression explicitly replays the old fetch policy.
+    engine.context_policy_revision = 'explicit_anchors_v0'
     result = engine.analyze_thread(OWNER, peer["thread_id"]) if stage == "analysis" else engine.decide_member(OWNER, peer["member_id"])
     assert len(seen) == 2
     if stage == "analysis":

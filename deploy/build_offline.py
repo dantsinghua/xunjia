@@ -57,13 +57,27 @@ def input_files(root):
     for name in ('requirements.lock','requirements-dev.lock','config/xunjia.env.example',
                  'config/README.md','config/transport.example.json'):
         files[name]=root/name
+    measured=root/'config/aggregation-profile.measured.json'
+    provenance=root/'config/aggregation-measurement.json'
+    if measured.is_file()!=provenance.is_file():
+        raise DeployError('AGGREGATION_EVIDENCE_MISSING')
+    if measured.is_file():
+        from server.negotiation.settings import Aggregation
+        try:
+            Aggregation(**json.loads(measured.read_text(encoding='utf8')))
+            evidence=json.loads(provenance.read_text(encoding='utf8'))
+            if not isinstance(evidence,dict) or evidence.get('profile_sha256')!=sha256(measured):
+                raise ValueError('Measured profile bytes differ from their provenance')
+        except (TypeError,ValueError) as exc:
+            raise DeployError('INVALID_MEASURED_AGGREGATION_PROFILE',str(exc)) from exc
+        for source in (measured,provenance):files[source.relative_to(root).as_posix()]=source
     for source in sorted((root/'web/dist').rglob('*')):
         if source.is_file():files['frontend/dist/'+source.relative_to(root/'web/dist').as_posix()]=source
     # The deployable regression suite intentionally does NOT need web/src, Node or esbuild.
     files['tests/conftest.py']=root/'tests/conftest.py'
     for source in sorted((root/'tests/release').glob('*.py')):
         files['tests/release/'+source.name]=source
-    for folder in ('cutover','negotiation'):
+    for folder in ('cutover','negotiation','benchmarks'):
         for source in sorted((root/'tests'/folder).glob('*.py')):
             files['tests/'+folder+'/'+source.name]=source
     for name in ('test_dify0153_canvas_20261015.py','test_oceanbase_schema_sql_20261015.py',
@@ -110,7 +124,7 @@ def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_
              'mutable_config':'config/xunjia.env (excluded from immutable checksum)',
              'shared_site_config':'PREFIX/config','shared_state':'PREFIX/state',
              'release_switch':'single current symlink with durable journal and process lock',
-             'archive_tests':'tests/release, tests/cutover, tests/negotiation and selected acceptance; no Node required',
+             'archive_tests':'tests/release, tests/cutover, tests/negotiation, tests/benchmarks and selected acceptance; no Node required',
              'python':'3.12','minimum_glibc':'2.28','architectures':['x86_64','aarch64'],
              'public_tools_require_token':False,'dify_admin_required':False,
              'collector_runtime':'collector-runtime/'+collector_wheel.name,

@@ -34,4 +34,12 @@
 
 最终统一门、模型47及恢复验证完成并冻结后，重新构建包含真实 `--arm-runtime` 的包，核 SHA256、SOURCE-HASHES 和完整清单，安全解到新目录，再在官方麒麟用户态从系统3.7.9调用包内 `05-test-package.sh`。该入口必须完成原完整包内用例、离线安装和 pip check；保留失败和清理证据，不用旧候选的 x86 结果替代。
 
-工作区外 `ARM-PREPARATION.md`、`arm-preparation/kylin-dependencies-result.json`、`real-kylin-python37-bootstrap-result.json` 和独立 `KYLIN-ARM-ACCEPTANCE.md` 保存准备证据；最终包产物和完整 QA 结果将在最终冻结后单独记录。本记录不宣称最终包已生成或已全部验收。
+工作区外 `ARM-PREPARATION.md`、`arm-preparation/kylin-dependencies-result.json`、`real-kylin-python37-bootstrap-result.json` 和独立 `KYLIN-ARM-ACCEPTANCE.md` 保存准备阶段证据；新包产物与完整QA结果见下方r20补记，准备成绩不替代新包结果。
+
+## r20 最终候选包实际验收补记
+
+上述待执行步骤现已在全仓2320项Python、69项Node及前端构建通过后执行。新包 `xunjia-v2.2-r20-kylin-aarch64-offline.tar.gz` 为208691951字节，SHA256 `9e163a84ae53f21f708443c66e7063fe83d03512325947845842e634ae46741a`，build_id `ffe4c9f09949684e8ff0b354f5fb60f4140599c77ba5e6c254cc409337d5f970`。运行时、依赖、采集wheel来自重新核实的既有字节，源码/构建前端/四画布/实测聚合配置及测试来自当前冻结树，不是旧包改名。
+
+同一官方麒麟用户态和PRoot5.5.0中，实际从系统Python3.7.9调用包内05-test-package.sh，六阶段均exit0：完整性校验、创建venv、no-index/no-deps离线安装、pip check、1257节点收集、1257测试全部通过。测试342.32秒，完整包QA441.393秒；344输入零漂移，临时工作根清理，P0外层无残留。包内五范围包含release/acceptance/cutover/negotiation/benchmarks，不需要Node或联网下载。
+
+现场数据库与真实IM仍单列，物理ARM现场未验证。当前源码增量交付及OceanBase QA启动地址问题见[最终交付记录](2026-10-18-final-delivery.md)，不将包通过当作这些事项完成。

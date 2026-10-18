@@ -13,8 +13,12 @@ import time
 from .prices import InvalidFact, Price, StaleDecision, number, resolve_yield_suffix, valuation_quote, volume_wan
 from .store import encoded, new_id
 from .validation import economics, token_side, validate_public_text, validate_observation
+from .reply_render import render_reply_plan
+from .slots import collect_candidates, window_reference_gaps
+from .text_roles import numeric_spelling, settlement_literal
 class Engine:
-    def __init__(self,service,chatflows,tools,*,aggregation=None,stage_budget_seconds=150):
+    def __init__(self,service,chatflows,tools,*,aggregation=None,stage_budget_seconds=150,
+                 context_policy_revision='latest_quote_confirmation_v1'):
         if (type(stage_budget_seconds) not in (int,float) or not math.isfinite(stage_budget_seconds)
                 or not 1<=stage_budget_seconds<=540):
             raise InvalidFact('Chatflow stage budget must be finite and between 1 and 540 seconds')
@@ -22,6 +26,9 @@ class Engine:
         self.client=chatflows;self.tools=tools;self.aggregation=aggregation
         self.stage_budget_seconds=float(stage_budget_seconds)
         self.lease_seconds=math.ceil(stage_budget_seconds)+30
+        if context_policy_revision not in ('latest_quote_confirmation_v1','explicit_anchors_v0'):
+            raise InvalidFact('Unknown context policy revision')
+        self.context_policy_revision=context_policy_revision
     @staticmethod
     def _merge_history(context, additions):
         targets={p['member_id']:p for p in context.get('members',[])}
@@ -63,6 +70,7 @@ class Engine:
 
     def _tool_call(self,method,context,*,owner=None,on_final=None,repair_audit=None):
         working=deepcopy(context);working['tool_results']=[];working['history_results']=[]
+        working['context_policy_revision']=self.context_policy_revision
         executed_tools=[]
         def finished(value):
             if method=='analyze':
@@ -92,8 +100,36 @@ class Engine:
             requests=result.get('tool_requests',[])
             private=result.get('history_requests',[])
             if requests and private:raise InvalidFact('Use separate public-tool and private-history rounds')
+            if private and self.context_policy_revision=='latest_quote_confirmation_v1':
+                members={p['member_id']:p for p in context.get('members',[])} if method=='analyze' else {context['member_id']:context}
+                if not isinstance(private,list) or not 1<=len(private)<=6:raise InvalidFact('Invalid bounded reference request')
+                for request in private:
+                    if (owner is None or not isinstance(request,dict) or set(request)!={'member_id','message_ids'}
+                            or request['member_id'] not in members or not isinstance(request['message_ids'],list)
+                            or not 1<=len(request['message_ids'])<=30
+                            or any(not isinstance(ref,str) or not 1<=len(ref)<=160 for ref in request['message_ids'])):
+                        raise InvalidFact('Invalid scoped reference request')
+                # A legacy model may still ask to fetch. The current policy
+                # records the missing reference without reading older history
+                # or spending another remote model round.
+                if method=='analyze':
+                    mids={request['member_id'] for request in private}
+                    scopes={message['message_id']:[mid for mid,p in members.items()
+                            if p.get('bond_code','') and p['bond_code'] in message['text']]
+                            for message in context['messages']}
+                    for message in context['messages']:
+                        if message.get('direction')=='in' and not scopes[message['message_id']]:
+                            scopes[message['message_id']]=sorted(mids)
+                    result={'schema_version':'2.2','scopes':scopes,'unresolved':{},'observations':[
+                        {'member_id':mid,'side':'ofr' if members[mid]['our_side']=='BUY' else 'bid',
+                         'validation_error':'REFERENCE_CONFIRMATION_REQUIRED'} for mid in sorted(mids)]}
+                else:
+                    plan={'kind':'CLARIFY','question':'ASK_CURRENT_QUOTE'}
+                    result={'schema_version':'2.2','action':'SEND','proposal':render_reply_plan(context,plan)['proposal']}
+                requests=[];private=[]
             if not requests and not private:
                 result=dict(result);result['_history_context']=deepcopy(histories)
+                result['_public_tool_results']=deepcopy(executed_tools)
                 if on_final is None:return finished(result)
                 baseline,feedback=on_final(result)
                 repair_audit['initial_elapsed_ms']=round((time.monotonic()-started)*1000,3)
@@ -156,24 +192,66 @@ class Engine:
                 executed_tools.append(recorded)
                 working['tool_results'].append(deepcopy(recorded))
                 used+=1
+    @staticmethod
+    def _cash_sources(snapshot,observation,member,aliases):
+        refs=set(observation.get('evidence',{}).get('price',[]))
+        current={m['message_id']:m for m in snapshot['messages'] if m.get('direction')=='in'
+                 and not m.get('historical') and m['message_id'] in refs}
+        regions={}
+        for ref,message in current.items():
+            marks=[]
+            for alias,mids in aliases.items():
+                if len(mids)==1:
+                    marks.extend((m.start(),next(iter(mids))) for m in re.finditer(
+                        r'(?<![a-z0-9])'+re.escape(alias)+r'(?![a-z0-9])',message['text'],re.I))
+            marks.sort()
+            regions[ref]=[(start,next((end for end,other in marks[index+1:] if other!=mid),len(message['text'])))
+                          for index,(start,mid) in enumerate(marks) if mid==member['member_id']] if marks else [(0,len(message['text']))]
+        return current,regions
+
+    def _cash_settlement(self,snapshot,observation,member,requested,aliases):
+        """Bind a cash settlement to this member's current inbound evidence.
+
+        T+1 is resolved only by the configured trading calendar. This runs
+        before Price construction; unresolved terms never enter saved facts.
+        """
+        if requested is None:return None
+        if not isinstance(requested,str):raise InvalidFact('Invalid cash settlement')
+        requested=settlement_literal(requested)
+        current,regions=self._cash_sources(snapshot,observation,member,aliases)
+        dates=set()
+        for candidate in collect_candidates(snapshot):
+            message=current.get(candidate['message_id'])
+            if (message is None
+                    or not {'DATE','SETTLEMENT'}.intersection(candidate['roles'])):continue
+            if not any(left<=candidate['start'] and candidate['end']<=right
+                       for left,right in regions[candidate['message_id']]):continue
+            text=message['text']
+            prefix=re.split(r'[,，;；。\n]',text[:candidate['start']])[-1]
+            suffix=re.split(r'[,，;；。\n]',text[candidate['end']:],maxsplit=1)[0]
+            # A selected date is not sufficient: explicit denial, a question,
+            # or a differently labelled business date is not confirmation.
+            if (re.search(r'[?？]',prefix+suffix) or re.search(r'(?:吗|么)\s*$',suffix)
+                    or re.search(r'(?:不是|不按|不要|不能|不是按|是不是|是否|不确定|未确定)\s*$',prefix)
+                    or re.search(r'(?:评级|到期|起息|兑付|发行|上市)(?:日期|日)?\s*(?:为|是|[:：])?\s*$',prefix)):
+                continue
+            literal=settlement_literal(candidate['token'])
+            if requested.startswith('T+') and literal!=requested:continue
+            if literal=='T+0':resolved=message.get('trade_day')
+            elif literal=='T+1':
+                resolve=getattr(self.service.calendar,'settlement_date',None)
+                try:resolved=resolve(message['trade_day'],'T+1') if callable(resolve) else None
+                except Exception:resolved=None  # Missing calendar retains an incomparable cash quote.
+            else:resolved=literal
+            if resolved and (requested.startswith('T+') or requested==resolved):dates.add(resolved)
+        return next(iter(dates)) if len(dates)==1 else None
+
     def _cash_conversion(self,snapshot,observation,member):
         price=observation['changes'].get('price')
         if not price or price['kind']=='YIELD' or not price.get('settlement_date'):return None
-        known={m['message_id']:m for p in snapshot['members'] for m in p['context']}
-        known.update({m['message_id']:m for m in snapshot['messages']})
-        evidence=[known[x] for x in observation['evidence']['price'] if x in known and known[x]['direction']=='in']
-        settlement=price['settlement_date'];confirmed=False
-        for message in evidence:
-            if settlement in message['text']:confirmed=True
-            if re.search(r'T\+0|T＋0',message['text'],re.I) and settlement==message['trade_day']:confirmed=True
-            if re.search(r'T\+1|T＋1',message['text'],re.I) and self.service.calendar is not None:
-                resolve=getattr(self.service.calendar,'settlement_date',None)
-                if callable(resolve) and resolve(message['trade_day'],'T+1')==settlement:confirmed=True
-        if not confirmed:
-            # Preserve the actual cash price; ignore a model-invented date. This
-            # leaves the quote incomparable and B must ask the actual settlement.
-            price['settlement_date']=None
-            return {'status':'SETTLEMENT_CONFIRMATION_REQUIRED','member_id':member['member_id']}
+        # _normalize resolved and validated current counterpart evidence before
+        # Price construction. Calculation cannot supply a missing settlement.
+        settlement=price['settlement_date']
         if self.service.reference_provider is None:return {'status':'TERMS_NOT_CONFIGURED','member_id':member['member_id']}
         try:
             snapshot_data=self.service.reference_provider.snapshot()
@@ -293,14 +371,38 @@ class Engine:
                 unclear=unresolved.get(message['message_id'],[])
                 unresolved[message['message_id']]=[m for m in unclear if m not in explicit]
         checked=[]
+        missing_references=set()
+        if getattr(self,'context_policy_revision',None)=='latest_quote_confirmation_v1':
+            missing_references=set(window_reference_gaps(snapshot,scopes))
         for observation in observations:
             try:
                 if not isinstance(observation,dict):raise InvalidFact("Invalid observation")
+                if observation.get('member_id') in missing_references:raise InvalidFact('REFERENCE_CONFIRMATION_REQUIRED')
+                if 'validation_error' in observation:raise InvalidFact(observation['validation_error'])
                 member=members.get(observation.get('member_id'))
                 if not member:raise InvalidFact("Unknown member")
                 changes=observation.get('changes',{})
                 if not isinstance(changes,dict):raise InvalidFact("Invalid changes")
                 interpretation=observation.get('interpretation')
+                if isinstance(interpretation,dict) and interpretation.get('intent')=='SETTLEMENT':
+                    question=member.get('settlement_question')
+                    self.store._settlement_sources(snapshot,observation,question)
+                    previous=member['quotes'][observation['side']]['price']
+                    raw=changes.get('price')
+                    if (not isinstance(raw,dict) or raw.get('kind') not in ('NET_PRICE','DIRTY_PRICE')
+                            or (raw.get('kind'),raw.get('value'))!=(previous['kind'],previous['value'])
+                            or set(raw)-{'kind','value','settlement_date'}):
+                        raise InvalidFact('Settlement answer must retain the bound cash price')
+                    settlement=self._cash_settlement(snapshot,observation,member,raw.get('settlement_date'),aliases)
+                    if settlement is None:raise InvalidFact('Settlement date or published calendar is unavailable')
+                    changes['price']=Price(raw['kind'],raw['value'],settlement_date=settlement).dump()
+                    validated={key:observation[key] for key in ('member_id','side','changes','evidence','settlement_binding')}
+                    calculation=self._cash_conversion(snapshot,validated,member)
+                    if calculation:result['_verified_calculations'].append(calculation)
+                    checked.append(validated)
+                    continue
+                if 'settlement_binding' in observation:
+                    raise InvalidFact('Settlement binding requires the explicit supplement intent')
                 if isinstance(interpretation,dict) and interpretation.get('intent') in ('QUOTE','INDICATIVE','QUESTION','REPORTED') and 'assertion' not in changes:
                     changes['assertion']=interpretation['intent']
                     evidence=observation.get('evidence',{})
@@ -324,6 +426,17 @@ class Engine:
                         value,_day=self.service.valuation(member['bond_code'])
                         raw['kind']='YIELD';raw['value']=str(valuation_quote(value.yield_pct,raw['value']))
                     elif notation!='ABSOLUTE':raise InvalidFact('Unsupported price notation')
+                    if raw.get('kind') in ('NET_PRICE','DIRTY_PRICE'):
+                        current,regions=self._cash_sources(snapshot,observation,member,aliases)
+                        candidates=[c for c in collect_candidates(snapshot) if c['message_id'] in current
+                                    and any(left<=c['start'] and c['end']<=right for left,right in regions[c['message_id']])]
+                        current_text=[current[ref]['text'][left:right] for ref,ranges in regions.items() for left,right in ranges]
+                        if (any({'DATE','SETTLEMENT'}.intersection(c['roles']) for c in candidates)
+                                and not any({'NET_PRICE','DIRTY_PRICE'}.intersection(c['roles']) for c in candidates)
+                                and not any(re.search(r'(?:按|照|沿用|采用).{0,12}(?:价|报价|条件)',text) for text in current_text)):
+                            raise InvalidFact('Settlement-only reply cannot replay or reconfirm a historical cash price')
+                    if raw.get('kind') in ('NET_PRICE','DIRTY_PRICE') and raw.get('settlement_date') is not None:
+                        raw['settlement_date']=self._cash_settlement(snapshot,observation,member,raw['settlement_date'],aliases)
                     changes['price']=Price.load(raw).dump()
                 if changes.get('volume_wan') is not None:
                     # All target quantities and quoted-amount fields explicitly use wan.
@@ -337,7 +450,11 @@ class Engine:
                 affected={observation['member_id']} if isinstance(observation,dict) and observation.get('member_id') in members else set()
                 checked.append({'member_id':observation.get('member_id') if isinstance(observation,dict) else None,
                                 'side':observation.get('side') if isinstance(observation,dict) else None,
+                                **({'validation_path':observation['validation_path']} if isinstance(observation,dict) and 'validation_path' in observation else {}),
                                 'affected_members':sorted(affected),'validation_error':str(exc)})
+        for mid in missing_references-{row.get('member_id') for row in checked}:
+            checked.append({'member_id':mid,'side':'ofr' if members[mid]['our_side']=='BUY' else 'bid',
+                            'affected_members':[mid],'validation_error':'REFERENCE_CONFIRMATION_REQUIRED'})
         if check_coverage:checked.extend(self._uncovered_quotes(snapshot,checked,aliases))
         observations=checked
         return scopes,observations,unresolved
@@ -406,7 +523,8 @@ class Engine:
 
     def analyze_thread(self,owner,thread_id,*,force=False):
         if self.client is None:return None
-        job=self.store.claim_analysis(owner,thread_id,aggregation=self.aggregation,force=force,lease_seconds=self.lease_seconds)
+        job=self.store.claim_analysis(owner,thread_id,aggregation=self.aggregation,force=force,lease_seconds=self.lease_seconds,
+            include_known_outbound_scopes=self.context_policy_revision=='latest_quote_confirmation_v1')
         if job is None:return None
         start=time.monotonic()
         snapshot=deepcopy(job['snapshot'])
@@ -462,7 +580,8 @@ class Engine:
             result=self._tool_call('analyze',snapshot,owner=owner,on_final=final_analysis,repair_audit=repair_audit)
             saved=self.store.commit_analysis(owner,job['analysis_id'],job['lease_token'],
                 scopes=result['scopes'],observations=result['observations'],unresolved=result['unresolved'],
-                corrections=result.get('corrections'),public_tool_results=result['_public_tool_results'])
+                corrections=result.get('corrections'),public_tool_results=result['_public_tool_results'],
+                reconfirm_current_quotes=self.context_policy_revision=='latest_quote_confirmation_v1')
             if repair_audit['succeeded']:
                 rejected={entry['index'] for entry in saved['rejected']}
                 if rejected & {target['index'] for target in repair_audit['targets']}:
@@ -560,6 +679,8 @@ class Engine:
         context['quote_constraints']=self._quote_constraints(context)
         context['analysis_tool_results']=[]
         context['analysis_tool_source']=None
+        context['context_policy_revision']=self.context_policy_revision
+        context['reference_confirmation_required']=False
         analysis=tx.execute("SELECT analysis_id,through_revision,snapshot_json,result_json FROM xj2_analysis WHERE thread_id=? AND through_revision=? AND state='COMMITTED'",
             (thread['thread_id'],thread['analyzed_revision'])).fetchone()
         if analysis:
@@ -567,7 +688,10 @@ class Engine:
             # A new member must not borrow a result from before it was present.
             snapshot=json.loads(analysis['snapshot_json'])
             if any(p['member_id']==mid for p in snapshot.get('members',[])):
-                public_results=json.loads(analysis['result_json']).get('public_tool_results',[])
+                saved=json.loads(analysis['result_json'])
+                context['reference_confirmation_required']=any(row.get('member_id')==mid and row.get('reason')=='REFERENCE_CONFIRMATION_REQUIRED'
+                                                              for row in saved.get('rejected',[]))
+                public_results=saved.get('public_tool_results',[])
                 if public_results:
                     context['analysis_tool_results']=public_results
                     context['analysis_tool_source']={'analysis_id':analysis['analysis_id'],
@@ -594,7 +718,13 @@ class Engine:
         return Price(price.kind,price.value,settlement_date=price.settlement_date,
                      computed_yield=str(result['yield_pct']),calculation_ref=reference)
     def _validate_reply(self,context,proposal):
-        if not isinstance(proposal,dict) or set(proposal)-{'kind','text','our_price'}:raise InvalidFact('Unexpected reply fields')
+        if not isinstance(proposal,dict) or set(proposal)-{'kind','text','our_price','render_plan'}:raise InvalidFact('Unexpected reply fields')
+        economic_text=proposal.get('text','')
+        if 'render_plan' in proposal:
+            try:rendered=render_reply_plan(context,proposal['render_plan'])
+            except (ValueError,KeyError,TypeError,ArithmeticError) as exc:raise InvalidFact(str(exc)) from exc
+            if rendered['proposal']!=proposal:raise InvalidFact('Public text or price differs from its source-bound plan')
+            economic_text=rendered['economic_text']
         kind=proposal.get('kind')
         if kind not in ('REPLY','RECONFIRM','ASK_VOLUME','CLARIFY','SOCIAL'):raise InvalidFact('Unsupported reply action')
         if context.get('unresolved_messages') and kind!='CLARIFY':raise InvalidFact('Resolve the uncertain bond fragment before an economic reply')
@@ -618,14 +748,20 @@ class Engine:
                 raise InvalidFact('Reply worsens this counterparty current final eligible price')
             previous,step,_source=self._reply_step_inputs(context)
             if abs(quoted-previous)*100>step:raise InvalidFact('Reply exceeds maximum step from actual sent price')
-            text=body.get('text','')
-            advertised=re.findall(r'(?<![\d.])(-?\d+(?:\.\d+)?)\s*%',text)
+            text=economic_text
+            advertised=re.findall(r'(?<![\d.+-])([+-]?\d+(?:\.\d+)?)\s*%',numeric_spelling(text))
             if price.kind=='YIELD':
-                if not advertised or any(number(v)!=quoted for v in advertised):raise InvalidFact('Public yield text differs from validated quote')
+                if not advertised or any(number(v.removeprefix('+'))!=quoted for v in advertised):raise InvalidFact('Public yield text differs from validated quote')
             elif advertised or ('净价' if price.kind=='NET_PRICE' else '全价') not in text:
                 raise InvalidFact('Cash quote must explicitly state its price kind, not an unvalidated yield')
             body['our_price']=price.dump()
-        validate_public_text(context,body)
+        validate_public_text(context,body,economic_text=economic_text)
+        # The original response and its plan remain in the decision audit;
+        # only validated native message fields cross the command boundary.
+        body.pop('render_plan',None)
+        if proposal.get('render_plan',{}).get('question')=='ASK_SETTLEMENT':
+            side='ofr' if context['our_side']=='BUY' else 'bid'
+            body['settlement_question']={'side':side,'quote_revision':context['quotes'][side]['revision']}
         return body
     def decide_member(self,owner,mid):
         if self.client is None:return None
@@ -662,6 +798,7 @@ class Engine:
                 prepared['_history_context']=deepcopy(frozen['history'])
             else:
                 self._merge_history(context,value['_history_context'])
+                context['tool_results']=deepcopy(value.get('_public_tool_results',[]))
                 original=self._reply_response(value)
                 frozen.update(original=deepcopy(original),history=deepcopy(value['_history_context']))
                 prepared=dict(value)

@@ -70,7 +70,7 @@ HTTP 接口：
 ## 交付包专用测试
     bash deploy/05-test-package.sh
 仅有系统 Python 3.7.9 的 ARM64 目标上，此入口同样自动引导经校验的包内 3.12，无需手工解压或设置 PATH；已有 `PREFIX/python`、`PREFIX/venv` 或显式 `XUNJIA_QA_PYTHON` 时先核版本再使用。
-只使用包内 Python wheels、tests/release、tests/cutover、tests/negotiation 及显式列出的协议验收用例，不需要 Node/esbuild 或 web/src。创建新临时 venv，离线安装、pip check、先收集再执行全部随包用例；失败返回非零并保留日志。
+只使用包内 Python wheels、tests/release、tests/cutover、tests/negotiation、tests/benchmarks 及显式列出的协议验收用例，不需要 Node/esbuild 或 web/src。创建新临时 venv，离线安装、pip check、先收集再执行全部随包用例；失败返回非零并保留日志。旧包没有 benchmarks 目录时沿用其原有测试范围。
 开发环境完整 tests/ 另行验收。包专用测试不等于整个源码开发套件，两者结果分开记录。
 测试使用本轮临时目录，结束后删除，不修改现役配置/数据库/服务。
 
@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS 不是旧表迁移，数据库升级另行审查。
 - 客户Dify导入 `dify/negotiation_v22/` 对应版本A/B画布，仅填 `XUNJIA_DIFY_URL`、`XUNJIA_DIFY_ANALYSIS_APP_KEY`、`XUNJIA_DIFY_REPLY_APP_KEY`。旧单APP_KEY不能作为新两阶段合同。公开Tool免Token，客户不需要提供管理权限。
 - `XUNJIA_AGGREGATION_PROFILE` 指向实测报告生成的参数；未测量时不启用自动分析窗口。`XUNJIA_BOND_CONTEXT_MESSAGES` 默认20、范围10..30。`XUNJIA_REFERENCE_CONFIG` 为可选公开资料/发布日历adapter配置，缺少真实源必须显示未配置。
 - `XUNJIA_DIFY_TIMEOUT_SECONDS` 为每次HTTP调用超时（模板90秒、范围1–300秒），`XUNJIA_DIFY_STAGE_BUDGET_SECONDS` 为包含工具/历史补取的阶段总预算（模板150秒、最大540秒）。实际HTTP超时还受当前剩余阶段预算限制；租约为阶段预算加30秒。部署时须显式沿用所选模型报告的HTTP/阶段预算，不能把默认值冒充已验证配置。
+- `config/aggregation-profile.measured.json` 提供本轮已测 qwen-max/shim 链路的四字段聚合配置：1463ms静默窗、4389ms累计上限；溯源及字节摘要位于 `config/aggregation-measurement.json`。应用的 `XUNJIA_AGGREGATION_PROFILE` 指向前者。首次安装带入配置目录；升级保留现场文件，运维可另存新测量配置并显式选择。该配置来自46对真实清洁实耗与固定合成到达实验；其他模型/运行环境按对应链路重新测量，累计上限不包含忙时排队。后台与真实发送默认仍关闭。
 - `XUNJIA_RUN_BACKGROUND=1` 可与 `XUNJIA_ENABLE_LIVE_TRANSPORT=0` 配合，仅接收、分析、对账；新包默认两者均0，不自动向真实对手发送。
 - 构建包先执行 `scripts/build_collector_runtime.py --output <fresh-dir> --wheelhouse <local-build-wheels>`；主包构建增加 `--collector-wheel <fresh-dir>/xunjia_collector_runtime-2.2.0-py3-none-any.whl`。打包会核wheel代码与本版源码逐文件一致。
 - QTrade采集端需先部署本轮 `qtrade_agent/ossbox/xunjia_v22.py`、Bus/UI guard与app互斥接线，再在其**专用Python环境**离线安装包内 `collector-runtime/*.whl`。依赖cryptography与QTrade现有依赖一致；安装前检查 `pip show xunjia-collector-runtime`，安装后检查 `pip check` 和模块路径。不能在其他服务的共用Python环境中覆盖同名server/relay包。该wheel不含Web服务、现场密钥或运行数据。

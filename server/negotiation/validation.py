@@ -6,9 +6,33 @@ an internal limit, and never treat an outgoing quantity as the peer's amount.
 from __future__ import annotations
 import re
 from .prices import InvalidFact, number, rounded_yield, volume_wan
+from .text_roles import mask_non_trading, numeric_spelling
+from .slots import direct_price_question
 
-NUM = r'-?\d+(?:\.\d+)?'
-QUANTITY = re.compile(r'(?<![\da-zA-Z.])(' + NUM + r')\s*(亿|万|[wW])(?![a-zA-Z])')
+NUM = r'[+-]?\d+(?:\.\d+)?'
+QUANTITY = re.compile(r'(?<![\da-zA-Z.+-])(' + NUM + r')\s*(亿|万|[wW])(?![a-zA-Z])')
+
+
+def _explicit_adoption(text, bond_codes):
+    """Recognize a narrow affirmative price adoption, never infer a new price.
+
+    Negated/reported/conditional prefixes and a later correction do not fit
+    this form. Other reference language remains a joint semantic decision.
+    """
+    text = numeric_spelling(text)
+    for code in sorted(bond_codes, key=len, reverse=True):
+        text = re.sub(r'^\s*'+re.escape(code)+r'(?![a-zA-Z0-9])\s*', '', text, count=1, flags=re.I)
+    match = re.match(r'\s*(?:就|那就|好的[，,]?)?按(?:照)?(?:你|您|贵方)'
+        r'(?:(?:刚才|上次|之前|那个|那条|所报|报的)\s*){0,6}'
+        r'(?P<price>'+NUM+r')\s*[%％]?\s*(?:收|出|买|卖)?\s*的?\s*(?:报价|价格|价)'
+        r'\s*[，,]\s*(?:我|本方)(?:这边)?\s*(?P<side>收|出|买|卖)\s*'+NUM+r'\s*(?:万|亿|[wW])', text)
+    if not match:
+        return None
+    remainder = text[match.end():]
+    if (re.search(r'现在|目前|改为|更正|不过|但是|但|不是|不按|别按|如果|假如|条件|吗|么|[?？]', remainder)
+            or economics(remainder, bond_codes=bond_codes)[0]):
+        return None
+    return rounded_yield(match['price'].removeprefix('+')), 'bid' if match['side'] in ('收', '买') else 'ofr'
 
 
 def economics(text, *, bond_codes=(), identifiers=()):
@@ -19,16 +43,16 @@ def economics(text, *, bond_codes=(), identifiers=()):
             masked=re.sub(re.escape(code),lambda m:' '*len(m[0]),masked,flags=re.I)
     masked=re.sub(r'(?<![a-zA-Z0-9])(?:[a-fA-F0-9]{24,160}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})(?![a-zA-Z0-9])',
                   lambda m:' '*len(m[0]),masked)
-    masked = re.sub(r'\d{4}-\d{2}-\d{2}|T\+[01]', lambda m: ' ' * len(m[0]), masked)
+    masked = numeric_spelling(mask_non_trading(masked))
     quantities = []
     for match in QUANTITY.finditer(masked):
-        quantities.append((volume_wan(match[1] + match[2]), match.start(), match.end()))
+        quantities.append((volume_wan(match[1].removeprefix('+') + match[2]), match.start(), match.end()))
     for _value, start, end in quantities:
         masked = masked[:start] + ' ' * (end-start) + masked[end:]
     prices = []
     bare = []
-    for match in re.finditer(r'(?<![\d.])(' + NUM + r')(?![\d.])', masked):
-        raw = match[1]; tail = masked[match.end():]
+    for match in re.finditer(r'(?<![\d.+-])(' + NUM + r')(?![\d.])', masked):
+        raw = match[1].removeprefix('+'); tail = masked[match.end():]
         # BP offsets are not literal yield quotes.
         if re.match(r'\s*(?:BP|bp)', tail):
             continue
@@ -60,6 +84,35 @@ def token_side(text,start,end):
         word=next(v for v in found.groups() if v).lower()
         return 'bid' if word in ('收','买','bid') else 'ofr'
     return None
+
+
+def _literal_quote_quantities(text, bond_codes):
+    """Read complete price-side-size clauses, not reported or conditional lots.
+
+    This supplies a contradiction check only. It does not establish quote
+    ownership, finality or permission to replace a model-selected field.
+    """
+    # A following correction/reference may qualify an earlier complete clause.
+    # This narrow check must abstain rather than invent precedence for them.
+    if re.search(r'改|更正|说错|写错|不是|不再|不算|作废|撤|取消|但|不过|如果|假如|条件|的话|按|照|昨天|之前|上次|原来', text):
+        return
+    for clause in re.split(r'[,，;；。\n]', numeric_spelling(text)):
+        for code in sorted(bond_codes, key=len, reverse=True):
+            clause = re.sub(r'^\s*'+re.escape(code)+r'(?![a-zA-Z0-9_.-])\s*',
+                            '', clause, count=1, flags=re.I)
+        prices, quantities = economics(clause)
+        if len(prices) != 1 or len(quantities) != 1:
+            continue
+        _price, start, end = prices[0]
+        amount, qstart, qend = quantities[0]
+        if not re.fullmatch(r'\s*(?:(?:我|我们|本方)(?:这边)?\s*)?(?:(?:净价|全价)\s*)?', clause[:start]):
+            continue
+        side = re.fullmatch(r'\s*%?\s*(收|出|买|卖|bid|ofr|offer)\s*', clause[end:qstart], re.I)
+        if not side or clause[qend:].strip():
+            continue
+        yield ('bid' if side[1].lower() in ('收', '买', 'bid') else 'ofr'), amount
+
+
 def validate_observation(snapshot, observation, aliases, *, raw_price=None):
     """Check the model's field evidence against actual, bond-scoped fragments.
 
@@ -98,7 +151,7 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
                 result.append((match.start(), match.end(), next(iter(members))))
         return sorted(result)
 
-    def source_parts(ref):
+    def source_parts(ref, *, preserve_prefix=False):
         message = known.get(ref)
         if not message:
             raise InvalidFact('Evidence is outside the supplied actual context')
@@ -110,7 +163,9 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
             if target != mid:
                 continue
             end = next((p for p, _q, m in anchors[i+1:] if m != mid), len(message['text']))
-            selected.append(message['text'][start:end])
+            clause = max((message['text'].rfind(mark, 0, start) for mark in ';；。\n'), default=-1)+1
+            prefix = message['text'][clause:start] if preserve_prefix else ''
+            selected.append(prefix+message['text'][start:end])
         if not selected:
             raise InvalidFact('Evidence explicitly names another bond')
         return selected
@@ -170,6 +225,11 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
     # infer a final price from a keyword. Finality still requires contextual
     # interpretation and price-version evidence.
     if changes.get('assertion','QUOTE')=='QUOTE':
+        for ref in {ref for refs in evidence.values() for ref in refs}:
+            message=known[ref]
+            if message['direction']=='in' and message['ingest_revision']==latest:
+                if any(direct_price_question(part,tuple(aliases)) for part in source_parts(ref,preserve_prefix=True)):
+                    raise InvalidFact('Explicit asking price is not a counterparty quote')
         if re.search(r'(?:是你|你(?:刚才)?说的|你(?:刚才)?报的).*[?？]',all_text):
             raise InvalidFact('Question about our quote is not a counterparty quote')
         if (re.search(r'(?:客户|别人|别家|市场|有人|他).*(?:说|报)',all_text) and
@@ -200,6 +260,14 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
         value = number(changes['price']['value'])
         literal = raw_price or changes['price']
         notation = literal.get('notation', 'ABSOLUTE')
+        if notation == 'ABSOLUTE' and changes['price']['kind'] == 'YIELD' and changes.get('assertion', 'QUOTE') == 'QUOTE':
+            for ref in evidence.get('price', []):
+                if known[ref]['direction'] != 'in' or known[ref]['ingest_revision'] != latest:
+                    continue
+                for text in source_parts(ref, preserve_prefix=True):
+                    adopted = _explicit_adoption(text, tuple(aliases))
+                    if adopted is not None and adopted[1] == side and adopted[0] != value:
+                        raise InvalidFact('Selected price contradicts the explicitly adopted current price')
         candidates = []
         outbound_parts = {part for ref in evidence['price'] if known[ref]['direction']=='out' for part in parts(ref)}
         for text in texts('price'):
@@ -213,7 +281,7 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
         if notation == 'CHINABOND_BP':
             offsets=[]
             for text in texts('price'):
-                for match in re.finditer(r'(加|减|\+|-)?\s*(\d+(?:\.\d+)?)\s*(?:BP|bp|收|出)', text):
+                for match in re.finditer(r'(加|减|\+|-)?\s*(\d+(?:\.\d+)?)\s*(?:BP|bp|收|出)', numeric_spelling(text)):
                     offsets.append(number(match[2])*(-1 if match[1] in ('减','-') else 1))
             supported=expected in offsets
         else:
@@ -271,6 +339,16 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
             raise InvalidFact('Cash-price evidence cannot be saved as a yield')
     if changes.get('volume_wan') is not None:
         amount = number(changes['volume_wan'])
+        # History can supply a referenced quantity, but cannot override an
+        # explicitly different current lot. Read the actual scoped source;
+        # cropped model segments must not hide that contradiction.
+        current_amounts = {value for ref in incoming_refs
+                           if known[ref]['ingest_revision'] == latest
+                           for text in source_parts(ref, preserve_prefix=True)
+                           for direction, value in _literal_quote_quantities(text, tuple(aliases))
+                           if direction == side}
+        if current_amounts and amount not in current_amounts:
+            raise InvalidFact('Selected quantity contradicts the explicit current counterparty lot')
         amounts = []
         for text in texts('volume_wan', inbound_only=True):
             for value, start, end in economics(text, bond_codes=tuple(aliases),identifiers=identifiers)[1]:
@@ -290,7 +368,7 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
     return {key: observation[key] for key in ('member_id', 'side', 'changes', 'evidence')}
 
 
-def validate_public_text(context, proposal):
+def validate_public_text(context, proposal, *, economic_text=None):
     text = proposal.get('text')
     if not isinstance(text, str) or not 1 <= len(text.strip()) <= 1500:
         raise InvalidFact('Reply text must contain 1..1500 characters')
@@ -298,10 +376,13 @@ def validate_public_text(context, proposal):
         raise InvalidFact('Public reply exposes private policy or internal context')
     # The tool negotiates and collects quotes, never executes or reserves a lot.
     for clause in re.split(r'[，,。;；\n]', text):
+        if re.search(r'\d+(?:\.\d+)?\s*(?:万|亿)\s*确认(?!报价)',clause):
+            raise InvalidFact('Quantity confirmation must explicitly refer to a quotation, not execution')
         if re.search(r'成交|锁(?:量|定|券)|占(?:用)?额度|确认买入|确认卖出|就(?:按.*)?要了', clause):
             if not re.search(r'不(?:会|作|做|能)?(?:自动)?(?:成交|锁|占|确认)', clause):
                 raise InvalidFact('Reply promises execution or reserves a counterparty lot')
-    prices, quantities = economics(text, bond_codes=(context.get('bond_code', ''),))
+    economic_text = text if economic_text is None else economic_text
+    prices, quantities = economics(economic_text, bond_codes=(context.get('bond_code', ''),))
     kind = proposal['kind']
     if kind != 'REPLY' and prices:
         raise InvalidFact('Nonquote reply contains an unvalidated public price')
@@ -313,8 +394,10 @@ def validate_public_text(context, proposal):
         if not prices or any(normalize(p) != expected for p, _a, _b in prices):
             raise InvalidFact('All public price tokens must match the structured quote')
         own_side = context['our_side']
-        if own_side == 'BUY' and re.search(r'出|卖', text) or own_side == 'SELL' and re.search(r'收|买', text):
+        if own_side == 'BUY' and re.search(r'出|卖', economic_text) or own_side == 'SELL' and re.search(r'收|买', economic_text):
             raise InvalidFact('Reply direction differs from our authorized side')
+    if not quantities:
+        return
     target = number(context['plan']['volume_wan'])
     if kind == 'ASK_VOLUME':
         ceiling = number(context['group_summary']['reported_shortfall_wan'])

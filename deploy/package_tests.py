@@ -44,10 +44,11 @@ def main(argv=None):
                         help="Parent for a fresh retained evidence directory; defaults to system temporary storage")
     args = parser.parse_args(argv)
     root = args.bundle.resolve()
+    scopes = (*SCOPES, 'tests/benchmarks') if (root/'tests/benchmarks').is_dir() else SCOPES
     if args.evidence_parent is not None:
         args.evidence_parent.mkdir(parents=True, exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="xunjia-package-evidence-", dir=args.evidence_parent))
-    report = {"package_root": str(root), "evidence_root": str(evidence), "test_scopes": list(SCOPES), "results": []}
+    report = {"package_root": str(root), "evidence_root": str(evidence), "test_scopes": list(scopes), "results": []}
     exit_code, work = 0, None
     print("PACKAGE_QA_BEGIN " + json.dumps({"package_root": str(root), "evidence_root": str(evidence)}), flush=True)
     try:
@@ -62,7 +63,7 @@ def main(argv=None):
                        PYTHONPATH=os.pathsep.join((str(root / "app"), str(root))), TMPDIR=str(scratch))
             python = str(work / "venv" / "bin" / "python")
             pytest = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                      "--basetemp=" + str(work / "tests"), *SCOPES, "--disable-warnings", "--tb=short"]
+                      "--basetemp=" + str(work / "tests"), *scopes, "--disable-warnings", "--tb=short"]
             stages = [
                 ("verify-package", [sys.executable, str(root / "deploy/manager.py"), "verify", "--package-only", "--bundle", str(root)], 60),
                 ("create-venv", [sys.executable, "-m", "venv", str(work / "venv")], 300),

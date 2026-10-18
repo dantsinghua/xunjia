@@ -9,21 +9,36 @@ def build(stage, *, version, provider, model):
         raise ValueError('Unsupported stage/version')
     if not provider or not model:
         raise ValueError('Choose an existing configured model/provider')
-    source = Path(__file__).with_name('node_code.py').read_text(encoding='utf8')
+    root = Path(__file__).resolve().parents[2]
+    runtime = root/'server/negotiation'
+    if not runtime.is_dir():
+        runtime = root/'app/server/negotiation'  # Uninstalled offline bundle layout.
+    shared = (runtime/'text_roles.py').read_text(encoding='utf8')+'\n'
+    shared += (runtime/'slots.py').read_text(encoding='utf8').replace('from .text_roles import non_trading_spans, numeric_spelling\n','')+'\n'
+    shared += (runtime/'reply_render.py').read_text(encoding='utf8').replace('from .slots import collect_candidates\n','')+'\n'
+    wire = Path(__file__).with_name('slot_wire.py').read_text(encoding='utf8').replace('from server.negotiation.slots import collect_candidates\n','').replace('from server.negotiation.text_roles import settlement_literal\n','')
+    source = shared+wire+'\n'+Path(__file__).with_name('node_code.py').read_text(encoding='utf8').replace(
+        'from server.negotiation.slots import collect_candidates, literal_member_hints, window_reference_gaps\n','').replace(
+        'from dify.negotiation_v22.slot_wire import decode_slot_observation\n','').replace(
+        'from server.negotiation.reply_render import public_information, render_reply_plan, reply_requirements, quote_grid\n','')
     source += '\n\ndef main(text: str, context_json: str) -> dict:\n'
-    source += f"    result = validate_result(parse_object(text), parse_object(context_json), {stage!r})\n"
+    source += f"    result = decode_stage_result(parse_object(text), parse_object(context_json), {stage!r})\n"
     source += "    return {'result': json.dumps(result, ensure_ascii=False, separators=(',', ':'))}\n"
-    projection = 'import json\n'+inspect.getsource(node_code.compact_context)
+    projection = shared+'\nimport json\n'+inspect.getsource(node_code.compact_context)
+    projection += '\n_SYSTEMS = '+repr({stage: prompts._SYSTEMS[stage]})+'\n'
+    projection += '\n'+inspect.getsource(prompts.select_system_prompt)
     projection += '\n\ndef main(context_json: str) -> dict:\n'
-    projection += "    return {'context': json.dumps(compact_context(json.loads(context_json)), ensure_ascii=False, separators=(',', ':'))}\n"
+    projection += "    context = json.loads(context_json)\n"
+    projection += f"    system = select_system_prompt(context, {stage!r})\n"
+    projection += "    return {'context': json.dumps(compact_context(context), ensure_ascii=False, separators=(',', ':')), 'system_prompt': system}\n"
     specs = [
         ('start', {'type':'start','variables':[{'variable':'context_json','label':'context_json','type':'paragraph','required':True,'default':'','max_length':1000000}]}),
         ('context', {'type':'code','code_language':'python3','code':projection,
                      'variables':[{'variable':'context_json','value_selector':['start','context_json']}],
-                     'outputs':{'context':{'type':'string','children':None}}}),
+                     'outputs':{'context':{'type':'string','children':None},'system_prompt':{'type':'string','children':None}}}),
         ('model', {'type':'llm','model':{'provider':provider,'name':model,'mode':'chat','completion_params':{'temperature':0}},
                    'context':{'enabled':False,'variable_selector':[]},'vision':{'enabled':False},'variables':[],
-                   'prompt_template':[{'role':'system','text':prompts.ANALYSIS if stage=='analysis' else prompts.REPLY},
+                   'prompt_template':[{'role':'system','text':'{{#context.system_prompt#}}'},
                                       {'role':'user','text':'本轮完整业务context_json（仅省数据库机械字段，原文/证据未裁剪）：\n{{#context.context#}}'}]}),
         ('contract', {'type':'code','code_language':'python3','code':source,
                       'variables':[{'variable':'text','value_selector':['model','text']},{'variable':'context_json','value_selector':['start','context_json']}],

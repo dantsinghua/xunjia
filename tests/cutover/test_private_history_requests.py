@@ -8,6 +8,14 @@ from test_production_flow import OWNER, desk, raw
 from test_acceptance_contract import current, observation, setup_groups
 
 
+@pytest.fixture(autouse=True)
+def _explicit_anchor_policy_for_archived_history_contract(desk, monkeypatch):
+    # Only this module replays the retired explicit-fetch policy. Imported
+    # history_desk helpers and the shared production desk retain the default.
+    monkeypatch.setattr(desk[0].state.negotiation_engine, 'context_policy_revision',
+                        'explicit_anchors_v0')
+
+
 def scope_only(snapshot):
     return {"schema_version": "2.2", "scopes": {
         m["message_id"]: [p["member_id"] for p in snapshot["members"] if p["bond_code"] in m["text"]]
