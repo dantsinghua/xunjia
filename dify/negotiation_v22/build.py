@@ -14,7 +14,7 @@ def build(stage, *, version, provider, model):
     if not runtime.is_dir():
         runtime = root/'app/server/negotiation'  # Uninstalled offline bundle layout.
     shared = (runtime/'text_roles.py').read_text(encoding='utf8')+'\n'
-    shared += (runtime/'slots.py').read_text(encoding='utf8').replace('from .text_roles import non_trading_spans, numeric_spelling\n','')+'\n'
+    shared += (runtime/'slots.py').read_text(encoding='utf8').replace('from .text_roles import non_trading_spans, numeric_spelling, valuation_offset_spans\n','')+'\n'
     shared += (runtime/'reply_render.py').read_text(encoding='utf8').replace('from .slots import collect_candidates\n','')+'\n'
     wire = Path(__file__).with_name('slot_wire.py').read_text(encoding='utf8').replace('from server.negotiation.slots import collect_candidates\n','').replace('from server.negotiation.text_roles import settlement_literal\n','')
     source = shared+wire+'\n'+Path(__file__).with_name('node_code.py').read_text(encoding='utf8').replace(

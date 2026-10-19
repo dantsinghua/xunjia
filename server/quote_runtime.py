@@ -76,9 +76,45 @@ class QBMarket:
             rows=[r for r in rows if r['flowId']<before or (r['flowId']==before and before_uni and str(r['bondUniCode'])<str(before_uni))]
         return rows[:limit],total
 
+    def valuation(self, code):
+        """Return only explicitly labelled ChinaBond valuation fields in Inno.
+        Neither best_bid/best_ofr nor an arbitrary broker quote can become our
+        internal valuation. Date/value provenance stays separate from peers.
+        """
+        from .negotiation.prices import Valuation, iso_day, number, InvalidFact
+        import hashlib
+        from datetime import date
+        with self.source._lock:
+            uni=self.source.code2uni.get(code)
+            rows=list(self.source.book.get(uni,{}).values()) if uni is not None else []
+            candidates=[]
+            for row in rows:
+                day=row.get('cnbd_date');value=row.get('cnbd_yield_mat')
+                if day is None or value is None:continue
+                try:
+                    day=iso_day(day.isoformat() if isinstance(day,date) else str(day))
+                    value=format(number(str(value)),'f')
+                    stamp=row.get('update_time')
+                    stamp=stamp.timestamp() if hasattr(stamp,'timestamp') else 0
+                    sequence=int(row.get('seq_ns') or row.get('id') or 0)
+                except (ValueError,TypeError,OverflowError):continue
+                candidates.append((day,stamp,sequence,value))
+        if not candidates:return None
+        newest=max((day,stamp,seq) for day,stamp,seq,_value in candidates)
+        values={number(value) for day,stamp,seq,value in candidates if (day,stamp,seq)==newest}
+        if len(values)!=1:
+            raise InvalidFact('INNO_CHINABOND_REVISION_CONFLICT:'+str(code)+':'+newest[0])
+        day,_stamp,_seq=newest
+        value=format(next(iter(values)),'f')
+        digest=hashlib.sha256(json.dumps([code,day,value],separators=(',',':')).encode()).hexdigest()
+        return Valuation(code,day,value,'innodealing-cnbd:'+digest)
     def poll(self):
         output=[]
-        for fid,q in self.source.poll():
+        before=getattr(self.source,'last_id',0)
+        incoming=self.source.poll()
+        # Includes valuation-only updates even when the best price did not move.
+        self.valuation_changed=getattr(self.source,'last_id',0)!=before
+        for fid,q in incoming:
             u=str(q['bond_uni_code']);rows=self.db.static_by_codes([u])
             if not rows:continue
             static=rows[0];new=self.db.groups_of(static,q.get('clearing'));old=self.groups.get(u,new)

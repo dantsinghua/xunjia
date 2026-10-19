@@ -14,30 +14,89 @@ from .store import encoded, identity, new_id
 def digest(value):return hashlib.sha256(encoded(value).encode()).hexdigest()
 class Inquiry:
     engine='v22'
-    def __init__(self,store:ApplicationStore,*,reference_provider=None,calendar=None):
+    def __init__(self,store:ApplicationStore,*,reference_provider=None,calendar=None,valuation_source=None):
         self.repo=self.store=store
         self.clock=store.clock
         self.commands_core=Commands(store,current_day=self.trade_day)
         self.reference_provider=reference_provider
         self.calendar=calendar
+        self.valuation_source=valuation_source  # Optional verified ChinaBond values carried by Inno rows.
         self.diagnostics=Diagnostics(clock=self.clock)
     def trade_day(self):
         # Counterparty quotes require confirmation on EVERY new local day.
         # The publication calendar is separate and is used only for valuation.
         return datetime.fromtimestamp(self.clock(),ZoneInfo('Asia/Shanghai')).date().isoformat()
     def valuation(self,code):
-        if self.reference_provider is None:raise InvalidFact('CHINABOND_SOURCE_NOT_CONFIGURED')
+        if self.reference_provider is None and self.valuation_source is None:
+            raise InvalidFact('CHINABOND_SOURCE_NOT_CONFIGURED')
         if self.calendar is None or not callable(getattr(self.calendar,'latest_valuation_day',None)):
             raise InvalidFact('CHINABOND_PUBLICATION_CALENDAR_NOT_CONFIGURED')
-        snapshot=self.reference_provider.snapshot()
-        candidates=[b for b in snapshot.bonds if b.get('code',b.get('bond_id'))==code]
-        if len(candidates)!=1:raise InvalidFact('No unique ChinaBond valuation for this bond')
-        row=candidates[0]
-        day=row.get('valuation_date',snapshot.as_of)
-        expected=self.calendar.latest_valuation_day(self.clock())
-        valuation=Valuation(code,iso_day(day),str(row.get('valuation_yield_pct',row.get('val_yield',''))),snapshot.snapshot_id)
-        if day!=expected:raise InvalidFact('Valuation snapshot is not the latest required trading date')
-        return valuation,expected
+        expected=iso_day(self.calendar.latest_valuation_day(self.clock()))
+        if expected>self.trade_day():raise InvalidFact('ChinaBond calendar is in the future')
+        candidates=[];failures=[]
+        if self.reference_provider is not None:
+            try:
+                snapshot=self.reference_provider.snapshot()
+                rows=[b for b in snapshot.bonds if b.get('code',b.get('bond_id'))==code]
+                if len(rows)!=1:raise InvalidFact('No unique ChinaBond valuation for this bond')
+                row=rows[0];day=iso_day(row.get('valuation_date',snapshot.as_of))
+                candidates.append(Valuation(code,day,str(row.get('valuation_yield_pct',row.get('val_yield',''))),snapshot.snapshot_id))
+            except Exception as exc:failures.append(type(exc).__name__)
+        if self.valuation_source is not None:
+            try:
+                value=self.valuation_source(code)
+                if value is not None:
+                    if not isinstance(value,Valuation) or value.bond_code!=code:
+                        raise InvalidFact('Inno valuation adapter returned a different bond')
+                    candidates.append(value)
+            except Exception as exc:failures.append(type(exc).__name__)
+        valid=[v for v in candidates if v.trading_date==expected]
+        if not valid:
+            raise InvalidFact('CHINABOND_LATEST_VALUATION_UNAVAILABLE:'+expected+':'+','.join(failures))
+        if len({number(v.yield_pct) for v in valid})>1:
+            # No arbitrary precedence when two purported same-day ChinaBond
+            # values disagree. This is a data issue, never a peer quotation.
+            raise InvalidFact('CHINABOND_SOURCES_DISAGREE:'+code+':'+expected)
+        return valid[0],expected
+    def refresh_valuations(self,*,refresh_reference=True):
+        """Retry recovery even AFTER the group day advanced; no model/native I/O.
+        The same entry is called after a successful source polling tick and
+        immediately after newly ingested Inno rows. One resolution per bond is
+        shared across owners. Transactions below recheck each policy version.
+        """
+        today=self.trade_day()
+        with self.store.db.transaction(write=False) as tx:
+            groups=[dict(g) for g in tx.execute('SELECT * FROM xj2_group WHERE archived=0').fetchall()]
+        bp_codes={g['bond_code'] for g in groups if json.loads(g['policy_json'])['mode']=='CHINABOND_BP'}
+        if refresh_reference and bp_codes:
+            for provider in {id(p):p for p in (self.reference_provider,self.calendar) if p is not None}.values():
+                invalidate=getattr(provider,'invalidate_valuation_cache',None)
+                if callable(invalidate):invalidate()
+        resolved={};errors={}
+        for code in sorted(bp_codes):
+            try:resolved[code]=self.valuation(code)
+            except Exception as exc:errors[code]=str(exc)[:300]
+        result={'rolled':0,'revalued':0,'pending':[]}
+        for g in groups:
+            owner=g['owner_id'];gid=g['group_id'];is_bp=json.loads(g['policy_json'])['mode']=='CHINABOND_BP'
+            valuation,expected=resolved.get(g['bond_code'],(None,None))
+            try:
+                if g['trade_day']<today:
+                    self.store.rollover(owner,gid,trade_day=today,valuation=valuation,expected_valuation_date=expected)
+                    result['rolled']+=1
+                elif is_bp and valuation is not None:
+                    if self.store.refresh_valuation(owner,gid,valuation=valuation,expected_valuation_date=expected,
+                                                    expected_policy_version=g['policy_version']):
+                        result['revalued']+=1
+                if is_bp and g['bond_code'] in errors:
+                    result['pending'].append({'group_id':gid,'bond_code':g['bond_code'],'reason':errors[g['bond_code']]})
+                    self.diagnostics.record('valuation',owner=owner,entity=gid,code='VALUATION_REFRESH_PENDING')
+                else:self.diagnostics.record('valuation',owner=owner,entity=gid)
+            except Exception as exc:
+                # One recovering group must not prevent the others from rolling.
+                result['pending'].append({'group_id':gid,'bond_code':g['bond_code'],'reason':type(exc).__name__})
+                self.diagnostics.record('valuation',owner=owner,entity=gid,code='VALUATION_APPLY_RETRY',error=exc)
+        return result
     def normalize_item(self,owner,item,*,preferences=None):
         if not isinstance(item,dict):raise InvalidFact('RFQ item must be an object')
         code=identity(item.get('code'),'bond code',32)
@@ -97,6 +156,7 @@ class Inquiry:
             if old:
                 if old['content_hash']!=content_hash:raise InvalidFact('Preview idempotency key reused with different inputs')
                 return json.loads(old['preview_json'])['public']
+            self.repo._ensure_peer_capacity(tx,owner,binding['account_uid'],per_peer)
             bid=new_id()
             public={'batch_id':bid,'version':1,'status':'preview','engine':'v22','items':lines,'commands_preview':previews}
             payload={'public':public,'items':normalized,'preferences_hash':digest(prefs)}
@@ -197,7 +257,8 @@ class Inquiry:
                 result.append({'session_id':peer['member_id'],'group_id':group['group_id'],'batch_id':group['group_id'],
                     'conversation_id':peer['thread_id'],'peer_id':peer['peer_uid'],'bond_code':group['bond_code'],
                     'state':state,'revision':peer['version'],'pending_command_id':peer['pending_command_id'],
-                    'policy':group['plan'],'peer_quote':{**q,'yield_pct':price.get('value') if price.get('kind')=='YIELD' else price.get('computed_yield')},
+                    'policy':{**group['plan'],'trade_day':group['trade_day'],
+                              'limit_yield_pct':group['boundary']['value'] if group['boundary'] else None},'peer_quote':{**q,'yield_pct':price.get('value') if price.get('kind')=='YIELD' else price.get('computed_yield')},
                     'quotes':peer['quotes'],'our_quote':peer['our_quote'],'created_at':group['created_at'],
                     'archived':group['archived'],'summary':group['summary'],'analysis_pending':peer['analysis_pending']})
         return result

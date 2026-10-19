@@ -38,6 +38,10 @@ def router(service,market,tools,transport):
         if peer and peer['command_state']=='UNKNOWN':return '待核对'
         if peer and peer['pending_command_id']:return '待回执'
         return '询价中'
+    @r.get('/negotiation/capacity')
+    def capacity(request:Request):
+        b=bound(request)
+        return {'ok':True,'data':store.counterparty_capacity(owner(request),b['account_uid'])}
     @r.get('/negotiation/state')
     def state(request:Request):return {'ok':True,'data':store.snapshot(owner(request))}
     @r.get('/negotiation/messages/{thread_id}')

@@ -66,3 +66,35 @@ test('本人已绑定但通道离线仍可生成零外发预览',async()=>{
  globalThis.fetch=async(url)=>{if(String(url).endsWith('/preview'))previewCalls++;return response({ok:true,data:preview})}
  assert.equal(vm.canPreview.value,true);await vm.requestPreview();assert.equal(previewCalls,1);scope.stop()
 })
+
+test('50人上限按不同对手计数，同一人多券不重复',()=>{
+ const {vm,scope}=setup()
+ const draft=vm.drafts.value[0]
+ const people=Array.from({length:50},(_,i)=>'synthetic-peer-'+i)
+ vm.drafts.value=[{...draft,uins:[...people]},{...draft,code:'SYN-B',uins:[...people]}]
+ assert.equal(vm.outgoingCount.value,50)
+ assert.equal(vm.validationError(),'')
+ vm.drafts.value[1].uins.push('synthetic-51')
+ assert.equal(vm.outgoingCount.value,51)
+ assert.match(vm.validationError(),/50个不同对手/)
+ scope.stop()
+})
+test('账号改变后迟到人数摘要不能覆盖新账号',async()=>{
+ let first!:(r:Response)=>void
+ let calls=0
+ globalThis.fetch=async(url)=>{
+  if(!String(url).endsWith('/negotiation/capacity'))return response({ok:true,data:{}})
+  calls++
+  if(calls===1)return new Promise(r=>{first=r})
+  return response({ok:true,data:{active:0,limit:50,available:50,unit:'distinct_counterparties',paused_counts:true}})
+ }
+ const {vm,scope}=setup()
+ assert.equal(calls,1)
+ imLinks.value=[{id:'link-capacity-new',active:true,tested:true,account_uid:'new-account',workbench_id:'wb-new'}] as any
+ await nextTick();await new Promise(r=>setTimeout(r,0))
+ assert.equal(vm.capacity.value?.active,0)
+ first(response({ok:true,data:{active:50,limit:50,available:0,unit:'distinct_counterparties',paused_counts:true}}))
+ await new Promise(r=>setTimeout(r,0))
+ assert.equal(vm.capacity.value?.active,0)
+ scope.stop()
+})

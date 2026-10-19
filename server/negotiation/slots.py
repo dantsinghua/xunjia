@@ -5,7 +5,7 @@ still require the joint semantic pass. Offsets always address the original text.
 """
 import re
 import unicodedata
-from .text_roles import non_trading_spans, numeric_spelling
+from .text_roles import non_trading_spans, numeric_spelling, valuation_offset_spans
 
 
 def extract_spans(text, codes=()):
@@ -18,8 +18,8 @@ def extract_spans(text, codes=()):
         if code:
             for match in re.finditer(re.escape(code), text, re.I):
                 add(match.start(), match.end(), 'BOND_CODE')
-    for match in re.finditer(r'(?:(?:中债|估值)\s*)?(?:加|减|[+＋－−-])\s*\d+(?:[.．]\d+)?\s*[bB][pP]', text):
-        add(match.start(), match.end(), 'BP')
+    for start, end, _value in valuation_offset_spans(text):
+        add(start, end, 'BP')
     code_spans=[(s['start'],s['end']) for s in spans if s['lexical']=='BOND_CODE']
     # A rating-shaped suffix overlapping a known code (SYN-A3.10) must not
     # swallow the following price. Keep both annotations, but protect the code.
@@ -79,8 +79,7 @@ def classify_spans(text, spans):
                 value = compact
         elif lexical == 'BP':
             roles = ['CHINABOND_BP']
-            amount = re.search(r'\d+(?:\.\d+)?',token)[0]
-            value = ('-' if re.search(r'减|-', token) else '') + amount
+            value = valuation_offset_spans(span['token'])[0][2]
         elif lexical == 'DIRECTION':
             left, right = text[:start], text[end:]
             compound = ((token == '出' and (re.match(r'差|现|版|来|去|口|席|生', right) or re.search(r'指|支|提|突|进|付$', left[-1:])))

@@ -29,6 +29,7 @@ class Engine:
         if context_policy_revision not in ('latest_quote_confirmation_v1','explicit_anchors_v0'):
             raise InvalidFact('Unknown context policy revision')
         self.context_policy_revision=context_policy_revision
+        self._reply_cursor=''  # Fair bounded pages even when 50 peers each discuss several bonds.
     @staticmethod
     def _merge_history(context, additions):
         targets={p['member_id']:p for p in context.get('members',[])}
@@ -887,7 +888,14 @@ class Engine:
         for t in threads:
             if self.analyze_thread(t['owner_id'],t['thread_id'],force=force) is not None:analyzed+=1
         with self.store.db.transaction(write=False) as tx:
-            members=tx.execute("SELECT p.member_id,g.owner_id FROM xj2_peer p JOIN xj2_group g ON g.group_id=p.group_id JOIN xj2_owner o ON o.owner_id=g.owner_id WHERE g.state='OPEN' AND g.send_allowed=1 AND p.send_allowed=1 AND o.send_allowed=1 ORDER BY p.member_id LIMIT 100").fetchall()
+            base=("SELECT p.member_id,g.owner_id FROM xj2_peer p JOIN xj2_group g ON g.group_id=p.group_id "
+                  "JOIN xj2_owner o ON o.owner_id=g.owner_id WHERE g.state='OPEN' AND g.archived=0 "
+                  "AND g.send_allowed=1 AND p.send_allowed=1 AND o.send_allowed=1 ")
+            cursor=getattr(self,'_reply_cursor','')
+            members=list(tx.execute(base+"AND p.member_id>? ORDER BY p.member_id LIMIT 100",(cursor,)).fetchall())
+            if len(members)<100 and cursor:
+                members.extend(tx.execute(base+"AND p.member_id<=? ORDER BY p.member_id LIMIT ?",(cursor,100-len(members))).fetchall())
+            if members:self._reply_cursor=members[-1]['member_id']
         decided=0
         for member in members:
             if self.decide_member(member['owner_id'],member['member_id']) is not None:decided+=1

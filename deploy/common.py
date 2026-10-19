@@ -146,6 +146,11 @@ def validate_config(values: dict, *, ready=False) -> list[str]:
     try:
         if not 1 <= int(values.get('XUNJIA_PORT', '18770')) <= 65535: raise ValueError
     except (ValueError, TypeError): raise DeployError('CONFIG_PORT_INVALID', 'XUNJIA_PORT') from None
+    try:
+        refresh = float(values.get('XUNJIA_VALUATION_REFRESH_SECONDS', '2'))
+        if not 1 <= refresh <= 30: raise ValueError
+    except (ValueError, TypeError):
+        raise DeployError('CONFIG_VALUATION_REFRESH_INVALID', 'XUNJIA_VALUATION_REFRESH_SECONDS must be 1..30') from None
     host = values.get('XUNJIA_HOST', '127.0.0.1')
     if not host or not re.fullmatch(r'[a-zA-Z0-9.:-]+', host): raise DeployError('CONFIG_HOST_INVALID')
     dify = values.get('XUNJIA_DIFY_URL', '')

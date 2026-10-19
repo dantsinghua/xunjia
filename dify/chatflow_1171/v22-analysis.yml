@@ -84,27 +84,38 @@ workflow:
           \ match.end(), 'TENOR'))\n    for match in re.finditer(r'(?<![a-zA-Z0-9])(?:(?:A|P|F)[-－][123]|(?:Aaa|Aa|Baa|Ba|Caa|Ca|AAA|AA|A|BBB|BB|B|CCC|CC|C|D)[123+－-]?)(?![a-zA-Z0-9])',\
           \ text):\n        if not trading_tail(match.end()):\n            result.append((match.start(), match.end(), 'RATING'))\n\
           \    return sorted(result)\n\n\ndef mask_non_trading(text):\n    masked = list(text)\n    for start, end, _role\
-          \ in non_trading_spans(text):\n        masked[start:end] = ' ' * (end - start)\n    return ''.join(masked)\n\n\"\
-          \"\"High-recall literal spans and a bounded, local batch of field classifiers.\n\nNo candidate is a fact: bond,\
-          \ speaker, side, negation and reference relationships\nstill require the joint semantic pass. Offsets always address\
-          \ the original text.\n\"\"\"\nimport re\nimport unicodedata\n\n\ndef extract_spans(text, codes=()):\n    spans =\
-          \ []\n    def add(start, end, lexical):\n        spans.append({'start': start, 'end': end, 'token': text[start:end],\
+          \ in non_trading_spans(text):\n        masked[start:end] = ' ' * (end - start)\n    return ''.join(masked)\n\ndef\
+          \ valuation_offset_spans(text):\n    \"\"\"Literal BP operands, including an omitted BP unit after 中债/估值.\n    No\
+          \ inferred price/side/intent: a valuation label plus an arithmetic operator\n    is required when the unit is absent.\
+          \ Naked negative yields remain yields.\n    Spans address original Unicode code points, so the same lexer is embedded\n\
+          \    in both Dify Code stages and used by server evidence validation.\n    \"\"\"\n    normalized = numeric_spelling(text).translate(str.maketrans('ＢＰｂｐ','BPbp'))\n\
+          \    operator = r'(?:上浮|下浮|加|减|[+-])'\n    amount = r'\\d+(?:\\.\\d+)?'\n    unit = r'(?:[bB][pP](?![a-zA-Z])|基点)'\n\
+          \    labelled = (r'(?:中债\\s*(?:估值)?|估值)\\s*(?:收益率\\s*)?'\n                + operator + r'\\s*' + amount + r'(?:\\\
+          s*' + unit + r')?')\n    # Explicit %, money and quantity units are not an omitted BP unit. The\n    # digit/dot\
+          \ guard also forbids regex backtracking to a shorter operand.\n    boundary = r'(?![\\d.a-zA-Z])(?!\\s*[%％万亿元份wW])'\n\
+          \    labelled += boundary\n    explicit = r'(?<![a-zA-Z0-9_.])(?:' + operator + r'\\s*)?' + amount + r'\\s*' + unit\n\
+          \    result = []\n    for match in re.finditer(labelled + '|' + explicit, normalized):\n        token = match[0]\n\
+          \        digits = re.search(amount, token)[0]\n        negative = re.search(r'下浮|减|-', token) is not None\n    \
+          \    result.append((match.start(), match.end(), ('-' if negative else '') + digits))\n    return result\n\n\"\"\"\
+          High-recall literal spans and a bounded, local batch of field classifiers.\n\nNo candidate is a fact: bond, speaker,\
+          \ side, negation and reference relationships\nstill require the joint semantic pass. Offsets always address the\
+          \ original text.\n\"\"\"\nimport re\nimport unicodedata\n\n\ndef extract_spans(text, codes=()):\n    spans = []\n\
+          \    def add(start, end, lexical):\n        spans.append({'start': start, 'end': end, 'token': text[start:end],\
           \ 'lexical': lexical})\n    for start, end, role in non_trading_spans(text):\n        add(start, end, role)\n  \
           \  for code in sorted(set(codes), key=lambda x: (-len(x), x)):\n        if code:\n            for match in re.finditer(re.escape(code),\
-          \ text, re.I):\n                add(match.start(), match.end(), 'BOND_CODE')\n    for match in re.finditer(r'(?:(?:中债|估值)\\\
-          s*)?(?:加|减|[+＋－−-])\\s*\\d+(?:[.．]\\d+)?\\s*[bB][pP]', text):\n        add(match.start(), match.end(), 'BP')\n \
-          \   code_spans=[(s['start'],s['end']) for s in spans if s['lexical']=='BOND_CODE']\n    # A rating-shaped suffix\
-          \ overlapping a known code (SYN-A3.10) must not\n    # swallow the following price. Keep both annotations, but protect\
-          \ the code.\n    protected = [(s['start'],s['end']) for s in spans if s['lexical']!='RATING'\n                 or\
-          \ not any(a<s['end'] and s['start']<b for a,b in code_spans)]\n    for match in re.finditer(r'(?<![\\d.．])[-−－+＋]?\\\
-          d+(?:[.．]\\d+)?(?:\\s*(?:亿|万|[wW](?![a-zA-Z])|[%％]|元|份))?', text):\n        if not any(a < match.end() and match.start()\
-          \ < b for a,b in protected):\n            add(match.start(), match.end(), 'NUMBER')\n    words = {\n        'DIRECTION':\
-          \ r'\\b(?:bid|ofr|offer)\\b|收|出|买|卖',\n        'NEGATION': r'不是|不再|不|没|无',\n        'REFERENCE': r'刚才|那只|那个|原价|之前|按你|上次|这只',\n\
-          \        'CORRECTION': r'改|更正|写错|说错',\n        'WITHDRAWAL': r'撤回|撤掉|取消|不出了|不收了',\n        'QUESTION': r'吗|么|[?？]|多少|是否',\n\
-          \        'CONDITION': r'如果|只要|条件|否则|的话',\n        'NEGOTIATION_SPACE': r'还能谈|还可以谈|不能再|最终|到头|还可|实价|意向',\n    }\n\
-          \    for lexical, pattern in words.items():\n        for match in re.finditer(pattern, text, re.I):\n          \
-          \  add(match.start(), match.end(), lexical)\n    unique = {(s['start'],s['end'],s['lexical']):s for s in spans}\n\
-          \    return sorted(unique.values(), key=lambda s:(s['start'],s['end'],s['lexical']))\n\n\ndef classify_spans(text,\
+          \ text, re.I):\n                add(match.start(), match.end(), 'BOND_CODE')\n    for start, end, _value in valuation_offset_spans(text):\n\
+          \        add(start, end, 'BP')\n    code_spans=[(s['start'],s['end']) for s in spans if s['lexical']=='BOND_CODE']\n\
+          \    # A rating-shaped suffix overlapping a known code (SYN-A3.10) must not\n    # swallow the following price.\
+          \ Keep both annotations, but protect the code.\n    protected = [(s['start'],s['end']) for s in spans if s['lexical']!='RATING'\n\
+          \                 or not any(a<s['end'] and s['start']<b for a,b in code_spans)]\n    for match in re.finditer(r'(?<![\\\
+          d.．])[-−－+＋]?\\d+(?:[.．]\\d+)?(?:\\s*(?:亿|万|[wW](?![a-zA-Z])|[%％]|元|份))?', text):\n        if not any(a < match.end()\
+          \ and match.start() < b for a,b in protected):\n            add(match.start(), match.end(), 'NUMBER')\n    words\
+          \ = {\n        'DIRECTION': r'\\b(?:bid|ofr|offer)\\b|收|出|买|卖',\n        'NEGATION': r'不是|不再|不|没|无',\n        'REFERENCE':\
+          \ r'刚才|那只|那个|原价|之前|按你|上次|这只',\n        'CORRECTION': r'改|更正|写错|说错',\n        'WITHDRAWAL': r'撤回|撤掉|取消|不出了|不收了',\n\
+          \        'QUESTION': r'吗|么|[?？]|多少|是否',\n        'CONDITION': r'如果|只要|条件|否则|的话',\n        'NEGOTIATION_SPACE': r'还能谈|还可以谈|不能再|最终|到头|还可|实价|意向',\n\
+          \    }\n    for lexical, pattern in words.items():\n        for match in re.finditer(pattern, text, re.I):\n   \
+          \         add(match.start(), match.end(), lexical)\n    unique = {(s['start'],s['end'],s['lexical']):s for s in\
+          \ spans}\n    return sorted(unique.values(), key=lambda s:(s['start'],s['end'],s['lexical']))\n\n\ndef classify_spans(text,\
           \ spans):\n    \"\"\"Equivalent batch classification; no per-token threads or network calls.\"\"\"\n    result =\
           \ []\n    for span in spans:\n        start, end = span['start'], span['end']\n        if span['token'] != text[start:end]:\n\
           \            raise ValueError('Candidate no longer matches immutable source')\n        token = unicodedata.normalize('NFKC',\
@@ -119,24 +130,24 @@ workflow:
           \         elif '.' in compact or compact.startswith('-'):\n                    roles = ['YIELD']\n             \
           \   elif int(compact) >= 100:\n                    roles = ['QUANTITY']\n                else:\n               \
           \     roles = ['YIELD','QUANTITY']\n                value = compact\n        elif lexical == 'BP':\n           \
-          \ roles = ['CHINABOND_BP']\n            amount = re.search(r'\\d+(?:\\.\\d+)?',token)[0]\n            value = ('-'\
-          \ if re.search(r'减|-', token) else '') + amount\n        elif lexical == 'DIRECTION':\n            left, right =\
-          \ text[:start], text[end:]\n            compound = ((token == '出' and (re.match(r'差|现|版|来|去|口|席|生', right) or re.search(r'指|支|提|突|进|付$',\
-          \ left[-1:])))\n                        or (token == '收' and re.match(r'到|入|益|集|据|藏|获', right))\n              \
-          \          or (token == '买' and re.match(r'方|家', right))\n                        or (token == '卖' and re.match(r'方|家',\
-          \ right)))\n            roles = ['NON_DIRECTION'] if compound else ['SIDE_BID' if token.lower() in ('收','买','bid')\
-          \ else 'SIDE_OFR']\n        else:\n            roles = [lexical]\n        result.append({**span, 'roles': roles,\
-          \ 'value': value})\n    return result\n\n\ndef collect_candidates(context):\n    \"\"\"Stable IDs within one immutable\
-          \ context, retaining message revision.\"\"\"\n    messages = {}\n    members = context.get('members', [])\n    for\
-          \ member in members:\n        for row in member.get('context', []):\n            messages[row['message_id']] = row\n\
-          \    for row in context.get('context', []) + context.get('correction_context', []) + context.get('messages', []):\n\
-          \        messages[row['message_id']] = row\n    codes = [m.get('bond_code','') for m in members] + [context.get('bond_code','')]\n\
-          \    result = []\n    for message in messages.values():\n        text = message['text']\n        for span in classify_spans(text,\
-          \ extract_spans(text, codes)):\n            result.append({**span, 'id':'s'+str(len(result)), 'message_id':message['message_id'],\n\
-          \                           'revision':message.get('ingest_revision',0), 'direction':message.get('direction')})\n\
-          \    return result\n\n\ndef literal_member_hints(context, candidates):\n    \"\"\"Index an explicit same-clause\
-          \ bond label, never infer a speaker or fact.\n\n    Unnamed references and multiple labels stay ambiguous. All candidates\
-          \ and\n    complete source messages remain available to the joint semantic pass.\n    \"\"\"\n    members = context.get('members',\
+          \ roles = ['CHINABOND_BP']\n            value = valuation_offset_spans(span['token'])[0][2]\n        elif lexical\
+          \ == 'DIRECTION':\n            left, right = text[:start], text[end:]\n            compound = ((token == '出' and\
+          \ (re.match(r'差|现|版|来|去|口|席|生', right) or re.search(r'指|支|提|突|进|付$', left[-1:])))\n                        or (token\
+          \ == '收' and re.match(r'到|入|益|集|据|藏|获', right))\n                        or (token == '买' and re.match(r'方|家', right))\n\
+          \                        or (token == '卖' and re.match(r'方|家', right)))\n            roles = ['NON_DIRECTION'] if\
+          \ compound else ['SIDE_BID' if token.lower() in ('收','买','bid') else 'SIDE_OFR']\n        else:\n            roles\
+          \ = [lexical]\n        result.append({**span, 'roles': roles, 'value': value})\n    return result\n\n\ndef collect_candidates(context):\n\
+          \    \"\"\"Stable IDs within one immutable context, retaining message revision.\"\"\"\n    messages = {}\n    members\
+          \ = context.get('members', [])\n    for member in members:\n        for row in member.get('context', []):\n    \
+          \        messages[row['message_id']] = row\n    for row in context.get('context', []) + context.get('correction_context',\
+          \ []) + context.get('messages', []):\n        messages[row['message_id']] = row\n    codes = [m.get('bond_code','')\
+          \ for m in members] + [context.get('bond_code','')]\n    result = []\n    for message in messages.values():\n  \
+          \      text = message['text']\n        for span in classify_spans(text, extract_spans(text, codes)):\n         \
+          \   result.append({**span, 'id':'s'+str(len(result)), 'message_id':message['message_id'],\n                    \
+          \       'revision':message.get('ingest_revision',0), 'direction':message.get('direction')})\n    return result\n\
+          \n\ndef literal_member_hints(context, candidates):\n    \"\"\"Index an explicit same-clause bond label, never infer\
+          \ a speaker or fact.\n\n    Unnamed references and multiple labels stay ambiguous. All candidates and\n    complete\
+          \ source messages remain available to the joint semantic pass.\n    \"\"\"\n    members = context.get('members',\
           \ [])\n    messages = {row['message_id']: row for member in members for row in member.get('context', [])}\n    messages.update({row['message_id']:\
           \ row for row in context.get('messages', [])})\n    hints = {}\n    numeric = {'YIELD', 'YIELD_SUFFIX', 'CHINABOND_BP',\
           \ 'NET_PRICE', 'DIRTY_PRICE', 'QUANTITY'}\n    for candidate in candidates:\n        if not numeric.intersection(candidate['roles']):\n\
@@ -405,7 +416,7 @@ workflow:
           n本轮明确给出的价量选当前入站候选，历史只帮助理解指代，不能覆盖当前新量。例如历史“3.04出500万”、当前“04出1000万”：price选当前04的YIELD_SUFFIX候选，volume_wan选当前1000万；代码恢复完整价，不选历史3.04和500万代替。\\\
           nside=对手bid收/ofr出，与我方BUY/SELL不同。slots含本轮改变的price、volume_wan，值为已有候选ID，如{\"price\":\"s12\",\"volume_wan\":\"s14\"\
           }。本轮净价/全价同时明确结算时再加settlement，选择当前入站DATE或SETTLEMENT候选ID；T+0/T+1交程序查实际日历，不能重抄或猜日期，不把评级/到期日当结算。程序按该字段支持的唯一候选类型取原值；类型有歧义时才用{\"\
-          candidate_id\":\"s12\",\"role\":\"候选已有role\"}。不写kind/value/basis，不把钱数/日期/代码当价量。20出2000的20是尾数，20%是完整收益率；净全价、BP按其已有类型，数学交代码。\\\
+          candidate_id\":\"s12\",\"role\":\"候选已有role\"}。不写kind/value/basis，不把钱数/日期/代码当价量。20出2000的20是尾数，20%是完整收益率；净全价、BP按其已有类型，数学交代码。“估值-5收”“中债加5出”省略BP仍选CHINABOND_BP候选，不选历史绝对价，不把-5存为-5%的收益率。\\\
           n仅补结算是独立意图：当前只答T+0/T+1/具体结算日且member.settlement_question提供真实已发同版本问句时，写{\"member_id\":\"实际成员\",\"source_ids\":[\"\
           当前入站ID\"],\"side\":\"问句相关边\",\"slots\":{\"settlement\":\"当前日期候选ID\"},\"meaning\":{\"intent\":\"SETTLEMENT\",\"reason\"\
           :\"本人回复结算\"}}。此形不写price、volume_wan、validity或negotiation_space；代码从问句绑定取原现金价，只补条件、不重新确认价量。不能复制历史price候选代替该意图。没有有效问句、跨日、未能确认回答哪只券时保留缺口，不凭T+1确认旧价。完整当前现金报价并同时给结算仍用普通QUOTE形。\\\
@@ -548,27 +559,38 @@ workflow:
           \ match.end(), 'TENOR'))\n    for match in re.finditer(r'(?<![a-zA-Z0-9])(?:(?:A|P|F)[-－][123]|(?:Aaa|Aa|Baa|Ba|Caa|Ca|AAA|AA|A|BBB|BB|B|CCC|CC|C|D)[123+－-]?)(?![a-zA-Z0-9])',\
           \ text):\n        if not trading_tail(match.end()):\n            result.append((match.start(), match.end(), 'RATING'))\n\
           \    return sorted(result)\n\n\ndef mask_non_trading(text):\n    masked = list(text)\n    for start, end, _role\
-          \ in non_trading_spans(text):\n        masked[start:end] = ' ' * (end - start)\n    return ''.join(masked)\n\n\"\
-          \"\"High-recall literal spans and a bounded, local batch of field classifiers.\n\nNo candidate is a fact: bond,\
-          \ speaker, side, negation and reference relationships\nstill require the joint semantic pass. Offsets always address\
-          \ the original text.\n\"\"\"\nimport re\nimport unicodedata\n\n\ndef extract_spans(text, codes=()):\n    spans =\
-          \ []\n    def add(start, end, lexical):\n        spans.append({'start': start, 'end': end, 'token': text[start:end],\
+          \ in non_trading_spans(text):\n        masked[start:end] = ' ' * (end - start)\n    return ''.join(masked)\n\ndef\
+          \ valuation_offset_spans(text):\n    \"\"\"Literal BP operands, including an omitted BP unit after 中债/估值.\n    No\
+          \ inferred price/side/intent: a valuation label plus an arithmetic operator\n    is required when the unit is absent.\
+          \ Naked negative yields remain yields.\n    Spans address original Unicode code points, so the same lexer is embedded\n\
+          \    in both Dify Code stages and used by server evidence validation.\n    \"\"\"\n    normalized = numeric_spelling(text).translate(str.maketrans('ＢＰｂｐ','BPbp'))\n\
+          \    operator = r'(?:上浮|下浮|加|减|[+-])'\n    amount = r'\\d+(?:\\.\\d+)?'\n    unit = r'(?:[bB][pP](?![a-zA-Z])|基点)'\n\
+          \    labelled = (r'(?:中债\\s*(?:估值)?|估值)\\s*(?:收益率\\s*)?'\n                + operator + r'\\s*' + amount + r'(?:\\\
+          s*' + unit + r')?')\n    # Explicit %, money and quantity units are not an omitted BP unit. The\n    # digit/dot\
+          \ guard also forbids regex backtracking to a shorter operand.\n    boundary = r'(?![\\d.a-zA-Z])(?!\\s*[%％万亿元份wW])'\n\
+          \    labelled += boundary\n    explicit = r'(?<![a-zA-Z0-9_.])(?:' + operator + r'\\s*)?' + amount + r'\\s*' + unit\n\
+          \    result = []\n    for match in re.finditer(labelled + '|' + explicit, normalized):\n        token = match[0]\n\
+          \        digits = re.search(amount, token)[0]\n        negative = re.search(r'下浮|减|-', token) is not None\n    \
+          \    result.append((match.start(), match.end(), ('-' if negative else '') + digits))\n    return result\n\n\"\"\"\
+          High-recall literal spans and a bounded, local batch of field classifiers.\n\nNo candidate is a fact: bond, speaker,\
+          \ side, negation and reference relationships\nstill require the joint semantic pass. Offsets always address the\
+          \ original text.\n\"\"\"\nimport re\nimport unicodedata\n\n\ndef extract_spans(text, codes=()):\n    spans = []\n\
+          \    def add(start, end, lexical):\n        spans.append({'start': start, 'end': end, 'token': text[start:end],\
           \ 'lexical': lexical})\n    for start, end, role in non_trading_spans(text):\n        add(start, end, role)\n  \
           \  for code in sorted(set(codes), key=lambda x: (-len(x), x)):\n        if code:\n            for match in re.finditer(re.escape(code),\
-          \ text, re.I):\n                add(match.start(), match.end(), 'BOND_CODE')\n    for match in re.finditer(r'(?:(?:中债|估值)\\\
-          s*)?(?:加|减|[+＋－−-])\\s*\\d+(?:[.．]\\d+)?\\s*[bB][pP]', text):\n        add(match.start(), match.end(), 'BP')\n \
-          \   code_spans=[(s['start'],s['end']) for s in spans if s['lexical']=='BOND_CODE']\n    # A rating-shaped suffix\
-          \ overlapping a known code (SYN-A3.10) must not\n    # swallow the following price. Keep both annotations, but protect\
-          \ the code.\n    protected = [(s['start'],s['end']) for s in spans if s['lexical']!='RATING'\n                 or\
-          \ not any(a<s['end'] and s['start']<b for a,b in code_spans)]\n    for match in re.finditer(r'(?<![\\d.．])[-−－+＋]?\\\
-          d+(?:[.．]\\d+)?(?:\\s*(?:亿|万|[wW](?![a-zA-Z])|[%％]|元|份))?', text):\n        if not any(a < match.end() and match.start()\
-          \ < b for a,b in protected):\n            add(match.start(), match.end(), 'NUMBER')\n    words = {\n        'DIRECTION':\
-          \ r'\\b(?:bid|ofr|offer)\\b|收|出|买|卖',\n        'NEGATION': r'不是|不再|不|没|无',\n        'REFERENCE': r'刚才|那只|那个|原价|之前|按你|上次|这只',\n\
-          \        'CORRECTION': r'改|更正|写错|说错',\n        'WITHDRAWAL': r'撤回|撤掉|取消|不出了|不收了',\n        'QUESTION': r'吗|么|[?？]|多少|是否',\n\
-          \        'CONDITION': r'如果|只要|条件|否则|的话',\n        'NEGOTIATION_SPACE': r'还能谈|还可以谈|不能再|最终|到头|还可|实价|意向',\n    }\n\
-          \    for lexical, pattern in words.items():\n        for match in re.finditer(pattern, text, re.I):\n          \
-          \  add(match.start(), match.end(), lexical)\n    unique = {(s['start'],s['end'],s['lexical']):s for s in spans}\n\
-          \    return sorted(unique.values(), key=lambda s:(s['start'],s['end'],s['lexical']))\n\n\ndef classify_spans(text,\
+          \ text, re.I):\n                add(match.start(), match.end(), 'BOND_CODE')\n    for start, end, _value in valuation_offset_spans(text):\n\
+          \        add(start, end, 'BP')\n    code_spans=[(s['start'],s['end']) for s in spans if s['lexical']=='BOND_CODE']\n\
+          \    # A rating-shaped suffix overlapping a known code (SYN-A3.10) must not\n    # swallow the following price.\
+          \ Keep both annotations, but protect the code.\n    protected = [(s['start'],s['end']) for s in spans if s['lexical']!='RATING'\n\
+          \                 or not any(a<s['end'] and s['start']<b for a,b in code_spans)]\n    for match in re.finditer(r'(?<![\\\
+          d.．])[-−－+＋]?\\d+(?:[.．]\\d+)?(?:\\s*(?:亿|万|[wW](?![a-zA-Z])|[%％]|元|份))?', text):\n        if not any(a < match.end()\
+          \ and match.start() < b for a,b in protected):\n            add(match.start(), match.end(), 'NUMBER')\n    words\
+          \ = {\n        'DIRECTION': r'\\b(?:bid|ofr|offer)\\b|收|出|买|卖',\n        'NEGATION': r'不是|不再|不|没|无',\n        'REFERENCE':\
+          \ r'刚才|那只|那个|原价|之前|按你|上次|这只',\n        'CORRECTION': r'改|更正|写错|说错',\n        'WITHDRAWAL': r'撤回|撤掉|取消|不出了|不收了',\n\
+          \        'QUESTION': r'吗|么|[?？]|多少|是否',\n        'CONDITION': r'如果|只要|条件|否则|的话',\n        'NEGOTIATION_SPACE': r'还能谈|还可以谈|不能再|最终|到头|还可|实价|意向',\n\
+          \    }\n    for lexical, pattern in words.items():\n        for match in re.finditer(pattern, text, re.I):\n   \
+          \         add(match.start(), match.end(), lexical)\n    unique = {(s['start'],s['end'],s['lexical']):s for s in\
+          \ spans}\n    return sorted(unique.values(), key=lambda s:(s['start'],s['end'],s['lexical']))\n\n\ndef classify_spans(text,\
           \ spans):\n    \"\"\"Equivalent batch classification; no per-token threads or network calls.\"\"\"\n    result =\
           \ []\n    for span in spans:\n        start, end = span['start'], span['end']\n        if span['token'] != text[start:end]:\n\
           \            raise ValueError('Candidate no longer matches immutable source')\n        token = unicodedata.normalize('NFKC',\
@@ -583,24 +605,24 @@ workflow:
           \         elif '.' in compact or compact.startswith('-'):\n                    roles = ['YIELD']\n             \
           \   elif int(compact) >= 100:\n                    roles = ['QUANTITY']\n                else:\n               \
           \     roles = ['YIELD','QUANTITY']\n                value = compact\n        elif lexical == 'BP':\n           \
-          \ roles = ['CHINABOND_BP']\n            amount = re.search(r'\\d+(?:\\.\\d+)?',token)[0]\n            value = ('-'\
-          \ if re.search(r'减|-', token) else '') + amount\n        elif lexical == 'DIRECTION':\n            left, right =\
-          \ text[:start], text[end:]\n            compound = ((token == '出' and (re.match(r'差|现|版|来|去|口|席|生', right) or re.search(r'指|支|提|突|进|付$',\
-          \ left[-1:])))\n                        or (token == '收' and re.match(r'到|入|益|集|据|藏|获', right))\n              \
-          \          or (token == '买' and re.match(r'方|家', right))\n                        or (token == '卖' and re.match(r'方|家',\
-          \ right)))\n            roles = ['NON_DIRECTION'] if compound else ['SIDE_BID' if token.lower() in ('收','买','bid')\
-          \ else 'SIDE_OFR']\n        else:\n            roles = [lexical]\n        result.append({**span, 'roles': roles,\
-          \ 'value': value})\n    return result\n\n\ndef collect_candidates(context):\n    \"\"\"Stable IDs within one immutable\
-          \ context, retaining message revision.\"\"\"\n    messages = {}\n    members = context.get('members', [])\n    for\
-          \ member in members:\n        for row in member.get('context', []):\n            messages[row['message_id']] = row\n\
-          \    for row in context.get('context', []) + context.get('correction_context', []) + context.get('messages', []):\n\
-          \        messages[row['message_id']] = row\n    codes = [m.get('bond_code','') for m in members] + [context.get('bond_code','')]\n\
-          \    result = []\n    for message in messages.values():\n        text = message['text']\n        for span in classify_spans(text,\
-          \ extract_spans(text, codes)):\n            result.append({**span, 'id':'s'+str(len(result)), 'message_id':message['message_id'],\n\
-          \                           'revision':message.get('ingest_revision',0), 'direction':message.get('direction')})\n\
-          \    return result\n\n\ndef literal_member_hints(context, candidates):\n    \"\"\"Index an explicit same-clause\
-          \ bond label, never infer a speaker or fact.\n\n    Unnamed references and multiple labels stay ambiguous. All candidates\
-          \ and\n    complete source messages remain available to the joint semantic pass.\n    \"\"\"\n    members = context.get('members',\
+          \ roles = ['CHINABOND_BP']\n            value = valuation_offset_spans(span['token'])[0][2]\n        elif lexical\
+          \ == 'DIRECTION':\n            left, right = text[:start], text[end:]\n            compound = ((token == '出' and\
+          \ (re.match(r'差|现|版|来|去|口|席|生', right) or re.search(r'指|支|提|突|进|付$', left[-1:])))\n                        or (token\
+          \ == '收' and re.match(r'到|入|益|集|据|藏|获', right))\n                        or (token == '买' and re.match(r'方|家', right))\n\
+          \                        or (token == '卖' and re.match(r'方|家', right)))\n            roles = ['NON_DIRECTION'] if\
+          \ compound else ['SIDE_BID' if token.lower() in ('收','买','bid') else 'SIDE_OFR']\n        else:\n            roles\
+          \ = [lexical]\n        result.append({**span, 'roles': roles, 'value': value})\n    return result\n\n\ndef collect_candidates(context):\n\
+          \    \"\"\"Stable IDs within one immutable context, retaining message revision.\"\"\"\n    messages = {}\n    members\
+          \ = context.get('members', [])\n    for member in members:\n        for row in member.get('context', []):\n    \
+          \        messages[row['message_id']] = row\n    for row in context.get('context', []) + context.get('correction_context',\
+          \ []) + context.get('messages', []):\n        messages[row['message_id']] = row\n    codes = [m.get('bond_code','')\
+          \ for m in members] + [context.get('bond_code','')]\n    result = []\n    for message in messages.values():\n  \
+          \      text = message['text']\n        for span in classify_spans(text, extract_spans(text, codes)):\n         \
+          \   result.append({**span, 'id':'s'+str(len(result)), 'message_id':message['message_id'],\n                    \
+          \       'revision':message.get('ingest_revision',0), 'direction':message.get('direction')})\n    return result\n\
+          \n\ndef literal_member_hints(context, candidates):\n    \"\"\"Index an explicit same-clause bond label, never infer\
+          \ a speaker or fact.\n\n    Unnamed references and multiple labels stay ambiguous. All candidates and\n    complete\
+          \ source messages remain available to the joint semantic pass.\n    \"\"\"\n    members = context.get('members',\
           \ [])\n    messages = {row['message_id']: row for member in members for row in member.get('context', [])}\n    messages.update({row['message_id']:\
           \ row for row in context.get('messages', [])})\n    hints = {}\n    numeric = {'YIELD', 'YIELD_SUFFIX', 'CHINABOND_BP',\
           \ 'NET_PRICE', 'DIRTY_PRICE', 'QUANTITY'}\n    for candidate in candidates:\n        if not numeric.intersection(candidate['roles']):\n\

@@ -63,3 +63,29 @@ def mask_non_trading(text):
     for start, end, _role in non_trading_spans(text):
         masked[start:end] = ' ' * (end - start)
     return ''.join(masked)
+
+def valuation_offset_spans(text):
+    """Literal BP operands, including an omitted BP unit after 中债/估值.
+    No inferred price/side/intent: a valuation label plus an arithmetic operator
+    is required when the unit is absent. Naked negative yields remain yields.
+    Spans address original Unicode code points, so the same lexer is embedded
+    in both Dify Code stages and used by server evidence validation.
+    """
+    normalized = numeric_spelling(text).translate(str.maketrans('ＢＰｂｐ','BPbp'))
+    operator = r'(?:上浮|下浮|加|减|[+-])'
+    amount = r'\d+(?:\.\d+)?'
+    unit = r'(?:[bB][pP](?![a-zA-Z])|基点)'
+    labelled = (r'(?:中债\s*(?:估值)?|估值)\s*(?:收益率\s*)?'
+                + operator + r'\s*' + amount + r'(?:\s*' + unit + r')?')
+    # Explicit %, money and quantity units are not an omitted BP unit. The
+    # digit/dot guard also forbids regex backtracking to a shorter operand.
+    boundary = r'(?![\d.a-zA-Z])(?!\s*[%％万亿元份wW])'
+    labelled += boundary
+    explicit = r'(?<![a-zA-Z0-9_.])(?:' + operator + r'\s*)?' + amount + r'\s*' + unit
+    result = []
+    for match in re.finditer(labelled + '|' + explicit, normalized):
+        token = match[0]
+        digits = re.search(amount, token)[0]
+        negative = re.search(r'下浮|减|-', token) is not None
+        result.append((match.start(), match.end(), ('-' if negative else '') + digits))
+    return result

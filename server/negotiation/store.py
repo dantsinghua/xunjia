@@ -12,6 +12,8 @@ import math
 import re
 import time
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from ..db import Database
 from .facts import Quote, apply_patch, group_summary
 from .prices import InvalidFact, LimitPolicy, Price, StaleDecision, Valuation, iso_day, number
@@ -195,8 +197,34 @@ class Store:
         identity(peer_uid, "counterparty")
         with self.write(owner) as tx:
             return self._add_member(tx,owner,group_id,account_uid=account_uid,peer_uid=peer_uid)
+    MAX_ACTIVE_COUNTERPARTIES = 50
+    def _active_peers(self, tx, owner, account_uid):
+        # A pause keeps analysis alive and therefore keeps the slot. Only a
+        # closed/handoff/archived final group releases that peer's last slot.
+        return {row['peer_uid'] for row in tx.execute("""SELECT DISTINCT t.peer_uid
+            FROM xj2_thread t JOIN xj2_peer p ON p.thread_id=t.thread_id
+            JOIN xj2_group g ON g.group_id=p.group_id
+            WHERE t.owner_id=? AND t.account_uid=? AND g.owner_id=?
+            AND g.state='OPEN' AND g.archived=0""",(owner,account_uid,owner)).fetchall()}
+    def _ensure_peer_capacity(self, tx, owner, account_uid, incoming):
+        existing = self._active_peers(tx, owner, account_uid)
+        requested = set(incoming)
+        total = len(existing | requested)
+        if total > self.MAX_ACTIVE_COUNTERPARTIES:
+            raise InvalidFact('ACTIVE_COUNTERPARTY_LIMIT: 同一企点账号最多维持50个活跃对手；'
+                              f'当前{len(existing)}人，本次新增{len(requested-existing)}人。'
+                              '同一对手多券只计一人；暂停仍占名额，请先完成人工交付或归档。')
+        return {'active':len(existing),'requested_total':total,'limit':self.MAX_ACTIVE_COUNTERPARTIES}
+    def counterparty_capacity(self, owner, account_uid):
+        with self.db.transaction(write=False) as tx:
+            active = len(self._active_peers(tx,owner,account_uid))
+        return {'active':active,'limit':self.MAX_ACTIVE_COUNTERPARTIES,
+                'available':max(0,self.MAX_ACTIVE_COUNTERPARTIES-active),
+                'unit':'distinct_counterparties','paused_counts':True}
     def _add_member(self,tx,owner,group_id,*,account_uid,peer_uid):
-        self._group(tx, owner, group_id)
+        group = self._group(tx, owner, group_id)
+        if group["state"] == "OPEN" and not group["archived"]:
+            self._ensure_peer_capacity(tx,owner,account_uid,[peer_uid])
         thread = tx.execute("SELECT thread_id FROM xj2_thread WHERE owner_id=? AND account_uid=? AND peer_uid=?", (owner, account_uid, peer_uid)).fetchone()
         if thread:
             tid = thread["thread_id"]
@@ -390,11 +418,15 @@ class Store:
                 or quote.price.kind not in ('NET_PRICE','DIRTY_PRICE') or quote.validity!='ACTIVE'
                 or quote.assertion!='QUOTE' or quote.confirmed_day!=group['trade_day']):
             return None
-        # A bounded command index is sufficient; exhaustion remains a gap, not
-        # permission to pick an older question or retrieve older chat messages.
-        rows=[dict(row) for row in tx.execute("SELECT * FROM xj2_command WHERE thread_id=? ORDER BY created_at DESC,command_id DESC LIMIT 100",
-                                            (member['thread_id'],)).fetchall()]
-        if len(rows)==100:return None
+        # Search the current-day actual sends and unresolved executions only.
+        # Cancelled/failed history cannot hide a current question at row 100.
+        # Retain competing live questions: a bare T+1 must still be unambiguous.
+        start = datetime.fromisoformat(group['trade_day']).replace(tzinfo=ZoneInfo('Asia/Shanghai')).timestamp()
+        rows=[dict(row) for row in tx.execute("""SELECT * FROM xj2_command
+            WHERE thread_id=? AND (state IN ('PENDING','UNKNOWN')
+              OR (state='SENT' AND sent_at>=? AND sent_at<?))
+            ORDER BY created_at DESC,command_id DESC""",
+            (member['thread_id'],start,start+86400)).fetchall()]
         target={'side':side,'quote_revision':quote.revision}
         candidates=[]; live=[]
         for row in rows:
@@ -775,6 +807,33 @@ class Store:
                 result['public_tool_results']=public_tool_results
             tx.execute("UPDATE xj2_analysis SET state='COMMITTED',result_json=?,committed_at=? WHERE analysis_id=?", (encoded(result), self.clock(), analysis_id))
             return result
+    def refresh_valuation(self, owner, group_id, *, valuation, expected_valuation_date, expected_policy_version=None):
+        """Same-day recovery/update of OUR BP boundary. Never edits peer facts.
+        Repeated equal economics is a no-op. A competing refresh/round may not
+        be overwritten by a snapshot fetched before that transaction committed.
+        """
+        with self.write(owner) as tx:
+            group=self._group(tx,owner,group_id)
+            policy=LimitPolicy(**json.loads(group['policy_json']))
+            if group['archived'] or policy.mode!='CHINABOND_BP':return False
+            if expected_policy_version is not None and group['policy_version']!=expected_policy_version:return False
+            boundary=policy.resolve(bond_code=group['bond_code'],valuation=valuation,expected_valuation_date=expected_valuation_date)
+            if boundary is None:raise InvalidFact('A verified latest valuation is required for refresh')
+            if valuation.trading_date>group['trade_day']:raise InvalidFact('Valuation is newer than the group day')
+            previous=json.loads(group['valuation_json'])
+            if previous and previous['trading_date']>valuation.trading_date:return False
+            if (json.loads(group['boundary_json'])==boundary and previous
+                    and previous['trading_date']==valuation.trading_date
+                    and number(previous['yield_pct'])==number(valuation.yield_pct)):
+                return False  # A new quote carrying identical valuation is not a new trading decision.
+            tx.execute('UPDATE xj2_group SET boundary_json=?,valuation_json=?,policy_version=policy_version+1 WHERE group_id=?',
+                       (encoded(boundary),encoded(asdict(valuation)),group_id))
+            self._cancel_commands(tx,group_id=group_id,reason='CHINABOND_VALUATION_REFRESHED')
+            self._refresh_groups(tx,owner,[group_id])
+            tx.execute('INSERT INTO xj2_audit(audit_id,owner_id,kind,entity_id,created_at,data_json) VALUES(?,?,?,?,?,?)',
+                (new_id(),owner,'valuation_refreshed',group_id,self.clock(),encoded({'previous':previous,
+                'valuation':asdict(valuation),'boundary':boundary})))
+            return True
     def rollover(self, owner, group_id, *, trade_day, valuation=None, expected_valuation_date=None):
         """All peers need actual reconfirmation; market data cannot substitute."""
         iso_day(trade_day)

@@ -33,6 +33,10 @@ export interface RfqPolicy {
   code: string; name: string; our_side: 'BUY' | 'SELL'; volume_wan: string
   opening_yield_pct: string; limit_yield_pct: string; step_bp: string
 }
+export interface CounterpartyCapacity {
+  active: number; limit: number; available: number
+  unit: 'distinct_counterparties'; paused_counts: boolean
+}
 export interface RfqPreview {
   batch_id: string; version: number; status: string
   items: (RfqPolicy & { peer_id: string; text: string })[]
@@ -467,6 +471,7 @@ export const api = {
   imActivate: (id: string, version?:number) => jpost('/api/im/links/' + id + '/activate', {expected_version:version}),
   imContacts: () => jget<{ ok: boolean; hint?: string; data: Dict }>('/api/im/contacts'),
   imSend: (uin: string, text: string, requestId: string = crypto.randomUUID()) => jpost<{ ok: boolean; blocked?: boolean; hint?: string; data: Dict }>('/api/im/send', { uin, text, idempotency_key: requestId, request_id:requestId }),
+  negotiationCapacity: () => jget<Resp<CounterpartyCapacity>>('/api/negotiation/capacity'),
   imRfqPreview: (items: (RfqPolicy & {peer_ids:string[]})[], requestId: string) =>
     jpost<Resp<RfqPreview>>('/api/im/rfq/preview', {request_id:requestId, items}),
   imRfqSend: (batchId: string, version: number, requestId: string) =>

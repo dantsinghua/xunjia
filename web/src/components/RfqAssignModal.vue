@@ -2,7 +2,7 @@
 /** 开始询价：左侧填每只债，右侧勾当前号的好友和组织架构。确认后才发。 */
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { App } from 'ant-design-vue'
-import { api, type RfqPolicy, type RfqPreview, type RfqSubmission } from '../api'
+import { api, type RfqPolicy, type RfqPreview, type RfqSubmission, type CounterpartyCapacity } from '../api'
 import type { BondRow, Strategy } from '../lib/types'
 import { useBodyScrollLock } from '../lib/useModal'
 import {
@@ -124,7 +124,24 @@ watch(() => props.open, (on) => {
 
 const activeDraft = computed(() => drafts.value[active.value] || null)
 const outgoingCount = computed(() => new Set(drafts.value.flatMap(d => d.uins)).size)
+const capacity = ref<CounterpartyCapacity | null>(null)
+let capacityRequest = 0
+watch(() => [props.open, accountKey()], async () => {
+  const request = ++capacityRequest
+  const account = accountKey()
+  capacity.value = null
+  if (!props.open || !imBoundAccount.value?.account_uid) return
+  try {
+    const response = await api.negotiationCapacity()
+    if (request !== capacityRequest || account !== accountKey() || !props.open) return
+    const data = response.data
+    if (response.ok && data?.unit === 'distinct_counterparties'
+      && Number.isInteger(data.active) && data.active >= 0 && data.limit === 50) capacity.value = data
+  } catch { /* A missing advisory never bypasses the server's atomic admission. */ }
+}, { immediate: true })
+onScopeDispose(() => { capacityRequest++ })
 function validationError(): string {
+  if (outgoingCount.value > 50) return '同一企点账号最多同时与50个不同对手询价，请减少收件人；同一对手多券只计一人。'
   if (!drafts.value.length) return '没有可询价的债券'
   for (const d of drafts.value) {
     const label = d.fields.name || d.code
@@ -376,6 +393,11 @@ function commandStatus(status: string): string {
             </button>
           </div>
           <p class="sub">先明确本方方向、询价量、起始收益率、边界和步幅，再选择收件人生成服务端预览。核对逐收件人最终首句后，第二次确认才授权发送。行情原文仅供复制或人工发送。</p>
+          <p class="sub" data-testid="rfq-counterparty-capacity">
+            每个企点账号最多50个活跃对手；本批已选{{ outgoingCount }}人。
+            <span v-if="capacity">当前活跃{{ capacity.active }}/{{ capacity.limit }}人。</span>
+            同一对手多券只计一人，暂停仍占名额；名额在预览和确认时由服务端重新核对。
+          </p>
           <p v-if="imBoundAccount && !imCurrent" class="sub">本人账号已绑定，可以生成零外发预览；实际投递仍须通过服务端通道健康检查。</p>
           <p v-if="(pickedCount || 0) > bonds.length" class="warn">已选数量与服务端解析结果不一致，请关闭弹窗并重新核对选择。</p>
         </div>

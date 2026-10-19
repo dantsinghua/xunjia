@@ -6,7 +6,7 @@ an internal limit, and never treat an outgoing quantity as the peer's amount.
 from __future__ import annotations
 import re
 from .prices import InvalidFact, number, rounded_yield, volume_wan
-from .text_roles import mask_non_trading, numeric_spelling
+from .text_roles import mask_non_trading, numeric_spelling, valuation_offset_spans
 from .slots import direct_price_question
 
 NUM = r'[+-]?\d+(?:\.\d+)?'
@@ -44,6 +44,9 @@ def economics(text, *, bond_codes=(), identifiers=()):
     masked=re.sub(r'(?<![a-zA-Z0-9])(?:[a-fA-F0-9]{24,160}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})(?![a-zA-Z0-9])',
                   lambda m:' '*len(m[0]),masked)
     masked = numeric_spelling(mask_non_trading(masked))
+    # A labelled offset is not an absolute yield, even when BP is omitted.
+    for start, end, _offset in valuation_offset_spans(masked):
+        masked = masked[:start] + ' ' * (end-start) + masked[end:]
     quantities = []
     for match in QUANTITY.finditer(masked):
         quantities.append((volume_wan(match[1].removeprefix('+') + match[2]), match.start(), match.end()))
@@ -278,11 +281,26 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
                     continue
                 candidates.append(raw)
         expected = number(literal['value']) if notation != 'ABSOLUTE' else value
+        if notation == 'ABSOLUTE':
+            for ref in evidence.get('price', []):
+                if known[ref]['direction']!='in' or known[ref]['ingest_revision']!=latest:continue
+                for text in source_parts(ref, preserve_prefix=True):
+                    relative=[(a,b) for a,b,_v in valuation_offset_spans(text)
+                              if token_side(text,a,b) in (None,side)]
+                    absolute=economics(text,bond_codes=tuple(aliases),identifiers=identifiers)[0]
+                    # Unsupported numeric copies keep the established evidence
+                    # error (also used by the bounded repair contract). This
+                    # additional guard only handles a stale loaded absolute.
+                    if (relative and any(rounded_yield(raw)==expected for raw in candidates)
+                            and not any(rounded_yield(raw)==expected and token_side(text,a,b) in (None,side)
+                                        for raw,a,b in absolute)):
+                        raise InvalidFact('Current valuation-relative price cannot be replaced by an old absolute yield')
         if notation == 'CHINABOND_BP':
             offsets=[]
             for text in texts('price'):
-                for match in re.finditer(r'(加|减|\+|-)?\s*(\d+(?:\.\d+)?)\s*(?:BP|bp|收|出)', numeric_spelling(text)):
-                    offsets.append(number(match[2])*(-1 if match[1] in ('减','-') else 1))
+                for start, end, offset in valuation_offset_spans(text):
+                    if token_side(text,start,end) in (None,side):
+                        offsets.append(number(offset))
             supported=expected in offsets
         else:
             supported = any((number(raw) == expected if notation == 'YIELD_SUFFIX' or changes['price']['kind'] != 'YIELD'

@@ -60,7 +60,10 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
         from .transport_config import load_transports
         if not os.environ.get('XUNJIA_STATE_DIR'):raise ValueError('传输状态目录未配置')
         transport=load_transports(store,os.environ['XUNJIA_TRANSPORT_CONFIG'],os.environ['XUNJIA_STATE_DIR'])
-    service=Inquiry(store,reference_provider=reference_provider,calendar=calendar)
+    service=Inquiry(store,reference_provider=reference_provider,calendar=calendar,
+                    valuation_source=getattr(source,'valuation',None))
+    refresh_seconds=float(os.environ.get('XUNJIA_VALUATION_REFRESH_SECONDS','2'))
+    if not 1<=refresh_seconds<=30:raise ValueError('估值恢复轮询间隔必须为1..30秒')
     tools=BondTools(provider=reference_provider)
     stage_budget=float(os.environ.get('XUNJIA_DIFY_STAGE_BUDGET_SECONDS','150')) if stage_budget_seconds is None else stage_budget_seconds
     engine=Engine(service,client,tools,aggregation=aggregation,stage_budget_seconds=stage_budget)
@@ -79,19 +82,15 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
                 service.diagnostics.record(name,code='BACKGROUND_TASK_FAILED',error=exc)
             await asyncio.sleep(delay)
     def rollover_once():
-        today=service.trade_day()
-        with store.db.transaction(write=False) as tx:
-            groups=tx.execute('SELECT owner_id,group_id,policy_json,bond_code FROM xj2_group WHERE archived=0 AND trade_day<?',(today,)).fetchall()
-        for g in groups:
-            valuation=expected=None
-            if json.loads(g['policy_json'])['mode']=='CHINABOND_BP':
-                try:valuation,expected=service.valuation(g['bond_code'])
-                except Exception:pass
-            store.rollover(g['owner_id'],g['group_id'],trade_day=today,valuation=valuation,expected_valuation_date=expected)
+        result=service.refresh_valuations()
+        runtime['valuation_refresh']=result
+        return result
     async def market_loop():
         while True:
             try:
                 for delta,groups in await asyncio.to_thread(source.poll):hub.publish(delta,groups)
+                if getattr(source,'valuation_changed',False):
+                    runtime['valuation_refresh']=await asyncio.to_thread(service.refresh_valuations,refresh_reference=False)
             except asyncio.CancelledError:raise
             except Exception as exc:service.diagnostics.record('market',code='MARKET_POLL_FAILED',error=exc)
             await asyncio.sleep(.5)
@@ -105,7 +104,7 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
                 # Reconciliation is never disabled merely because auto sending is paused.
                 tasks.append(asyncio.create_task(repeated('dispatch',dispatcher.run_once,.5)))
             if client and aggregation:tasks.append(asyncio.create_task(repeated('analysis',engine.run_once,.25)))
-            tasks.append(asyncio.create_task(repeated('day_rollover',rollover_once,30)))
+            tasks.append(asyncio.create_task(repeated('day_rollover',rollover_once,refresh_seconds)))
             if source:tasks.append(asyncio.create_task(market_loop()))
         try:yield
         finally:

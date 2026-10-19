@@ -26,6 +26,11 @@ class HTTPReferenceProvider:
         if type(self.ttl) not in (int,float) or not 0<=self.ttl<=60:raise ValueError('Reference cache must be 0..60 seconds')
     @classmethod
     def from_file(cls,path):return cls(json.loads(Path(path).read_text(encoding='utf8')))
+    def invalidate_valuation_cache(self):
+        """The bounded recovery poll must see a restored source, not a TTL hit."""
+        with self._lock:
+            self._cache.pop('snapshot_url',None)
+            self._cache.pop('calendar_url',None)
     def _read(self,key):
         url=self.config.get(key)
         if not url:raise ReferenceDataUnavailable('NOT_CONFIGURED:'+key)
