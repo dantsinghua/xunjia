@@ -14,10 +14,34 @@ export type {
   BondRow, BondStatus, BondDetail, Counterparty, ChatMsg, DetailRow, Strategy, QaResult, TraceView, ChartSpec,
 } from './lib/types'
 
+import type { OrgStatus } from './lib/imLink'
 import { authFetch, requestJson } from './lib/http'
 import type { BondStatic } from './lib/quoteTypes'
 import type { QuoteFilterState } from './lib/quoteFilter'
 export interface UnknownCommand {cmd_id:string;peer_id:string;text:string;created_at:number;expected_result_hash:string;conflict:boolean}
+export interface SessionResetStatus {
+  reset_id: string
+  scope: { workbench_id: string; account_uid: string }
+  binding_version: number
+  account_epoch: number
+  state: 'requested' | 'waiting_native' | 'local_applied' | 'complete' | 'blocked'
+  code?: string | null
+  snapshot_hash?: string
+  snapshot?: {
+    account_epoch: number
+    published_source_highwater: number
+    snapshot_at: number
+    unresolved_history: unknown[]
+    peers: Record<string, {
+      source_watermark: number
+      receiver_fence_version: number
+      receiver_fence_id: string
+      min_control_version: number
+    }>
+  } | null
+  created_at: number
+  updated_at: number
+}
 export interface FilterSpec extends QuoteFilterState { channel: string; broker: string; groups: string[] }
 
 type Dict = Record<string, unknown>
@@ -29,7 +53,8 @@ export type Selection =
 export interface RfqPolicy {
   strict_match?:boolean
   pricing_basis?: 'absolute' | 'bp'
-  valuation_snapshot?: {snapshot_id:string; valuation_date:string; yield_pct:string; provider:string}
+  valuation_snapshot?: {snapshot_id:string; valuation_date:string|null; yield_pct:string; provider:string; source?:'innodealing'|'reference'}
+  valuation_warnings?: string[]
   code: string; name: string; our_side: 'BUY' | 'SELL'; volume_wan: string
   opening_yield_pct: string; limit_yield_pct: string; step_bp: string
 }
@@ -47,6 +72,56 @@ export interface RfqSubmission {
   commands: {command_id: string; cmd_id?: string; status: 'queued' | 'pending' | 'unknown' | 'sent' | 'failed' | 'cancelled' | 'expired'; reason?:string; peer_id: string; text: string; session_ids?: string[]}[]
 }
 export interface BulkResult { count?: number; scope?: string; [k: string]: unknown }
+export interface CollectorAccount {
+  account_uid: string; account_nick: string; updated_at?: number | null; stale?: boolean
+  capabilities?: string[]; contacts_path?: string; available?: boolean; state?: string
+}
+export interface CollectorWorkbench {
+  workbench_id: string; name?: string; updated_at?: number | null; stale?: boolean; accounts: CollectorAccount[]
+}
+export interface CollectorSelection { workbench_id: string; account_uid: string; version: number }
+export interface CollectorCatalog {
+  workbenches: CollectorWorkbench[]; selected: CollectorSelection | null; note?: string; refresh_error?: string; contract?: string; offline_seconds?: number
+}
+export interface CollectorContacts extends OrgStatus {
+  source: string; workbench_id: string; account_uid: string; contacts: import('./lib/imLink').ImPerson[]
+  org: import('./lib/imLink').ImOrg; updated_at?: number | null; stale?: boolean; source_path?: string
+  friends_updated_at?: number | null; refresh_requested?: boolean
+}
+export interface CollectorSelectionResult {
+  binding: CollectorSelection & { owner_user_id: string; transport: string }; contacts: CollectorContacts
+  connected: boolean; note?: string
+}
+export interface NativeHistoryMedia {
+  sha256?: string; name: string; size: number; mime: string; state: 'ready' | 'pending' | 'unavailable'; download_ready: boolean
+}
+export interface NativeHistoryMessage {
+  id: number; native_id: string; peer_id: string; direction: 'in' | 'out'; occurred_at: number
+  text: string; type: 'text' | 'image' | 'file'; session_kind: 'private' | 'group'; media: NativeHistoryMedia[]; historical: true
+}
+export interface NativeHistoryPage {
+  workbench_id: string; account_uid: string; binding_version: number; items: NativeHistoryMessage[]
+  has_more: boolean; next_cursor: number | null; retention_days: number
+}
+export interface TransferFile {
+  id: number; name: string; extension: string; kind: string; lane: string
+  source_created_at: number; received_at: number | null; state: string
+  upload_state: string | null; receive_state: string | null
+}
+export interface TransferFilePage {
+  items: TransferFile[]; next_before: number | null; workbench_id: string; account_uid: string
+  scope: 'retained_authenticated_files'
+}
+export interface MqConfig {
+  editable: boolean; configured: boolean; applied: boolean; backend: 'file_gateway'; base_url: string; credentials_set: boolean
+  account_uid: string | null; workbench_id: string | null; revision: string; note: string
+}
+export interface MqConfigInput {
+  base_url: string; config_yaml: string; expected_revision?: string
+}
+export interface MqConnectionTest {
+  passed: boolean; connected: boolean; saved: false; steps: {name: string; ok: boolean; detail: string}[]
+}
 
 export type BondsResp = Resp<BondRow[]> & { total: number; hasMore: boolean; nextBefore: number; nextUni?: number; source?: string; emptyReason?: string | null }
 
@@ -348,7 +423,7 @@ export const api = {
     const r = await jpost<Resp<Dict[]>>('/api/bonds/resolve', { selection })
     return { ...r, data: r.ok ? normBonds(r.data) : [] }
   }, [] as BondRow[]),
-  getFloors: () => jget<Resp<{items:{code:string;kind:'bp'|'yield';value:number;revision:number}[]}>>('/api/im/inquiry/floor'),
+  getFloors: () => jget<Resp<{items:{code:string;kind:'bp'|'yield';value:number|string;revision:number}[]}>>('/api/im/inquiry/floor'),
   brokers: () => jget<{ ok: boolean; data: { id: number; name: string }[] }>('/api/brokers'),
 
   bond: async (windcode: string, bond?: BondRow): Promise<Resp<BondDetail>> => ({ ok: true, data: await assembleDetail(windcode, bond) }),
@@ -462,6 +537,18 @@ export const api = {
 
   /* ---------- 屏3 智能问答 ---------- */
   /* ---------- 采集端通道 ---------- */
+  imHistory: (before?: number, peer?: string) => jget<Resp<NativeHistoryPage>>('/api/im/history?limit=50' + (before ? '&before=' + before : '') + (peer ? '&peer=' + encodeURIComponent(peer) : '')),
+  imFiles: (before?: number) => jget<Resp<TransferFilePage>>('/api/im/files?limit=50' + (before ? '&before=' + before : '')),
+  sessionReset: () => jget<Resp<SessionResetStatus | null>>('/api/im/session-reset'),
+  startSessionReset: (requestId: string, bindingVersion: number) =>
+    jpost<Resp<SessionResetStatus>>('/api/im/session-reset', {
+      request_id: requestId, expected_binding_version: bindingVersion, confirmed: true,
+    }),
+  mqConfig: () => jget<Resp<MqConfig>>('/api/im/mq-config'),
+  saveMqConfig: (body: MqConfigInput) => requestJson<Resp<MqConfig>>('/api/im/mq-config', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }),
+  testMqConfig: (body: MqConfigInput) => jpost<Resp<MqConnectionTest>>('/api/im/mq-config/test', body),
   imLinks: () => jget<{ ok: boolean; data: { active_id: string; links: Dict[] }; hints: Record<string, string> }>('/api/im/links'),
   imSave: (id: string | null, body: Dict) => id
     ? requestJson('/api/im/links/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -469,7 +556,7 @@ export const api = {
   imDelete: (id: string) => requestJson('/api/im/links/' + id, { method: 'DELETE' }),
   imTest: (id: string, accountId?: string) => jpost('/api/im/links/' + id + '/test', accountId ? { account_id: accountId } : {}),
   imActivate: (id: string, version?:number) => jpost('/api/im/links/' + id + '/activate', {expected_version:version}),
-  imContacts: () => jget<{ ok: boolean; hint?: string; data: Dict }>('/api/im/contacts'),
+  imContacts: (refresh = false) => jget<{ ok: boolean; hint?: string; data: Dict }>('/api/im/contacts' + (refresh ? '?refresh=1' : '')),
   imSend: (uin: string, text: string, requestId: string = crypto.randomUUID()) => jpost<{ ok: boolean; blocked?: boolean; hint?: string; data: Dict }>('/api/im/send', { uin, text, idempotency_key: requestId, request_id:requestId }),
   negotiationCapacity: () => jget<Resp<CounterpartyCapacity>>('/api/negotiation/capacity'),
   imRfqPreview: (items: (RfqPolicy & {peer_ids:string[]})[], requestId: string) =>
@@ -478,7 +565,13 @@ export const api = {
     jpost<Resp<RfqSubmission>>('/api/im/rfq/send', {batch_id:batchId, expected_version:version, request_id:requestId}),
   imRfqStatus: () => jget<{ ok: boolean; hint?: string; data?: { items?: { code: string; status: string; quote?: Record<string, string | number> | null }[] } }>('/api/im/rfq/status'),
   archiveSession: (id: string) => result(() => jpost<Resp<Dict>>('/api/sessions/' + encodeURIComponent(id) + '/archive', {}), {}),
-  imCatalog: () => jget<{ ok: boolean; hint?: string; data: { workbenches: { workbench_id: string; stale?: boolean; updated_at?: number; accounts: { account_uid: string; account_nick: string }[] }[] } }>('/api/im/catalog'),
+  imCatalog: () => jget<Resp<CollectorCatalog>>('/api/im/catalog'),
+  refreshImCatalog: () => jpost<Resp<CollectorCatalog>>('/api/im/catalog/refresh', {}),
+  selectImBinding: (body: CollectorSelection) => jpost<Resp<CollectorSelectionResult>>('/api/im/binding/select', {
+    workbench_id: body.workbench_id, account_uid: body.account_uid, expected_version: body.version,
+  }),
+  startQuoteSource: () => jpost('/api/im/quote/start', {}),
+  stopQuoteSource: () => jpost('/api/im/quote/stop', {}),
   quoteSource: () => jget<{ ok: boolean; hint?: string; data: { account: string; sid_set: boolean; cookie_set: boolean; device_id_set: boolean } }>('/api/im/quote'),
   saveQuoteSource: (body: { account: string; sid: string; cookie: string; device_id: string }) =>
     requestJson('/api/im/quote', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),

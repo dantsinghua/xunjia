@@ -20,7 +20,7 @@ def test_all_schema_and_readiness_details(tmp_path):
         assert response.status_code==200,response.text
         value=response.json()['data']
         assert value['ready'] and value['database_ready']
-        assert value['schema']['tables_expected']==15 and value['schema']['indexes_expected']==13
+        assert value['schema']['tables_expected']==16 and value['schema']['indexes_expected']==14
         assert value['build_id'] and value['release_id'] and value['boot_id']
         assert value['automation_ready'] is False
         assert client.get('/api/health/automation').status_code==503

@@ -269,7 +269,7 @@ def test_model_snapshot_does_not_swallow_message_arriving_during_analysis(desk):
     assert current(app, peer).price.value == "3.10"
 
 
-def test_default_live_dispatch_stays_off_even_with_a_capable_transport(tmp_path):
+def test_default_dispatches_confirmed_command_with_a_capable_transport(tmp_path):
     clock, flows, transport = Clock(), FakeFlows(), FakeNative()
     app = create_app(database_url="sqlite:///" + str(tmp_path / "default-off.db"),
         auth_config=AuthConfig(sso_secret="synthetic-sso", session_secret="synthetic-session-at-least-32-characters", clock=clock),
@@ -279,7 +279,7 @@ def test_default_live_dispatch_stays_off_even_with_a_capable_transport(tmp_path)
     with TestClient(app) as client:
         client.headers["Authorization"] = "Bearer " + app.state.auth.issue_token(User())
         confirmed = confirm(client, draft(client))
-        assert app.state.dispatcher.live_enabled is False
+        assert not hasattr(app.state.dispatcher, "live_enabled")
         app.state.dispatcher.run_once()
-        assert transport.sent == []
-        assert app.state.inquiry.commands_core.get(OWNER, confirmed["commands"][0]["command_id"])["state"] == "QUEUED"
+        assert len(transport.sent) == 1
+        assert app.state.inquiry.commands_core.get(OWNER, confirmed["commands"][0]["command_id"])["state"] == "SENT"

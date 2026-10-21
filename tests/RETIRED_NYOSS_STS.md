@@ -1,0 +1,23 @@
+安琳已明确删除旧 NYOSS/nytoken、STS/直连 OSS 及旧 imlink 接线。本批以下旧合同测试原样移动至本批次 retired-tests/，不是 skip 或降低断言。此列表不包含仍需保留的邮件、receiver ledger、行情、登录或混合 MQ 业务门。精确 SHA256 与静态定义数量见批次 qa/retired-test-manifest.json。
+
+- tests/test_oss_catalog.py
+- tests/test_imlink.py
+- tests/test_dify_inquiry.py
+- tests/test_address_book.py
+- tests/test_rfq_status.py
+- tests/test_rfq_oss_send.py
+- tests/test_rfq_send_gate.py
+- tests/test_empty_catalog.py
+- tests/test_oss_phase1.py
+- tests/test_org_tree_spec.py
+- tests/test_oss_downlink.py
+- tests/test_rfq_assign_spec.py
+- tests/test_rfq_assign.py
+- tests/test_org_contacts.py
+- tests/acceptance/test_sts_mq_contract.py
+- tests/acceptance/test_sts_protocol.py
+- tests/acceptance/test_sts_bucket_decoupling_20261015.py
+- tests/developer/test_sts_mq.py
+- tests/developer/test_sts_credentials.py
+- tests/cutover/test_oss_connection_settings.py
+- tests/developer/test_v22_oss_namespaces.py

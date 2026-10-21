@@ -130,3 +130,20 @@ def snapshot(case):
              'source_seq':21,'ingest_revision':21}
     return {'schema_version':'2.2','stage':'analysis','thread_id':'synthetic-'+case['id'],'from_revision':20,'through_revision':21,
             'context_messages':20,'messages':[message],'members':members,'tool_results':[]}
+
+
+def review_cases():
+    """Independent review inputs; the original 47-case corpus stays unchanged."""
+    entries = [
+        ("review-bp-minus-omitted", "SYN-A 估值-5收5000万", "SELL", [("bid", "2.53", "5000")]),
+        ("review-bp-plus-omitted", "SYN-A 估值加5出1000万", "BUY", [("ofr", "2.63", "1000")]),
+        ("review-bp-fullwidth", "SYN-A 中债估值－５收５０００万", "SELL", [("bid", "2.53", "5000")]),
+        ("review-bp-explicit-control", "SYN-A 估值-5BP收5000万", "SELL", [("bid", "2.53", "5000")]),
+        ("review-bp-two-sided", "SYN-A 估值-5收5000万，估值+5出1000万", "BUY", [("bid", "2.53", "5000"), ("ofr", "2.63", "1000")]),
+        ("review-negative-yield", "SYN-A 收益率-0.05%出1000万", "BUY", [("ofr", "-0.05", "1000")]),
+    ]
+    return [{"id": key, "path": "review_regression", "text": text, "our_side": direction,
+             "reference_case_id": "bp-minus",
+             "expected": [{"member": "a", "side": side, "price": price, "volume": volume}
+                          for side, price, volume in expected]}
+            for key, text, direction, expected in entries]

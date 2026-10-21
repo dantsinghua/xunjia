@@ -1,8 +1,8 @@
 """Fail-closed QTrade Bus boundary for a future v2 CollectorBridge host integration.
 
 This adapter is NOT a background poller and NEVER starts a QTrade account.
-It is deliberately disabled unless the integrator supplies explicit native
-send consent plus a dynamic test showing the legacy XunjiaInbox is disabled.
+Valid authorized commands use the bound native account. The legacy
+XunjiaInbox must remain disabled so only one receiver executes each command.
 
 Contract:
   - invoke native_send/native_reconcile only from the synchronous Bridge worker,
@@ -23,6 +23,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 import hashlib
 import json
 import math
+import threading
 from typing import Any, Callable
 
 from relay.protocol import Binding, ProtocolError, validate_command
@@ -44,6 +45,11 @@ def _qtrade_command(account_id: str, command: dict[str, Any]):
 
 
 class QTradeNativePort:
+    # Host replacement in the same native Bus must still see older timed-out
+    # calls. A different Bus/account has an independent execution boundary.
+    _future_lock = threading.Lock()
+    _account_tasks = {}
+
     def __init__(
         self,
         *,
@@ -52,7 +58,6 @@ class QTradeNativePort:
         bus: Any,
         loop: asyncio.AbstractEventLoop,
         legacy_inbox_disabled: Callable[[], bool],
-        allow_native_send: bool = False,
         timeout_seconds: float = 45.0,
         command_factory: Callable[[str, dict[str, Any]], Any] = _qtrade_command,
         execution_permission: Callable[[dict[str, Any]], bool] | None = None,
@@ -63,14 +68,28 @@ class QTradeNativePort:
             raise ValueError("collector isolation and command factory are required")
         if not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or not 1 <= timeout_seconds <= 120:
             raise ValueError("QTrade native result timeout is invalid")
-        if allow_native_send and not legacy_inbox_disabled():
+        if not legacy_inbox_disabled():
             raise RuntimeError("Refuse native activation while legacy XunjiaInbox is enabled")
         self.binding, self.store, self.bus, self.loop = binding, store, bus, loop
         self.legacy_inbox_disabled = legacy_inbox_disabled
-        self.allow_native_send = allow_native_send
         self.timeout_seconds = float(timeout_seconds)
         self.command_factory = command_factory
         self.execution_permission = execution_permission
+        self._task_scope = (id(bus), binding.owner_user_id, binding.workbench_id, binding.account_uid)
+
+    def quiescent(self):
+        """Queued and timed-out submissions remain active until their coroutine exits."""
+        with self._future_lock:
+            active = self._account_tasks.get(self._task_scope)
+            return active is None or not active[1]
+
+    def _native_finished(self, task):
+        with self._future_lock:
+            active = self._account_tasks.get(self._task_scope)
+            if active is not None:
+                active[1].discard(task)
+                if not active[1]:
+                    del self._account_tasks[self._task_scope]
 
     def _account(self):
         matches = [
@@ -85,7 +104,7 @@ class QTradeNativePort:
         account = self._account()
         return {
             "legacy_inbox_disabled": bool(self.legacy_inbox_disabled()),
-            "native_send_enabled": bool(self.allow_native_send),
+            "native_send_enabled": bool(self.legacy_inbox_disabled() and callable(self.execution_permission)),
             "single_bound_account": account is not None,
             "account_online": bool(account and account.get("state") in ("running", "degraded")),
             "qtrade_loop_running": self.loop.is_running(),
@@ -93,7 +112,7 @@ class QTradeNativePort:
 
     def _preflight(self, command: dict[str, Any]):
         validate_command(command, self.binding)
-        if not self.allow_native_send or not self.legacy_inbox_disabled():
+        if not self.legacy_inbox_disabled():
             return None, {"status": "failed", "evidence": "qtrade-v2-native-disabled"}
         account = self._account()
         if not account or account.get("state") not in ("running", "degraded"):
@@ -132,14 +151,14 @@ class QTradeNativePort:
         if reason is not None:
             return reason
         qcommand = self.command_factory(str(account["id"]), command)
-        if command.get('business_version') == '2.2':
+        if command.get('business_version') == '2.2' or 'account_epoch' in command or callable(self.execution_permission):
             if not callable(self.execution_permission) or getattr(self.bus,'supports_xunjia_v22_guard',False) is not True:
                 return {'status':'failed','evidence':'qtrade-v22-native-guard-not-installed'}
             fixed = copy.deepcopy(command)
             expected_args = {'session':fixed['peer_id'],'text':fixed['text']}
             def permitted():
                 current = self._account()
-                return bool(self.allow_native_send and self.legacy_inbox_disabled()
+                return bool(self.legacy_inbox_disabled()
                     and current and current['id']==account['id'] and current.get('state') in ('running','degraded')
                     and getattr(qcommand,'account_id',None)==str(account['id'])
                     and getattr(qcommand,'op',None)=='send_text' and getattr(qcommand,'args',None)==expected_args
@@ -148,8 +167,24 @@ class QTradeNativePort:
             qcommand._xunjia_native_guard = permitted
         # This call must not share the event loop thread. No resend on timeout:
         # the QTrade Bus may still finish the already claimed native action.
+        task = object()
+        with self._future_lock:
+            # Hold the actual Bus while any call runs, so its id cannot be
+            # recycled. Release the registry entry after the last coroutine.
+            self._account_tasks.setdefault(self._task_scope, (self.bus, set()))[1].add(task)
+        async def tracked_submit():
+            try:
+                return await self.bus.submit(qcommand)
+            finally:
+                self._native_finished(task)
+        submitted = tracked_submit()
         try:
-            future = asyncio.run_coroutine_threadsafe(self.bus.submit(qcommand), self.loop)
+            try:
+                future = asyncio.run_coroutine_threadsafe(submitted, self.loop)
+            except Exception:
+                submitted.close()
+                self._native_finished(task)
+                raise
             result = future.result(timeout=self.timeout_seconds)
         except FutureTimeout:
             return {"status": "unknown", "evidence": "qtrade-native-result-timeout"}

@@ -6,7 +6,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, 
 import { App } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import { api, applyBondStatic, type Selection, type FilterSpec } from '../api'
-import { imCurrent, imIdentity } from '../lib/imLink'
+import { imBoundAccount } from '../lib/imLink'
 import { authToken, authUserId } from '../lib/http'
 import { createQuoteClient } from '../lib/quoteClient'
 import type { QuoteDelta } from '../lib/quoteTypes'
@@ -332,7 +332,7 @@ function isAggregate() {
 function filterSpec(): FilterSpec {
   return { keyword:appliedKeyword.value, chips:{...activeChip}, prices:JSON.parse(JSON.stringify(priceApplied)), groups:[...activeGroups.value], channel:CHAN[chanTab.value], broker:chanTab.value === 2 ? brokerPick.value : '' }
 }
-function scopeKey() { return JSON.stringify([filterSpec(), imCurrent.value?.id, imIdentity(imCurrent.value).uid]) }
+function scopeKey() { const binding = imBoundAccount.value; return JSON.stringify([filterSpec(), binding?.workbench_id, binding?.account_uid, binding?.version ?? 0]) }
 function quoteBonds(before: number, uni = 0) {
   const filter = filterSpec()
   return api.bonds(before, PAGE, filter.groups, filter.channel, filter.broker, uni, filter)
@@ -583,7 +583,14 @@ async function refreshBusiness() {
     }
     if (floors.ok) {
       for (const code of Object.keys(floorValue)) { delete floorValue[code]; delete floorKind[code] }
-      for (const item of floors.data.items) { floorKind[item.code] = item.kind; floorValue[item.code] = item.value }
+      const invalid: string[] = []
+      for (const item of floors.data.items) {
+        const raw: unknown = item.value
+        const value = typeof raw === 'number' ? raw : typeof raw === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw.trim()) ? Number(raw) : NaN
+        if (!Number.isFinite(value) || !['bp', 'yield'].includes(item.kind)) { invalid.push(item.code); continue }
+        floorKind[item.code] = item.kind; floorValue[item.code] = value
+      }
+      if (invalid.length) message.error(`底价数据含无效数值，未作为本批参考：${invalid.join('、')}`)
     }
     if (!status.ok || !floors.ok) message.error(status.hint || floors.hint || '业务状态刷新失败')
   } catch (e) { message.error(e instanceof Error ? e.message : '业务状态刷新失败') }
@@ -701,7 +708,7 @@ function onJump(cpId: string, bondName: string) {
 
 <template>
   <div class="quote-wrap fade-up">
-    <ImLinkBar class="im-slot" />
+    <ImLinkBar class="im-slot" :show-address-book="false" />
     <main class="board glass" :style="{ gridTemplateColumns: qGrid }">
       <!-- 筛选栏 -->
       <aside v-if="sideOpen" class="filter">
@@ -780,10 +787,10 @@ function onJump(cpId: string, bondName: string) {
         <div ref="scroller" class="table-scroll" @scroll.passive="onScroll">
           <table class="mkt">
             <colgroup>
-              <col style="width:430px"><col style="width:100px"><col style="width:150px">
-              <col style="width:90px"><col style="width:100px"><col style="width:100px"><col style="width:90px">
-              <col style="width:110px"><col style="width:90px"><col style="width:100px"><col style="width:100px">
-              <col style="width:90px"><col style="width:110px"><col style="width:106px">
+              <col style="width:260px"><col style="width:104px"><col style="width:150px">
+              <col style="width:76px"><col style="width:92px"><col style="width:92px"><col style="width:76px">
+              <col style="width:108px"><col style="width:76px"><col style="width:92px"><col style="width:92px">
+              <col style="width:76px"><col style="width:108px"><col style="width:100px">
             </colgroup>
             <thead>
               <tr>
@@ -794,7 +801,7 @@ function onJump(cpId: string, bondName: string) {
                     <span v-if="hasChecked" class="sel-badge">已选 {{ checkedCount }}</span>
                   </div>
                 </th>
-                <th colspan="3" class="grp base">债券基本信息</th>
+                <th colspan="2" class="grp base">债券基本信息</th>
                 <th colspan="4" class="grp intent">内部意向</th>
                 <th colspan="6" class="grp ext">外部报价</th>
                 <th rowspan="2" class="sticky-r">当前状态</th>
@@ -815,18 +822,18 @@ function onJump(cpId: string, bondName: string) {
                     <span v-if="r.isNew" class="new-badge">新</span>
                   </div>
                 </td>
-                <td class="muted">{{ r.term }}</td>
-                <td class="mono muted">{{ r.val }}</td>
+                <td class="muted" :title="r.term">{{ r.term }}</td>
+                <td class="mono muted" :title="r.val">{{ r.val }}</td>
                 <td class="mono muted intent-bl">{{ r.ibv }}</td>
                 <td class="mono b red" :class="cellCls(r.code, 'ib')">{{ r.dispIb }}</td>
                 <td class="mono b green" :class="cellCls(r.code, 'io')">{{ r.dispIo }}</td>
                 <td class="mono muted">{{ r.iov }}</td>
-                <td class="ext-bl"><span class="side-pill" :style="{ background: r.obsBg, color: r.obsColor }">{{ r.obs }}</span></td>
+                <td class="ext-bl"><span class="side-pill" :title="r.obs" :style="{ background: r.obsBg, color: r.obsColor }">{{ r.obs }}</span></td>
                 <td class="mono muted">{{ r.obv }}</td>
                 <td class="mono b red" :class="cellCls(r.code, 'ob')">{{ r.ob }}</td>
                 <td class="mono b green" :class="cellCls(r.code, 'oo')">{{ r.oo }}</td>
                 <td class="mono muted">{{ r.oov }}</td>
-                <td><span class="side-pill" :style="{ background: r.oosBg, color: r.oosColor }">{{ r.oos }}</span></td>
+                <td><span class="side-pill" :title="r.oos" :style="{ background: r.oosBg, color: r.oosColor }">{{ r.oos }}</span></td>
                 <td class="sticky-r status-cell"><span class="status" :style="{ background: r.stBg, color: r.stColor, boxShadow: '0 0 10px ' + r.stGlow }">{{ r.status }}</span></td>
               </tr>
               <tr v-if="padBottom" class="pad-row" :style="padBotStyle"><td :colspan="14" /></tr>
@@ -976,15 +983,15 @@ function onJump(cpId: string, bondName: string) {
 
 .table-scroll { overflow: auto; flex: 1; min-height: 0; overflow-anchor: none; }
 /* fixed 布局:列宽由 colgroup 定死,O(1);auto 布局会因虚拟滚动换行而抖动 */
-.mkt { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 13px; min-width: 1896px; }
+.mkt { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 13px; min-width: 1502px; }
 .mkt th, .mkt td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pad-row td { padding: 0; border: none; background: transparent; }
 .grp { position: sticky; top: 0; z-index: 6; text-align: left; padding: 8px 14px; font-size: 11.5px; font-weight: 700; letter-spacing: 2px; background: #F6F1EC; border-bottom: 1px solid rgba(176, 28, 36,.1); }
 .grp.base { color: #8A7F76; font-weight: 600; }
 .grp.intent { color: #B01C24; border-left: 1px solid rgba(176, 28, 36,.18); }
 .grp.ext { color: #7A5A2E; border-left: 1px solid rgba(176, 28, 36,.18); }
-.subcol { position: sticky; top: 36px; z-index: 6; text-align: left; padding: 8px 14px; font-size: 12px; font-weight: 600; background: #F6F1EC; border-bottom: 1px solid rgba(176, 28, 36,.16); }
-.sticky-l { position: sticky; left: 0; top: 0; z-index: 8; background: #F6F1EC; text-align: left; padding: 11px 16px; font-size: 12.5px; font-weight: 700; color: #B01C24; letter-spacing: 1px; border-bottom: 1px solid rgba(176, 28, 36,.16); border-left: 1px solid rgba(176, 28, 36,.16); border-right: 1px solid rgba(176, 28, 36,.16); min-width: 430px; border-right: 1px solid rgba(176, 28, 36,.18); }
+.subcol { position: sticky; top: 36px; z-index: 6; text-align: left; padding: 8px; font-size: 12px; font-weight: 600; background: #F6F1EC; border-bottom: 1px solid rgba(176, 28, 36,.16); }
+.sticky-l { position: sticky; left: 0; top: 0; z-index: 8; background: #F6F1EC; text-align: left; padding: 11px 16px; font-size: 12.5px; font-weight: 700; color: #B01C24; letter-spacing: 1px; border-bottom: 1px solid rgba(176, 28, 36,.16); border-left: 1px solid rgba(176, 28, 36,.16); border-right: 1px solid rgba(176, 28, 36,.16); min-width: 260px; border-right: 1px solid rgba(176, 28, 36,.18); }
 .sticky-r { position: sticky; right: 0; top: 0; z-index: 8; background: #F6F1EC; text-align: center; padding: 11px 16px; font-size: 12.5px; font-weight: 700; color: #B01C24; letter-spacing: 1px; border-bottom: 1px solid rgba(176, 28, 36,.16); border-left: 1px solid rgba(176, 28, 36,.16); min-width: 96px; border-left: 1px solid rgba(176, 28, 36,.18); }
 .th-name { display: flex; align-items: center; gap: 10px; }
 .sel-badge { font-size: 11px; font-weight: 600; color: #fff; background: #B01C24; padding: 1px 7px; border-radius: 999px; }
@@ -993,14 +1000,14 @@ function onJump(cpId: string, bondName: string) {
 .mkt-row:hover { background: rgba(176, 28, 36,.055); }
 .mkt-row.fresh { background: rgba(176, 28, 36,.035); }
 .mkt-row.sel { background: rgba(176, 28, 36,.07); }
-.mkt td { height: 42px; padding: 0 14px; border-bottom: 1px solid rgba(176, 28, 36,.08); }
+.mkt td { height: 42px; padding: 0 8px; border-bottom: 1px solid rgba(176, 28, 36,.08); }
 .cell-name { z-index: 3; background: #FBF9F6; padding: 11px 16px; border-left: 1px solid rgba(176, 28, 36,.16); border-right: 1px solid rgba(176, 28, 36,.14); border-right: 1px solid rgba(176, 28, 36,.14); }
 .mkt-row.sel .cell-name, .mkt-row.sel .status-cell { background: #F5E7E4; }
 .mkt-row.fresh .cell-name, .mkt-row.fresh .status-cell { background: #FAF2F0; }
 .status-cell { z-index: 3; background: #FBF9F6; text-align: center; border-left: 1px solid rgba(176, 28, 36,.14); border-left: 1px solid rgba(176, 28, 36,.14); }
 .name-cell { min-width: 0; display: flex; align-items: center; gap: 6px; }
 .mini-tag { flex: none; padding: 1px 6px; border-radius: 5px; font-size: 10.5px; font-weight: 700; letter-spacing: .5px; }
-.name { cursor: pointer; font-weight: 700; color: #B01C24; border-bottom: 1px dashed rgba(176, 28, 36,.4); transition: all .2s; }
+.name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; font-weight: 700; color: #B01C24; border-bottom: 1px dashed rgba(176, 28, 36,.4); transition: all .2s; }
 .name:hover { color: #C2333B; text-shadow: 0 0 12px rgba(176, 28, 36,.35); }
 .new-badge { padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #C2333B, #8E1620); box-shadow: 0 0 10px rgba(176, 28, 36,.5); }
 .mono { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
@@ -1010,7 +1017,7 @@ function onJump(cpId: string, bondName: string) {
 .green { color: #1F6B3E; }
 .intent-bl { border-left: 1px solid rgba(176, 28, 36,.12); }
 .ext-bl { border-left: 1px solid rgba(176, 28, 36,.12); }
-.side-pill { padding: 2px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; }
+.side-pill { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; padding: 2px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; }
 .status { padding: 4px 11px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
 
 /* 浮条 */

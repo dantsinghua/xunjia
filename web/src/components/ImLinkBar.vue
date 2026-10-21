@@ -4,9 +4,11 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { App } from 'ant-design-vue'
 import OrgTree from './OrgTree.vue'
 import {
-  activateIm, imContactSource, imContacts, imCurrent, imFeedError, imIdentityText, imReady,
-  imTarget, loadImLinks, orgEmpty, orgTree, imOrg, orgEmptyLabel, orgReadNotice, imHealthError, refreshImContacts, selectImTarget, type ImLink,
+  activateIm, imContactSource, imContacts, imCurrent, imFeedError, imIdentityText, imModeLabel, imReady,
+  imTarget, loadImLinks, orgEmpty, orgTree, imOrg, imOrgStatus, orgEmptyLabel, orgReadNotice, imHealthError, refreshImContacts, selectImTarget, type ImLink,
 } from '../lib/imLink'
+
+const props = withDefaults(defineProps<{ showAddressBook?: boolean }>(), { showAddressBook: true })
 
 const { message } = App.useApp()
 const busy = ref(false)
@@ -27,7 +29,8 @@ onUnmounted(() => { if (healthTimer) clearInterval(healthTimer) })
 
 function optionLabel(link: ImLink) {
   const who = imIdentityText(link)
-  return who ? `${link.name} · ${who}` : link.name
+  const name = link.name || imModeLabel(link)
+  return who ? `${name} · ${who}` : name
 }
 
 async function onPick(e: Event) {
@@ -50,10 +53,11 @@ async function readBook(refresh = false) {
   try {
     const got = await refreshImContacts(refresh)
     openBook.value = true
-    if (got.source === 'catalog') {
-      message[orgEmptyLabel(got.org) ? 'warning' : 'success'](orgReadNotice(got.org))
+    if (got.org_state === 'error') message.warning(orgReadNotice(imOrg.value, got))
+    else if (got.source === 'catalog') {
+      message[orgEmptyLabel(got.org, got) ? 'warning' : 'success'](orgReadNotice(got.org, got))
     } else {
-      const via = got.source === 'contacts' ? '通讯录' : '私聊会话'
+      const via = ['contacts', 'its-relay'].includes(got.source) ? '通讯录' : '私聊会话'
       message.success(`已读取 ${got.contacts.length} 人（${via}）`)
     }
   } catch (err) {
@@ -74,26 +78,27 @@ async function readBook(refresh = false) {
         <option v-for="l in imReady" :key="l.id" :value="l.id">{{ optionLabel(l) }}</option>
       </select>
       <template v-if="imCurrent">
-        <span class="im-tag">{{ imCurrent.mode_label }}</span>
+        <span class="im-tag">{{ imModeLabel(imCurrent) }}</span>
         <span v-if="imCurrent.mode !== 'oss'" class="mono im-ep">{{ imCurrent.endpoint }}</span>
         <span v-else class="mono im-ep">{{ imCurrent.workbench_id }}</span>
-        <span v-if="imCurrent.catalog_stale" class="im-stale">工作台未上报</span>
-        <span v-else class="im-ok">测试通过</span>
+        <span v-if="imCurrent.catalog_stale" class="im-stale">目录已过期</span>
+        <span v-else class="im-ok">{{ imCurrent.mode === 'oss' ? '目录已校验' : '测试通过' }}</span>
       </template>
       <span v-else class="im-miss">未接入。请到采集通道选择公网上报或邮件中转，选好工作台和企点号，测试通过后在这里切换。</span>
       <span v-if="imFeedError" class="im-stale">{{ imFeedError }}</span>
-      <button class="btn-ghost im-btn" type="button" :disabled="busy || !imCurrent" @click="readBook(false)">读取通讯录</button>
-      <button class="btn-ghost im-btn" type="button" :disabled="busy || !imCurrent" @click="readBook(true)">刷新通讯录</button>
+      <button v-if="props.showAddressBook" class="btn-ghost im-btn" type="button" :disabled="busy || !imCurrent" @click="readBook(false)">读取通讯录</button>
+      <button v-if="props.showAddressBook" class="btn-ghost im-btn" type="button" :disabled="busy || !imCurrent" @click="readBook(true)">刷新通讯录</button>
       <router-link class="im-cfg" to="/link">配置通道</router-link>
     </div>
-    <div v-if="openBook && imCurrent" class="im-book" :class="{ tree: showOrg }">
+    <div v-if="props.showAddressBook && openBook && imCurrent" class="im-book" :class="{ tree: showOrg }">
       <template v-if="showOrg">
         <div class="im-head">
           <span class="im-k">组织架构</span>
           <span v-if="imTarget" class="im-ok">已选 {{ imTarget.name }}</span>
         </div>
-        <p v-if="orgEmpty" class="im-miss" data-org="empty">{{ orgEmptyLabel(imOrg) }}</p>
+        <p v-if="orgEmpty" class="im-miss" data-org="empty">{{ orgEmptyLabel(imOrg, imOrgStatus) }}</p>
         <OrgTree v-else :nodes="orgTree" />
+        <p v-if="imOrgStatus.org_state === 'error' && !orgEmpty" class="im-stale">{{ orgReadNotice(imOrg, imOrgStatus) }}</p>
         <div v-if="imContacts.length" class="im-people">
           <span class="im-k">私人好友 {{ imContacts.length }}</span>
           <button v-for="p in imContacts" :key="p.uin" type="button" class="im-person" :class="{ on: imTarget?.uin === p.uin }" @click="selectImTarget(p)">{{ p.name }} · <em class="mono">{{ p.uin }}</em></button>

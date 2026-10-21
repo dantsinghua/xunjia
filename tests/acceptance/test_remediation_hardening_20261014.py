@@ -237,31 +237,13 @@ def test_negative_bp_floor_is_not_stripped_or_abs_converted(service):
     assert p['items'][0]['limit_yield_pct']=='1.95'
 
 
-def test_production_oss_profile_requires_expected_bucket_and_http_optin(service,tmp_path,monkeypatch):
-    import base64
+def test_production_rejects_retired_direct_oss_profile_fields(service,tmp_path):
     from server.transport_config import load_transports
-    from imlink.sts_credentials import MQ_STS_URL
-    monkeypatch.setenv('SYNTHETIC_SEAL',base64.b64encode(b'0'*32).decode())
-    monkeypatch.setenv('SYNTHETIC_SIGN',base64.b64encode(b'1'*32).decode())
-    monkeypatch.setenv('SYNTHETIC_STS_AUTH','synthetic-auth')
-    monkeypatch.setenv('SYNTHETIC_STS_SM4','0123456789abcdef')
     profile={'owner_user_id':'owner-a','account_uid':'synthetic-001',
              'workbench_id':'synthetic-workbench',
              'seal_key_env':'SYNTHETIC_SEAL','sign_key_env':'SYNTHETIC_SIGN',
-             'oss':{'endpoint':'https://oss.example.invalid',
-                    'sts_url':MQ_STS_URL,
-                    'auth_key_env':'SYNTHETIC_STS_AUTH','sm4_key_env':'SYNTHETIC_STS_SM4'}}
+             'oss':{'endpoint':'https://legacy.invalid','expected_bucket':'synthetic-bucket'}}
     config=tmp_path/'transport.json'
-    def store():
-        config.write_text(json.dumps([profile]))
-        config.chmod(0o600)
-    store()
-    with pytest.raises(ValueError,match='expected_bucket'):
+    config.write_text(json.dumps([profile]));config.chmod(0o600)
+    with pytest.raises(ValueError,match='不支持字段'):
         load_transports(service.repo,str(config),str(tmp_path/'state'))
-    profile['oss']['expected_bucket']='synthetic-bucket'
-    store()
-    with pytest.raises(ValueError,match='MQ|HTTP'):
-        load_transports(service.repo,str(config),str(tmp_path/'state'))
-    monkeypatch.setenv('XUNJIA_ALLOW_INSECURE_MQ_HTTP','1')
-    adapters=load_transports(service.repo,str(config),str(tmp_path/'state'))
-    assert ('owner-a','synthetic-001','oss') in adapters.adapters

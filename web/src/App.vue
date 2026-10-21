@@ -4,40 +4,54 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { App as AntApp, ConfigProvider } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { antdTheme } from './theme'
 import { clearImState, setImBinding } from './lib/imLink'
 import { authToken, requestJson, setAuthToken, setAuthUserId } from './lib/http'
 
+import LoginGate from "./components/LoginGate.vue"
+import { consumeSsoLocation, type SsoProof } from "./lib/sso"
+
 const route = useRoute()
+const router = useRouter()
+const portalFailure = ref(false)
 const authReady = ref(false)
 const authBusy = ref(false)
 const authError = ref('')
 const identity = ref<{user_id:string;display_name:string;account_uid:string|null;binding:unknown}|null>(null)
-async function authenticate() {
+async function authenticate(provided?: SsoProof, destination?: string) {
   if (authBusy.value) return
-  authBusy.value = true; authReady.value = false; authError.value = ''
+  authBusy.value = true; authReady.value = false; authError.value = ""
+  let fromPortal = false
   try {
-    const query = new URLSearchParams(location.search)
-    const hashQuery = new URLSearchParams(location.hash.split('?')[1] || '')
-    const fields = ['userName','nickName','ts','sign']
-    const sso = Object.fromEntries(fields.map(k => [k, query.get(k) ?? hashQuery.get(k) ?? '']))
-    for (const k of [...fields,'user_id','userId']) { query.delete(k); hashQuery.delete(k) }
-    history.replaceState(null,'',location.pathname + (query.size ? '?' + query : '') + location.hash.split('?')[0] + (hashQuery.size ? '?' + hashQuery : ''))
-    if (sso.sign) {
-      clearImState(); setAuthToken('')
-      const res = await requestJson<{ok:boolean;token?:string;hint?:string}>('/api/auth/sso', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sso)})
-      if (!res.ok || !res.token) throw new Error(res.hint || '单点登录失败')
+    // Finish the initial navigation before consuming its portal parameters.
+    await router.isReady()
+    const incoming = provided ? { present: false, proof: null } : consumeSsoLocation()
+    if (incoming.present) await router.replace(location.hash.slice(1) || "/")
+    fromPortal = incoming.present
+    const proof = provided || incoming.proof
+    if (provided || incoming.present) {
+      clearImState(); setAuthUserId(""); setAuthToken(""); identity.value = null; portalFailure.value = false
+      if (!proof) throw new Error("门户登录参数不完整，请从门户重新进入")
+      const res = await requestJson<{ok:boolean;token?:string;hint?:string}>("/api/auth/sso", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(proof)})
+      if (!res.ok || !res.token) throw new Error(res.hint || "单点登录失败")
       setAuthToken(res.token)
     }
-    if (!authToken()) throw new Error('请从已授权的门户进入询价工作台')
-    const me = await requestJson<{ok:boolean;hint?:string;data:NonNullable<typeof identity.value>}>('/api/auth/me')
-    if (!me.ok || !me.data?.user_id) throw new Error(me.hint || '身份验证失败')
-    identity.value = me.data; setImBinding(me.data.binding, me.data.account_uid); setAuthUserId(me.data.user_id); authReady.value = true
-  } catch (e) { identity.value = null; authError.value = e instanceof Error ? e.message : '登录失败' }
-  finally { authBusy.value = false }
+    if (!authToken()) return
+    const me = await requestJson<{ok:boolean;hint?:string;data:NonNullable<typeof identity.value>}>("/api/auth/me")
+    if (!me.ok || !me.data?.user_id) throw new Error(me.hint || "身份验证失败")
+    identity.value = me.data; setImBinding(me.data.binding, me.data.account_uid); setAuthUserId(me.data.user_id)
+    authReady.value = true; portalFailure.value = false
+    if (destination && ["/quote", "/monitor", "/chat", "/link"].includes(destination)) await router.replace(destination)
+  } catch (e) {
+    identity.value = null; clearImState(); setAuthUserId(""); portalFailure.value = fromPortal
+    authError.value = e instanceof Error ? e.message : "登录失败"
+  } finally { authBusy.value = false }
 }
-function expired() { clearImState(); setAuthUserId(''); authReady.value = false; identity.value = null; authError.value = '登录已失效，请从门户重新进入' }
+function expired() { clearImState(); setAuthUserId(""); authReady.value = false; identity.value = null; authError.value = "登录已失效，请重新登录或从门户进入" }
+function logout() {
+  clearImState(); setAuthToken(""); setAuthUserId(""); identity.value = null; authReady.value = false; portalFailure.value = false; authError.value = ""
+}
 
 function storageChanged(event: StorageEvent) { if (event.key === 'xj_auth_token') { expired(); void authenticate() } }
 
@@ -89,6 +103,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
               <span class="dot" />
               <b>{{ identity?.display_name || '未登录' }}</b>
             </span>
+            <button v-if="authReady" type="button" class="logout" :disabled="authBusy" @click="logout">退出登录</button>
             <div class="meta">
               <div class="sub">现券交易台 · 内部系统</div>
               <div class="clock mono">{{ now }}</div>
@@ -98,11 +113,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
 
         <main class="pane">
           <router-view v-if="authReady" />
-        <main v-else class="glass" style="margin:40px auto;padding:32px;max-width:560px" role="status">
-          <h2>询价工作台登录</h2>
-          <p>{{ authBusy ? '正在验证身份…' : authError }}</p>
-          <button class="btn-primary" :disabled="authBusy" @click="authenticate">重新验证</button>
-        </main>
+        <LoginGate v-else :busy="authBusy" :error="authError" :portal-failure="portalFailure" @login="authenticate" @retry="authenticate()" @reset="logout" />
         <p v-if="authReady && !identity?.account_uid" role="alert" style="text-align:center">当前本人账号尚未绑定企点，发送功能不可用。</p>
         </main>
       </div>
@@ -152,6 +163,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
   display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px;
   background: rgba(255,255,255,.55); border: 1px solid rgba(176, 28, 36,.14); backdrop-filter: blur(8px);
 }
+.logout { border:1px solid #dacfc6; border-radius:7px; padding:5px 8px; background:transparent; cursor:pointer; }
 .online .dot { width: 7px; height: 7px; border-radius: 50%; background: #3DA65E; box-shadow: 0 0 8px rgba(61,166,94,.8); }  /* dotPulse 同理停用 */
 .online b { color: #2B2320; font-weight: 600; }
 .meta { text-align: right; line-height: 1.35; }

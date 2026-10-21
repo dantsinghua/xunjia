@@ -20,11 +20,21 @@ class AuthConfig:
     sso_skew_seconds: int = 60
     clock: Callable[[], float] = field(default=time.time, repr=False)
 
+    dev_login: bool = False
+    dev_user_name: str = ""
+    dev_nick_name: str = ""
+
     @classmethod
     def from_env(cls) -> "AuthConfig":
+        dev = os.environ.get("XUNJIA_AUTH_DEV_LOGIN", "0").strip().lower()
+        if dev not in ("0", "1", "false", "true"):
+            raise ValueError("XUNJIA_AUTH_DEV_LOGIN must be 0/1 or false/true")
         return cls(
             sso_secret=os.environ.get("XUNJIA_SSO_SECRET", ""),
             session_secret=os.environ.get("XUNJIA_AUTH_SECRET", ""),
+            dev_login=dev in ("1", "true"),
+            dev_user_name=os.environ.get("XUNJIA_DEV_USER_NAME", ""),
+            dev_nick_name=os.environ.get("XUNJIA_DEV_NICK_NAME", ""),
         )
 
 
@@ -55,9 +65,9 @@ class AuthService:
             raise AuthError("登录服务尚未配置")
         legacy = body.get("userId") or body.get("user_id")
         uid = legacy or body.get("userName") or body.get("user_name")
-        name = body.get("nickName") or body.get("nick_name") or (body.get("userName") if legacy else None)
+        name = body.get("nickName") or body.get("nick_name") or ((body.get("userName") or body.get("user_name")) if legacy else None)
         ts = body.get("ts") if "ts" in body else body.get("timestamp")
-        sign = body.get("sign")
+        sign = body.get("sign") or body.get("md5") or body.get("sig") or body.get("token")
         if not isinstance(uid, str) or not isinstance(name, str):
             raise AuthError("登录参数无效")
         uid, name = uid.strip(), name.strip()

@@ -1,0 +1,106 @@
+"""Two-field files MQ contract replacing the user-retired five-field OSS form.
+
+The original file is archived in this batch's retired-tests directory.
+"""
+import json
+from urllib.parse import urlsplit
+import pytest
+from playwright.sync_api import expect
+
+YAML = 'auth:\n  key: synthetic-browser-mq-key\n  sm4_key: 0123456789abcdef\n'
+
+
+@pytest.fixture
+def mq(ui):
+    page, base, *_ = ui
+    state = {'editable': True, 'configured': True, 'backend': 'file_gateway',
+             'base_url': 'https://mq.synthetic.invalid/its-relay/v1', 'credentials_set': True,
+             'account_uid': 'synthetic-account', 'workbench_id': 'synthetic-wb',
+             'revision': 'synthetic-revision-one', 'applied': True, 'note': 'synthetic applied'}
+    calls = [];behavior = {'passed': True, 'save_error': None, 'applied': True}
+    def route(r):
+        req=r.request;path=urlsplit(req.url).path;body=req.post_data_json if req.post_data else None
+        calls.append((req.method,path,body))
+        if req.method=='PUT':
+            if behavior['save_error']:
+                r.fulfill(status=409,content_type='application/json',body=json.dumps({'ok':False,'hint':behavior['save_error']}));return
+            state.update(base_url=body['base_url'],revision='synthetic-revision-two',applied=behavior['applied'],saved=True,
+                         note='配置已应用' if behavior['applied'] else '配置已保存，现役网关尚未加载')
+            data=state
+        elif path.endswith('/test'):
+            data={'passed':behavior['passed'],'connected':behavior['passed'],'saved':False,
+                  'steps':[{'name':'pending','ok':behavior['passed'],'detail':'待收文件 7 个，未取件' if behavior['passed'] else 'FILE_AUTH_REJECTED'}]}
+        else:data=state
+        r.fulfill(content_type='application/json',body=json.dumps({'ok':True,'data':data}))
+    page.route(base+'/api/im/mq-config**',route)
+    return page,base,state,calls,behavior
+
+
+def open_form(mq):
+    page,base,*_=mq;page.goto(base+'/#/link')
+    expect(page.get_by_test_id('mq-config')).to_be_visible()
+    expect(page.locator('[name=mq-base-url]')).to_have_value(mq[2]['base_url'])
+    return page
+
+
+def writes(mq):return [call for call in mq[3] if call[0]!='GET']
+
+
+def test_exactly_two_fields_no_sts_bucket_or_secret_readback(mq):
+    page=open_form(mq);expect(page.get_by_test_id('mq-config').locator('input,textarea,select')).to_have_count(2)
+    expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
+    for name in ('oss-sts-url','oss-endpoint','oss-bucket','oss-auth-key','oss-sm4-key'):
+        assert page.locator('[name='+name+']').count()==0
+
+
+def test_save_two_fields_revision_clears_yaml_without_other_operations(mq):
+    page=open_form(mq);page.locator('[name=mq-config-yaml]').fill(YAML)
+    page.locator('[name=mq-base-url]').fill('https://new-mq.synthetic.invalid/its-relay/v1')
+    page.get_by_test_id('mq-save').click();expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
+    values=writes(mq);assert len(values)==1 and values[0][:2]==('PUT','/api/im/mq-config')
+    assert set(values[0][2])=={'base_url','config_yaml','expected_revision'}
+    assert values[0][2]['config_yaml']==YAML and values[0][2]['expected_revision']=='synthetic-revision-one'
+    assert 'synthetic-browser-mq-key' not in page.evaluate('JSON.stringify({local:{...localStorage},session:{...sessionStorage}})')
+
+
+def test_blank_yaml_retains_and_public_status_survives_refresh(mq):
+    page=open_form(mq);page.get_by_test_id('mq-save').click();expect(page.get_by_test_id('mq-save')).to_be_enabled()
+    page.reload();expect(page.get_by_test_id('mq-config')).to_be_visible()
+    expect(page.locator('[name=mq-base-url]')).to_have_value(mq[2]['base_url'])
+    expect(page.locator('[name=mq-config-yaml]')).to_have_value('');assert writes(mq)[0][2]['config_yaml']==''
+
+
+def test_pending_uses_unsaved_form_without_saving_or_claiming_full_send(mq):
+    page=open_form(mq);page.locator('[name=mq-config-yaml]').fill(YAML)
+    page.locator('[name=mq-base-url]').fill('https://unsaved-mq.synthetic.invalid/its-relay/v1')
+    page.get_by_test_id('mq-test').click();result=page.get_by_test_id('mq-test-result')
+    expect(result).to_contain_text('待收文件 7 个');expect(result).to_contain_text('不代表')
+    values=writes(mq);assert len(values)==1 and values[0][:2]==('POST','/api/im/mq-config/test')
+    assert values[0][2]['base_url'].startswith('https://unsaved-mq.') and mq[2]['base_url']=='https://mq.synthetic.invalid/its-relay/v1'
+
+
+def test_failed_pending_displays_error_without_success_claim(mq):
+    mq[4]['passed']=False;page=open_form(mq);page.get_by_test_id('mq-test').click()
+    expect(page.get_by_test_id('mq-test-result')).to_contain_text('FILE_AUTH_REJECTED')
+    expect(page.get_by_test_id('mq-test-result')).not_to_contain_text('检查通过');assert len(writes(mq))==1
+
+
+def test_saved_not_applied_never_claims_active_connection(mq):
+    mq[4]['applied']=False;page=open_form(mq);page.get_by_test_id('mq-save').click();panel=page.get_by_test_id('mq-config')
+    expect(panel).to_contain_text('已保存');expect(panel).to_contain_text('尚未加载');expect(panel).not_to_contain_text('已保存并应用')
+
+
+def test_conflict_visible_without_auto_resubmit(mq):
+    mq[4]['save_error']='MQ配置已变化，请重新读取后再保存';page=open_form(mq);page.get_by_test_id('mq-save').click()
+    expect(page.get_by_text(mq[4]['save_error'],exact=False)).to_be_visible();assert len(writes(mq))==1
+
+
+def test_unwired_profile_disables_actions(mq):
+    mq[2].update(editable=False,applied=False,note='现役网关尚未确认此配置');page=open_form(mq)
+    expect(page.get_by_test_id('mq-save')).to_be_disabled();expect(page.get_by_test_id('mq-test')).to_be_disabled();assert writes(mq)==[]
+
+
+def test_im_failure_does_not_hide_mq_configuration(mq):
+    page,base,*_=mq
+    page.route(base+'/api/im/links',lambda r:r.fulfill(status=503,content_type='application/json',body=json.dumps({'ok':False,'hint':'synthetic IM down'})))
+    open_form(mq);expect(page.get_by_test_id('mq-save')).to_be_enabled()

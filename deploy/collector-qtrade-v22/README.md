@@ -1,5 +1,7 @@
 # QTrade V2.2 宿主源码与接线参考
 
+2026-10-20 更新：宿主向采集桥注入 `port.quiescent`，并提供按绑定账号读取的会话同步状态。配套协议库须包含 `ReceiverLedger.reset_status/account_epoch` 及会话重置控制包；新能力仅在原生静止检查可用时声明。Windows 账号详情使用同版只读状态接口。以下来源限制描述原 2026-10-17 交付，不代表本次修改没有保留前像；具体功能和升级规则见 [双端会话清空](../../docs/implementation/2026-10-20-session-reset.md)。
+
 安琳，本目录交付本批新增的两份运行源码、四份独立验收文件，以及既有 QTrade 文件的定点接线说明。它不是完整 QTrade 源码、安装包或可自动应用的通用补丁。复制两个模块本身不能完成装配；既有文件仍需按下文审核集成。
 
 ## 来源与限制
@@ -12,12 +14,12 @@
 
 ## 依赖与配置
 
-先在用于集成的独立 QTrade 副本中核对既有接口，再装配本目录。协议实现由主交付包 `collector-runtime/xunjia_collector_runtime-2.2.0-py3-none-any.whl` 提供；使用 QTrade 专用 Python 环境离线安装并执行 `pip check`，不能覆盖其他服务共享环境中的 `server`、`relay` 包。运行时需要以下接口：
+先在用于集成的独立 QTrade 副本中核对既有接口，再装配本目录。协议实现由主交付包 `collector-runtime/xunjia_collector_runtime-2.2.1-py3-none-any.whl` 提供；使用 QTrade 专用 Python 环境离线安装并执行 `pip check`，不能覆盖其他服务共享环境中的 `server`、`relay` 包。运行时需要以下接口：
 
 - `relay.protocol.Binding`；`CollectorBridge.publish_native/run_once/publish_capabilities`。
 - `ReceiverLedger.begin_inbound/stage_out/permission`；`QTradeNativePort` 的 `execution_permission` 和只读 `native_reconcile`。
-- `OSSTransport` 的 V2 通讯录路径为 `wb/{workbench}/out/xunjia/{account}/contacts.bin`，不能覆盖 deposit 的共享 `contacts.json`。
-- QTrade 当前 `Events.on_emit`、持久 `events_outbox` 和 `Store.outbox_seq_bounds`；`OssV1Box` 使用现有 STS provider。
+- `FileGatewayTransport` 通过 its-relay 三个文件接口收发协议包，不使用对象路径或共享 contacts.json。
+- QTrade 当前 `Events.on_emit`、持久 `events_outbox` 和 `Store.outbox_seq_bounds`；文件网关使用 config.yaml 中的 key/sm4_key 动态生成 access_token。
 
 `XUNJIA_COLLECTOR_VERSION=2.2` 显式选择 V2；不设置保持 v1，未知值停用询价消费者。`XUNJIA_COLLECTOR_CONFIG_FILE` 指向私有 JSON：
 
@@ -28,11 +30,18 @@
   "workbench_id": "REPLACE_WORKBENCH",
   "seal_key_file": "/private/path/seal-key.hex",
   "sign_key_file": "/private/path/sign-key.hex",
-  "allow_native_send": false
+  "file_gateway": {
+    "uplink_url": "https://REPLACE_LOCAL_COORDINATOR/up",
+    "downlink_url": "https://REPLACE_LOCAL_COORDINATOR/down",
+    "auth_file": "config.yaml",
+    "allow_http": false
+  }
 }
 ```
 
-密钥文件内容为十六进制，路径相对私有配置文件解析。配置、账本与已有 OSS 工作台身份必须一致；V2 配置缺失或失败不能回落 v1。默认 `allow_native_send=false`；安装和以下合成测试不需要启动账号或启用真实发送。
+密钥文件内容为十六进制，路径相对私有配置文件解析。配置、账本与已有 its-relay 工作台身份必须一致；V2 配置缺失或失败不能回落 v1。有效授权指令默认交给绑定账号发送，不另设真实发送开关；安装和以下合成测试不需要启动账号或启用真实发送。
+
+用户在工作台只填写一个远端 `base_url` 和 `config.yaml` 内容；上述两方向地址是现有协调器的内部路由，由部署接入，不能填成同一消费队列。没有独立 STS 认证或直连 OSS/Bucket 配置。
 
 ## 既有文件接线
 

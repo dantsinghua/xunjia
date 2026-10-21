@@ -25,6 +25,7 @@ mock/data/*.db-shm
 
 # Real deployment env is local-only; the package includes a clean initialized copy.
 config/xunjia.env
+/config.yaml
 # Local operational records and external tool binaries stay on this workstation.
 /data/
 /relay/side_a/state/

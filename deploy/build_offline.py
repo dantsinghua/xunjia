@@ -24,17 +24,21 @@ def template_is_clean(path):
     if 'REPLACE_DATABASE_PASSWORD' not in values.get('XUNJIA_DATABASE_URL',''):
         raise DeployError('TEMPLATE_DATABASE_SECRET_PRESENT')
     secrets=('XUNJIA_DIFY_APP_KEY','XUNJIA_DIFY_ANALYSIS_APP_KEY','XUNJIA_DIFY_REPLY_APP_KEY','XUNJIA_SSO_SECRET','XUNJIA_AUTH_SECRET',
-             'XUNJIA_AGENT_SERVICE_TOKEN','XUNJIA_STS_AUTH_KEY','XUNJIA_STS_SM4_KEY',
+             'XUNJIA_AGENT_SERVICE_TOKEN','QB_MYSQL_PASSWORD',
              'XUNJIA_SEAL_KEY','XUNJIA_SIGN_KEY')
     if any(values.get(key) for key in secrets): raise DeployError('TEMPLATE_CONTAINS_SECRET')
     known={'XUNJIA_DATABASE_URL','XUNJIA_HOST','XUNJIA_PORT','XUNJIA_WEB_DIST','XUNJIA_STATE_DIR',
-           'XUNJIA_RUN_BACKGROUND','XUNJIA_ENABLE_LIVE_TRANSPORT','XUNJIA_QUOTE_SOURCE',
-           'XUNJIA_TRANSPORT_CONFIG','XUNJIA_DIFY_URL','XUNJIA_ALLOWED_ORIGINS',
-           'XUNJIA_ALLOW_INSECURE_MQ_HTTP','XUNJIA_AGGREGATION_PROFILE','XUNJIA_REFERENCE_CONFIG',
+           'XUNJIA_RUN_BACKGROUND','XUNJIA_QUOTE_SOURCE',
+           'XUNJIA_TRANSPORT_CONFIG','XUNJIA_MQ_CONNECTION_CONFIG','XUNJIA_MQ_ALLOW_HTTP','XUNJIA_DIFY_URL','XUNJIA_ALLOWED_ORIGINS',
+           'XUNJIA_AGGREGATION_PROFILE','XUNJIA_REFERENCE_CONFIG',
            'XUNJIA_BOND_CONTEXT_MESSAGES','XUNJIA_DIFY_STAGE_BUDGET_SECONDS','XUNJIA_DIFY_TIMEOUT_SECONDS',
-           'XUNJIA_VALUATION_REFRESH_SECONDS',*secrets}
+           'XUNJIA_VALUATION_REFRESH_SECONDS','XUNJIA_AUTH_DEV_LOGIN','XUNJIA_DEV_USER_NAME','XUNJIA_DEV_NICK_NAME',
+           'QB_CONFIG_DIR','QB_MYSQL_HOST','QB_MYSQL_PORT','QB_MYSQL_USER','QB_MYSQL_DB',
+           'XUNJIA_QUOTE_CACHE','XUNJIA_QUOTE_MANAGERS','XUNJIA_QUOTE_AUTOSTART',*secrets}
     if set(values)-known:raise DeployError('UNKNOWN_TEMPLATE_FIELD')
-    if any(values.get(k)!='0' for k in ('XUNJIA_RUN_BACKGROUND','XUNJIA_ENABLE_LIVE_TRANSPORT')):
+    if values.get('XUNJIA_RUN_BACKGROUND')!='1':
+        raise DeployError('TEMPLATE_BACKGROUND_DISABLED')
+    if any(values.get(k,'0')!='0' for k in ('XUNJIA_AUTH_DEV_LOGIN','XUNJIA_QUOTE_AUTOSTART')):
         raise DeployError('TEMPLATE_AUTOMATION_ENABLED')
     return values
 def input_files(root):
@@ -56,7 +60,7 @@ def input_files(root):
     if collector_source_manifest.is_file():
         files['deploy/collector-qtrade-v22/manifest.json']=collector_source_manifest
     for name in ('requirements.lock','requirements-dev.lock','config/xunjia.env.example',
-                 'config/README.md','config/transport.example.json'):
+                 'config/README.md','config/transport.example.json','config/mq-connection.example.json'):
         files[name]=root/name
     measured=root/'config/aggregation-profile.measured.json'
     provenance=root/'config/aggregation-measurement.json'

@@ -18,9 +18,12 @@ class Inbox:
         payload=envelope.get('payload')
         if not isinstance(payload,dict):raise InvalidFact('Invalid input envelope')
         kind=envelope.get('kind')
+        if kind=='session_reset_ack':
+            return self.service.session_reset.accept_ack(binding,payload)
         if kind=='receipt':
             row=self.service.commands_core.get(owner,payload.get('command_id'))
             with store.db.transaction(write=False) as tx:thread=store._thread(tx,owner,row['thread_id'])
+            if thread.get('workbench_id')!=binding.workbench_id:raise InvalidFact('Receipt belongs to another collector thread')
             for key,value in (('command_id',row['command_id']),('content_hash',row['content_hash']),('peer_id',thread['peer_uid']),('account_uid',thread['account_uid'])):
                 if payload.get(key)!=value or envelope.get(key)!=value:raise InvalidFact('Receipt identity/content mismatch')
             return self.service.commands_core.receipt(owner,row['command_id'],account_uid=thread['account_uid'],peer_uid=thread['peer_uid'],content_hash=row['content_hash'],status=str(payload.get('status','')).upper(),evidence=payload.get('evidence'),native_id=payload.get('native_id'),occurred_at=payload.get('executed_at'))
@@ -37,18 +40,23 @@ class Inbox:
         source_command=payload.get('source_command_id')
         if direction=='out' and source_command:
             row=self.service.commands_core.get(owner,source_command)
+            with store.db.transaction(write=False) as tx:origin=store._thread(tx,owner,row['thread_id'])
+            if origin.get('workbench_id')!=binding.workbench_id:raise InvalidFact('Native echo belongs to another collector thread')
             if json.loads(row['body_json'])['text']!=payload.get('text'):raise InvalidFact('Native echo differs from immutable command text')
             return self.service.commands_core.receipt(owner,source_command,account_uid=binding.account_uid,peer_uid=peer,content_hash=row['content_hash'],status='SENT',evidence='native:'+str(native),native_id=native,occurred_at=occurred)
         with store.write(owner) as tx:
-            thread=tx.execute('SELECT * FROM xj2_thread WHERE owner_id=? AND account_uid=? AND peer_uid=?',(owner,binding.account_uid,peer)).fetchone()
+            thread=tx.execute('SELECT * FROM xj2_thread WHERE owner_id=? AND workbench_id=? AND account_uid=? AND peer_uid=?',(owner,binding.workbench_id,binding.account_uid,peer)).fetchone()
             if thread:tid=thread['thread_id']
             else:
-                tid=new_id();tx.execute('INSERT INTO xj2_thread(thread_id,owner_id,account_uid,peer_uid,ingest_revision,analyzed_revision) VALUES(?,?,?,?,0,0)',(tid,owner,binding.account_uid,peer))
+                tid=new_id();tx.execute('INSERT INTO xj2_thread(thread_id,owner_id,workbench_id,account_uid,peer_uid,ingest_revision,analyzed_revision) VALUES(?,?,?,?,?,0,0)',(tid,owner,binding.workbench_id,binding.account_uid,peer))
+                store._restore_thread_reset(tx,owner,binding.account_uid,peer,tid,binding.workbench_id)
+            current_thread=store._thread(tx,owner,tid)
+            old_source=store.source_before_reset(tx,current_thread,payload.get('source_seq'))
             fence=envelope.get('manual_fence_id');version=envelope.get('manual_fence_version',0)
-            if fence:
+            if fence and not old_source:
                 if type(version) is not int or version<1:raise InvalidFact('Invalid receiver manual fence')
                 tx.execute('UPDATE xj2_thread SET receiver_fence_id=?,receiver_fence_version=? WHERE thread_id=? AND receiver_fence_version<=?',(fence,version,tid,version))
-            if direction=='out' and not payload.get('historical') and not envelope.get('transport_replay'):
+            if direction=='out' and not old_source and not payload.get('historical') and not envelope.get('transport_replay'):
                 for p in tx.execute('SELECT member_id FROM xj2_peer WHERE thread_id=?',(tid,)).fetchall():
                     tx.execute('UPDATE xj2_peer SET send_allowed=0,control_version=control_version+1 WHERE member_id=?',(p['member_id'],))
                     store._cancel_commands(tx,member_id=p['member_id'],reason='NATIVE_HUMAN_MESSAGE')
@@ -80,20 +88,24 @@ class Inbox:
                 except Exception as exc:self.service.diagnostics.record('inbox',owner=owner,code='CURSOR_ACK_RETRY',error=exc)
         return done
 class Dispatcher:
-    def __init__(self,service,transport,*,live_enabled=False):
+    def __init__(self,service,transport):
         self.service,self.store,self.commands=service,service.store,service.commands_core
-        self.transport=transport;self.live_enabled=live_enabled
+        self.transport=transport
         self._last_check={}
     def _wire(self,owner,row):
         with self.store.write(owner) as tx:
             original=self.commands._command(tx,owner,row['command_id'])
             result=json.loads(original['result_json'])
-            if result.get('wire'):return result['wire']
             binding=self.store.require_binding(tx,owner)
-            thread=self.store._thread(tx,owner,original['thread_id'])
+            thread=self.store.require_current_thread(tx,owner,original['thread_id'])
+            if not thread.get('workbench_id'):raise InvalidFact('Thread collector provenance is not established')
+            if result.get('wire'):
+                if result['wire'].get('workbench_id')!=thread['workbench_id']:raise InvalidFact('Stored command collector differs from its thread')
+                return result['wire']
             body=json.loads(original['body_json'])
             wire={'business_version':'2.2','command_id':original['command_id'],'owner_user_id':owner,
-                  'account_uid':thread['account_uid'],'peer_id':thread['peer_uid'],'workbench_id':binding['workbench_id'],
+                  'account_uid':thread['account_uid'],'peer_id':thread['peer_uid'],'workbench_id':thread['workbench_id'],
+                  'account_epoch':original['account_epoch'],
                   'kind':'manual_send' if body['kind']=='MANUAL' else 'send_text','op':'send_text','text':body['text'],
                   'content_hash':original['content_hash'],'control_version':result['dispatch_version'],
                   'expires_at':original['expires_at'],'transport':binding['transport'],
@@ -123,10 +135,20 @@ class Dispatcher:
         return (catalog.get('account_uid')==wire['account_uid'] and
                 'negotiation-v22-watermark' in catalog.get('capabilities',[]))
     def run_once(self):
-        if self.transport is None:return 0
         processed=0
+        # Expiry is local bookkeeping, independent of whether sending is enabled.
+        # Never claim a fresh command or alter a submitted/uncertain command here.
         with self.store.db.transaction(write=False) as tx:
-            pending=tx.execute("SELECT c.*,g.owner_id FROM xj2_command c JOIN xj2_group g ON g.group_id=c.group_id WHERE c.state IN ('PENDING','UNKNOWN') ORDER BY c.created_at LIMIT 20").fetchall()
+            expired=tx.execute("SELECT c.command_id,g.owner_id FROM xj2_command c JOIN xj2_group g ON g.group_id=c.group_id WHERE c.state='QUEUED' AND c.expires_at<=? ORDER BY c.expires_at,c.command_id LIMIT 20",(self.store.clock(),)).fetchall()
+        for row in expired:
+            with self.store.write(row['owner_id']) as tx:
+                current=self.commands._command(tx,row['owner_id'],row['command_id'])
+                if current['state']=='QUEUED' and current['expires_at']<=self.store.clock():
+                    self.commands._cancel_unsubmitted(tx,current,'EXPIRED_BEFORE_DISPATCH')
+                    processed+=1
+        if self.transport is None:return processed
+        with self.store.db.transaction(write=False) as tx:
+            pending=tx.execute("SELECT c.*,g.owner_id FROM xj2_command c JOIN xj2_group g ON g.group_id=c.group_id JOIN xj2_thread t ON t.thread_id=c.thread_id JOIN xj2_binding b ON b.owner_id=t.owner_id AND b.account_uid=t.account_uid AND b.workbench_id=t.workbench_id WHERE c.state IN ('PENDING','UNKNOWN') AND NOT EXISTS (SELECT 1 FROM xj2_session_reset r WHERE r.owner_id=g.owner_id AND r.account_uid=t.account_uid AND r.workbench_id=t.workbench_id AND r.state IN ('local_applied','complete') AND r.account_epoch>c.account_epoch) ORDER BY c.created_at LIMIT 20").fetchall()
         for row in pending:
             owner=row['owner_id'];cid=row['command_id']
             if self._last_check.get(cid,0)>self.store.clock():continue
@@ -140,9 +162,8 @@ class Dispatcher:
             try:self._result(owner,wire,self.transport.cancel(wire) if cancel else self.transport.reconcile(wire))
             except Exception as exc:self._uncertain(owner,wire,exc)
             processed+=1
-        if not self.live_enabled:return processed
         with self.store.db.transaction(write=False) as tx:
-            queued=tx.execute("SELECT c.command_id,g.owner_id FROM xj2_command c JOIN xj2_group g ON g.group_id=c.group_id WHERE c.state='QUEUED' ORDER BY c.created_at,c.command_id LIMIT 20").fetchall()
+            queued=tx.execute("SELECT c.command_id,g.owner_id FROM xj2_command c JOIN xj2_group g ON g.group_id=c.group_id JOIN xj2_thread t ON t.thread_id=c.thread_id JOIN xj2_binding b ON b.owner_id=t.owner_id AND b.account_uid=t.account_uid AND b.workbench_id=t.workbench_id WHERE c.state='QUEUED' ORDER BY c.created_at,c.command_id LIMIT 20").fetchall()
         for row in queued:
             owner=row['owner_id'];cid=row['command_id']
             claim=self.commands.claim(owner,cid)

@@ -12,7 +12,7 @@ from build_offline import input_files, template_is_clean
 def test_background_analysis_configuration_does_not_require_live_sending():
     values = {'XUNJIA_DATABASE_URL': 'oceanbase://synthetic:synthetic@127.0.0.1/xunjia_test',
               'XUNJIA_SSO_SECRET': 'synthetic', 'XUNJIA_AUTH_SECRET': 'x' * 32,
-              'XUNJIA_RUN_BACKGROUND': '1', 'XUNJIA_ENABLE_LIVE_TRANSPORT': '0',
+              'XUNJIA_RUN_BACKGROUND': '1',
               'XUNJIA_DIFY_URL': 'http://127.0.0.1:8090/v1',
               'XUNJIA_DIFY_ANALYSIS_APP_KEY': 'synthetic-a',
               'XUNJIA_DIFY_REPLY_APP_KEY': 'synthetic-b',

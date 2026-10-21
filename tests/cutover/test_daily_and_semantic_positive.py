@@ -29,7 +29,7 @@ def test_rollover_asks_every_counterparty_and_updates_only_bp_boundary(tmp_path,
         auth_config=AuthConfig(sso_secret="synthetic-sso", session_secret="synthetic-session-at-least-32-characters", clock=clock),
         enable_background=False, chatflows=flows, transport=transport,
         aggregation=Aggregation(0, 0, 1000, "synthetic-fixture-only"),
-        reference_provider=reference, calendar=reference, enable_live_transport=True)
+        reference_provider=reference, calendar=reference)
     app.state.repository.bind_account(OWNER, "synthetic-account", "synthetic-wb")
     with TestClient(app) as client:
         client.headers["Authorization"] = "Bearer " + app.state.auth.issue_token(User())

@@ -120,10 +120,11 @@ def read_env(path: Path, *, require_private=True) -> dict[str, str]:
 def effective_env(values: dict, prefix: Path, app: Path) -> dict[str, str]:
     env = dict(values)
     defaults = {'XUNJIA_HOST': '127.0.0.1', 'XUNJIA_PORT': '18770',
-                'XUNJIA_RUN_BACKGROUND': '0', 'XUNJIA_ENABLE_LIVE_TRANSPORT': '0',
+                'XUNJIA_RUN_BACKGROUND': '1',
                 'XUNJIA_DIFY_URL': '', 'XUNJIA_DIFY_ANALYSIS_APP_KEY': '',
                 'XUNJIA_DIFY_REPLY_APP_KEY': '', 'XUNJIA_AGGREGATION_PROFILE': '',
-                'XUNJIA_TRANSPORT_CONFIG': '', 'XUNJIA_QUOTE_SOURCE': ''}
+                'XUNJIA_TRANSPORT_CONFIG': '', 'XUNJIA_MQ_CONNECTION_CONFIG': '', 'XUNJIA_QUOTE_SOURCE': '',
+                'XUNJIA_SEAL_KEY': '', 'XUNJIA_SIGN_KEY': '', 'XUNJIA_MQ_ALLOW_HTTP': '0'}
     for key, val in defaults.items(): env.setdefault(key, val)
     if env.get('XUNJIA_WEB_DIST', '') in ('', '/home/xunjia/app/frontend/dist', str(prefix/'app/frontend/dist')):
         env['XUNJIA_WEB_DIST'] = str(app/'frontend/dist')
@@ -141,7 +142,7 @@ def validate_config(values: dict, *, ready=False) -> list[str]:
         raise DeployError('CONFIG_DATABASE_URL_INVALID', 'select an explicit OceanBase xunjia_* schema')
     if not url.username or not url.password or 'REPLACE_' in dsn:
         missing.append('XUNJIA_DATABASE_URL')
-    for flag in ('XUNJIA_RUN_BACKGROUND', 'XUNJIA_ENABLE_LIVE_TRANSPORT', 'XUNJIA_ALLOW_INSECURE_MQ_HTTP'):
+    for flag in ('XUNJIA_RUN_BACKGROUND', 'XUNJIA_MQ_ALLOW_HTTP'):
         if values.get(flag, '0') not in ('0', '1'): raise DeployError('CONFIG_BOOLEAN_INVALID', flag)
     try:
         if not 1 <= int(values.get('XUNJIA_PORT', '18770')) <= 65535: raise ValueError
@@ -170,8 +171,6 @@ def validate_config(values: dict, *, ready=False) -> list[str]:
     if values.get('XUNJIA_RUN_BACKGROUND') == '1':
         for key in (*keys,'XUNJIA_DIFY_URL','XUNJIA_AGGREGATION_PROFILE'):
             if not values.get(key): missing.append(key)
-    if values.get('XUNJIA_ENABLE_LIVE_TRANSPORT')=='1' and not values.get('XUNJIA_TRANSPORT_CONFIG'):
-        missing.append('XUNJIA_TRANSPORT_CONFIG')
     if ready and missing:
         raise DeployError('CONFIG_INCOMPLETE', ', '.join(sorted(set(missing))))
     return sorted(set(missing))

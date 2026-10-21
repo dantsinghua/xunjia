@@ -20,7 +20,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 NAMESPACE = "xunjia"
 VERSION = 2
 MAX_BYTES = 4 * 1024 * 1024
-KINDS = frozenset({"command", "cancel", "query", "receipt", "event", "catalog", "contacts", "manifest"})
+KINDS = frozenset({"command", "cancel", "query", "receipt", "event", "catalog", "contacts", "manifest",
+                   "session_reset", "session_reset_ack"})
+RESET_FIELDS = ("reset_id", "owner_user_id", "workbench_id", "account_uid", "binding_version",
+                "expected_account_epoch", "account_epoch", "transport")
 RESULTS = frozenset({"accepted", "pending", "sent", "failed", "cancelled", "unknown"})
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
 
@@ -45,6 +48,20 @@ class Binding:
             raise ProtocolError("协议密钥配置无效")
 
 
+@dataclass(frozen=True)
+class OwnerKeys:
+    """Authenticate directory discovery before a concrete account is selected."""
+    owner_user_id: str
+    seal_key: bytes = field(repr=False)
+    sign_key: bytes = field(repr=False)
+
+    def __post_init__(self):
+        if not isinstance(self.owner_user_id,str) or not self.owner_user_id or len(self.owner_user_id)>160 or not self.owner_user_id.isprintable():
+            raise ProtocolError('业务用户身份无效')
+        if len(self.seal_key) not in (16,24,32) or len(self.sign_key)<32:
+            raise ProtocolError('协议密钥配置无效')
+
+
 def token(value: Any) -> str:
     if not isinstance(value, str) or not _ID.fullmatch(value) or value in (".", ".."):
         raise ProtocolError("协议标识无效")
@@ -60,6 +77,75 @@ def canonical(value: Any) -> bytes:
 
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def session_reset_hash(payload: dict) -> str:
+    if not isinstance(payload, dict) or any(key not in payload for key in RESET_FIELDS):
+        raise ProtocolError('SESSION_RESET_REQUEST_INVALID')
+    return digest({key: payload[key] for key in RESET_FIELDS})
+
+
+def validate_session_reset(payload: dict, binding: Binding, *, ack=False) -> None:
+    if not isinstance(payload, dict):
+        raise ProtocolError('SESSION_RESET_REQUEST_INVALID')
+    token(payload.get('reset_id'))
+    for key in ('owner_user_id', 'workbench_id', 'account_uid'):
+        if payload.get(key) != getattr(binding, key):
+            raise ProtocolError('SESSION_RESET_IDENTITY_MISMATCH')
+    for key in ('binding_version', 'expected_account_epoch', 'account_epoch'):
+        if type(payload.get(key)) is not int or payload[key] < (1 if key == 'binding_version' else 0):
+            raise ProtocolError('SESSION_RESET_EPOCH_INVALID')
+    if payload['account_epoch'] != payload['expected_account_epoch'] + 1:
+        raise ProtocolError('SESSION_RESET_EPOCH_INVALID')
+    if payload.get('transport') not in ('oss', 'mail'):
+        raise ProtocolError('SESSION_RESET_TRANSPORT_INVALID')
+    if payload.get('request_hash') != session_reset_hash(payload):
+        raise ProtocolError('SESSION_RESET_HASH_MISMATCH')
+    phase = payload.get('phase')
+    allowed = set(RESET_FIELDS) | {'request_hash', 'phase'}
+    if not ack:
+        if phase not in ('request', 'applied'):
+            raise ProtocolError('SESSION_RESET_PHASE_INVALID')
+        if phase == 'applied':
+            allowed.add('snapshot_hash')
+            if not re.fullmatch(r'[a-f0-9]{64}', str(payload.get('snapshot_hash', ''))):
+                raise ProtocolError('SESSION_RESET_SNAPSHOT_INVALID')
+    else:
+        allowed |= {'snapshot_hash', 'snapshot', 'code'}
+        if phase not in ('waiting_native', 'barrier_ready', 'complete', 'blocked'):
+            raise ProtocolError('SESSION_RESET_PHASE_INVALID')
+        if not isinstance(payload.get('code'), str) or not payload['code']:
+            raise ProtocolError('SESSION_RESET_CODE_INVALID')
+        snap = payload.get('snapshot')
+        if phase == 'blocked' and snap is None and payload.get('snapshot_hash') == '':
+            pass
+        else:
+            if not isinstance(snap, dict) or payload.get('snapshot_hash') != digest(snap):
+                raise ProtocolError('SESSION_RESET_SNAPSHOT_INVALID')
+            if type(snap.get('account_epoch')) is not int or snap['account_epoch'] != payload['account_epoch']:
+                raise ProtocolError('SESSION_RESET_SNAPSHOT_EPOCH_INVALID')
+            for key in ('published_source_highwater', 'pending_inbound_count', 'pending_echo_count', 'old_native_tasks_running'):
+                if type(snap.get(key)) is not int or snap[key] < 0:
+                    raise ProtocolError('SESSION_RESET_SNAPSHOT_INVALID')
+            if type(snap.get('snapshot_at')) not in (int, float) or not math.isfinite(snap['snapshot_at']):
+                raise ProtocolError('SESSION_RESET_SNAPSHOT_INVALID')
+            if not isinstance(snap.get('peers'), dict) or not isinstance(snap.get('unresolved_history'), list):
+                raise ProtocolError('SESSION_RESET_SNAPSHOT_INVALID')
+            for peer_id, peer in snap['peers'].items():
+                token(peer_id)
+                if not isinstance(peer, dict):
+                    raise ProtocolError('SESSION_RESET_PEER_INVALID')
+                for key in ('source_watermark', 'receiver_fence_version', 'min_control_version'):
+                    if type(peer.get(key)) is not int or peer[key] < 0:
+                        raise ProtocolError('SESSION_RESET_PEER_INVALID')
+                validate_fence(peer, 'receiver_fence_id', 'receiver_fence_version', allow_empty=True)
+                if peer['source_watermark'] > snap['published_source_highwater']:
+                    raise ProtocolError('SESSION_RESET_PEER_WATERMARK_INVALID')
+            if phase in ('barrier_ready', 'complete') and any(snap[key] for key in
+                    ('pending_inbound_count', 'pending_echo_count', 'old_native_tasks_running')):
+                raise ProtocolError('SESSION_RESET_NOT_QUIESCENT')
+    if set(payload) - allowed:
+        raise ProtocolError('SESSION_RESET_FIELDS_INVALID')
 
 
 def envelope(binding: Binding, kind: str, payload: dict, *, message_id: str,
@@ -92,6 +178,8 @@ def validate_command(command: dict, binding: Binding) -> None:
         raise ProtocolError("命令有效期无效")
     if command.get("transport") not in ("oss", "mail"):
         raise ProtocolError("命令主通道无效")
+    if type(command.get('account_epoch', 0)) is not int or command.get('account_epoch', 0) < 0:
+        raise ProtocolError('COMMAND_ACCOUNT_EPOCH_INVALID')
     if 'business_version' in command:
         if command['business_version']!='2.2' or type(command.get('source_watermark')) is not int or command['source_watermark']<0:
             raise ProtocolError('Unsupported business version or missing source watermark')
@@ -117,7 +205,9 @@ class Codec:
     def __init__(self, binding: Binding, *, clock=time.time, max_bytes=MAX_BYTES, clock_skew=60):
         self.binding, self.clock, self.max_bytes, self.clock_skew = binding, clock, max_bytes, clock_skew
 
-    def _validate(self, data):
+    def _validate(self, data, *, allow_expired=False):
+        if not isinstance(self.binding, Binding):
+            raise ProtocolError('目录认证范围尚未选择具体采集端账号')
         if not isinstance(data, dict) or data.get("version") != VERSION or data.get("namespace") != NAMESPACE or data.get("kind") not in KINDS:
             raise ProtocolError("不支持或缺失认证协议版本")
         for key in ("owner_user_id", "account_uid", "workbench_id"):
@@ -130,12 +220,12 @@ class Codec:
             raise ProtocolError('载荷摘要与正文不符')
         if not isinstance(data.get('content_hash'), str) or not re.fullmatch(r'[a-f0-9]{64}', data['content_hash']):
             raise ProtocolError('业务内容摘要无效')
-        if data['kind'] in ('event', 'catalog', 'contacts', 'manifest') and data['content_hash'] != digest(data['payload']):
+        if data['kind'] in ('event', 'catalog', 'contacts', 'manifest', 'session_reset', 'session_reset_ack') and data['content_hash'] != digest(data['payload']):
             raise ProtocolError('事件或目录摘要不符')
         created, expires = data.get("created_at"), data.get("expires_at")
         if any(type(v) not in (int, float) or not math.isfinite(v) for v in (created, expires)):
             raise ProtocolError("信封时间无效")
-        if created > self.clock() + self.clock_skew or expires <= created or expires <= self.clock():
+        if created > self.clock() + self.clock_skew or expires <= created or (not allow_expired and expires <= self.clock()):
             raise ProtocolError("信封过期或时间无效")
         if data["kind"] in ("command", "cancel", "query", "receipt"):
             token(data.get("command_id")); token(data.get("peer_id"))
@@ -149,6 +239,8 @@ class Codec:
                     raise ProtocolError("命令与信封身份不符")
             if data['kind']=='command' and data['expires_at']!=data['payload']['expires_at']:
                 raise ProtocolError('命令有效期与信封不符')
+        if data['kind'] in ('session_reset', 'session_reset_ack'):
+            validate_session_reset(data['payload'], self.binding, ack=data['kind'] == 'session_reset_ack')
         if data['kind']=='receipt':
             if 'text' in data['payload']:raise ProtocolError('回执不得携带业务正文')
             native_id=data['payload'].get('native_id')
@@ -189,7 +281,8 @@ class Codec:
         nonce = secrets.token_bytes(12)
         return nonce + AESGCM(self.binding.seal_key).encrypt(nonce, plain, None)
 
-    def unpack(self, blob: bytes) -> dict:
+    def _authenticated(self, blob: bytes) -> dict:
+        """Authenticate bytes before inspecting any claimed routing identity."""
         try:
             if not isinstance(blob, bytes) or not 28 <= len(blob) <= self.max_bytes:
                 raise ValueError()
@@ -207,7 +300,33 @@ class Codec:
             expected = "hmac-sha256=" + hmac.new(self.binding.sign_key, canonical(data), hashlib.sha256).hexdigest()
             if not isinstance(signature, str) or not hmac.compare_digest(expected, signature):
                 raise ValueError()
+            return data
+        except Exception:
+            raise ProtocolError("信封认证、身份或有效期校验失败") from None
+
+    def unpack(self, blob: bytes) -> dict:
+        data = self._authenticated(blob)
+        try:
             self._validate(data)
+            return data
+        except Exception:
+            raise ProtocolError("信封认证、身份或有效期校验失败") from None
+
+    def unpack_owned(self, blob: bytes, *, allow_expired=False) -> dict:
+        """Authenticate a dynamic pair for this owner; fixed consumers use unpack.
+
+        Expired signed publications can only be used as stale directory cache.
+        """
+        data = self._authenticated(blob)
+        try:
+            if data.get('owner_user_id') != self.binding.owner_user_id:
+                raise ProtocolError('信封所属用户不匹配')
+            binding = Binding(self.binding.owner_user_id, token(data.get('account_uid')),
+                              token(data.get('workbench_id')), self.binding.seal_key,
+                              self.binding.sign_key)
+            Codec(binding, clock=self.clock, max_bytes=self.max_bytes,
+                  clock_skew=self.clock_skew)._validate(
+                      data, allow_expired=allow_expired and data.get('kind') in ('catalog', 'contacts'))
             return data
         except Exception:
             raise ProtocolError("信封认证、身份或有效期校验失败") from None

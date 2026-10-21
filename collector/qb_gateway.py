@@ -24,6 +24,10 @@ WS = os.environ.get("QB_WS_URL", "wss://bosh2.innodealing.com/onshore-ws-gateway
 FE_VER = os.environ.get("QB_FE_VER", "14260")
 
 
+class QuoteAuthenticationError(RuntimeError):
+    """The authentication response did not provide a usable market identity."""
+
+
 def merge_sid(cookie: str, sid: str) -> str:
     """Cookie 的 sid 优先；独立 SID 只补缺，按完整 cookie 名判断。"""
     cookie, sid = cookie.strip(), sid.strip()
@@ -60,7 +64,7 @@ def authenticate(cookie: str, device_id: str) -> dict:
         body = r.json()
     data = body.get("data") if isinstance(body, dict) else None
     if not data or not (data.get("t") or data.get("token")):
-        raise RuntimeError("authenticate 未返回 token")
+        raise QuoteAuthenticationError("authenticate 未返回 token")
     return data
 
 

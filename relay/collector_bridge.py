@@ -1,24 +1,25 @@
 """Injectable collector loop; does not start accounts, pollers or network clients.
 
-Disable the legacy xunjia poller before installing this bridge on the same OSS
-prefix. Both routes must share the new receiver ledger and source publication
+Disable the legacy xunjia poller before installing this bridge. Both routes must
+share the receiver ledger and source publication
 state. Run run_once() in the collector's existing scheduler, not a second agent.
 """
 from __future__ import annotations
 
-import hashlib
 import math
-from pathlib import PurePosixPath
 
 from relay.protocol import Codec, ProtocolError, digest, token
 from server.receiver_ledger import ReceiverLedger
 from server.transports import TransportUnavailable
+from server.file_gateway_transport import FileGatewayTransport
 
 
 class CollectorBridge:
     def __init__(self, *, ledger: ReceiverLedger, adapters: dict, native_send,
                  native_reconcile, primary_transport: str | None = None, object_store=None,
-                 echo_wait_seconds=5, native_verification_budget=5):
+                 echo_wait_seconds=5, native_verification_budget=5, native_quiescent=None):
+        if object_store is not None:
+            raise TransportUnavailable('DIRECT_OSS_RETIRED_USE_FILE_GATEWAY')
         if not (0 < echo_wait_seconds <= 5 and echo_wait_seconds <= native_verification_budget):
             raise ValueError('echo等待须为正数且不超过5秒及native验证预算')
         self.echo_wait_seconds=echo_wait_seconds
@@ -26,47 +27,32 @@ class CollectorBridge:
             raise TransportUnavailable('NOT_CONFIGURED: COLLECTOR_PRIMARY_TRANSPORT')
         self.ledger, self.binding, self.adapters = ledger, ledger.binding, adapters
         self.native_send, self.native_reconcile = native_send, native_reconcile
+        self.native_quiescent = native_quiescent
         # The construction hint is accepted for existing schedulers only. Native
         # events always use every configured uplink; command.transport selects replies.
-        self.object_store = object_store
         self.last_publication_errors = []
         self.codec = Codec(self.binding, clock=ledger.clock)
         for route,adapter in adapters.items():
             if route not in ('oss','mail') or adapter.binding != self.binding:
                 raise ProtocolError('采集桥通道与固定绑定不匹配')
+            if route == 'oss' and not getattr(adapter,'polls_downlink',False):
+                raise TransportUnavailable('DIRECT_OSS_RETIRED_USE_FILE_GATEWAY')
         paths={adapter.store.path.resolve() for adapter in adapters.values()}
         if not adapters or len(paths)!=1:raise ProtocolError('两路采集上行必须共享同一持久事件账本')
-        self.prefix=f'wb/{token(self.binding.workbench_id)}/in/xunjia/'
 
     def _oss_inputs(self, limit, errors):
         if 'oss' not in self.adapters:return []
-        if self.object_store is None:
-            errors.append('NOT_CONFIGURED: COLLECTOR_OSS_LIST_GET');return []
-        try:names=self.object_store.list(self.prefix)
-        except Exception:
-            errors.append('OSS_INBOX_LIST_UNAVAILABLE');return []
-        def priority(name):
-            leaf=PurePosixPath(name).name
-            return (0 if leaf.startswith('cancel-') else 1 if leaf.startswith('query-') else 2,name)
-        pending=[]
-        for name in sorted(names,key=priority):
-            if not isinstance(name,str) or not name.startswith(self.prefix) or not name.endswith('.bin'):
-                continue
-            leaf=name[len(self.prefix):]
-            if '/' in leaf or '..' in leaf:continue
-            try:blob=self.object_store.get(name)
+        adapter=self.adapters['oss']
+        if getattr(adapter,'polls_downlink',False):
+            if getattr(adapter,'role',None)!='collector':
+                errors.append('FILE_GATEWAY_COLLECTOR_ROLE_REQUIRED');return []
+            try:
+                rows=(adapter.poll(limit=limit,control_intake=True) if isinstance(adapter,FileGatewayTransport)
+                      else adapter.poll(limit=limit))
             except Exception:
-                errors.append('OSS_INBOX_GET_UNAVAILABLE');continue
-            if blob is None:continue
-            fingerprint=hashlib.sha256(blob).hexdigest();source='oss:'+name
-            if self.ledger.source_done(source,fingerprint):continue
-            try:env=self.codec.unpack(blob)
-            except ProtocolError:
-                self.ledger.mark_source(source,fingerprint,reason='protocol-rejected')
-                errors.append('OSS_INBOX_PROTOCOL_REJECTED');continue
-            pending.append((env,source,fingerprint,None,None))
-            if len(pending)>=limit:break
-        return pending
+                errors.append('FILE_GATEWAY_DOWNLINK_UNAVAILABLE');return []
+            return [(row['envelope'],'file-gateway:'+row['source_token'],digest(row['envelope']),adapter,row['source_token']) for row in rows]
+        raise TransportUnavailable('DIRECT_OSS_RETIRED_USE_FILE_GATEWAY')
 
     def _mail_inputs(self, limit, errors):
         adapter=self.adapters.get('mail')
@@ -81,8 +67,10 @@ class CollectorBridge:
         processed=0;errors=[]
         try:self.flush_deferred()
         except Exception:errors.append('DEFERRED_EVENT_PUBLICATION_PENDING')
+        try:self.progress_session_resets()
+        except Exception:errors.append('SESSION_RESET_PROGRESS_PENDING')
         inputs=self._oss_inputs(limit,errors)+self._mail_inputs(limit,errors)
-        order={'cancel':0,'query':1,'command':2}
+        order={'session_reset':-1,'cancel':0,'query':1,'command':2}
         for env,source,fingerprint,adapter,source_token in sorted(inputs,key=lambda item:order.get(item[0].get('kind'),3)):
             try:
                 if self.ledger.source_done(source,fingerprint):
@@ -98,6 +86,14 @@ class CollectorBridge:
                     errors.append('UNSUPPORTED_DOWNLINK_KIND');continue
                 reply=self.adapters.get(command.get('transport'))
                 if reply is None:raise TransportUnavailable('NOT_CONFIGURED: ORIGINAL_REPLY_TRANSPORT')
+                if kind=='session_reset':
+                    ack=self.ledger.session_reset(command,native_quiescent=self.native_quiescent,
+                        published_source_highwater=reply.store.source_highwater)
+                    reply.queue_session_reset_ack(ack)
+                    self.ledger.mark_source(source,fingerprint,reason='session-reset-ack-queued')
+                    if adapter:adapter.ack(source_token)
+                    processed+=1
+                    continue
                 if kind=='cancel':outcome=self.ledger.cancel(command)
                 elif kind=='query':outcome=self.ledger.reconcile(command,self.native_reconcile)
                 else:outcome=self.ledger.execute(command,self.native_send)
@@ -125,10 +121,26 @@ class CollectorBridge:
             except Exception:errors.append(route+':EVENT_PUBLICATION_PENDING')
         return {'processed':processed,'errors':errors}
 
+    def progress_session_resets(self):
+        """Resume a durable barrier after restart without re-executing a command."""
+        acknowledgements=[]
+        for request in self.ledger.pending_session_resets():
+            adapter=self.adapters.get(request['transport'])
+            if adapter is None:
+                raise TransportUnavailable('NOT_CONFIGURED: ORIGINAL_REPLY_TRANSPORT')
+            ack=self.ledger.session_reset(request,native_quiescent=self.native_quiescent,
+                published_source_highwater=adapter.store.source_highwater)
+            adapter.queue_session_reset_ack(ack)
+            acknowledgements.append(ack)
+        return acknowledgements
+
     def publish_capabilities(self,*,updated_at=None):
+        capabilities=['negotiation-v22-watermark']
+        if callable(self.native_quiescent) and callable(getattr(self.ledger,'session_reset',None)):
+            capabilities.append('negotiation-v22-session-reset')
         payload={'account_uid':self.binding.account_uid,'workbench_id':self.binding.workbench_id,
                  'updated_at':self.ledger.clock() if updated_at is None else updated_at,
-                 'capabilities':['negotiation-v22-watermark'],'accounts':[{'account_uid':self.binding.account_uid}]}
+                 'capabilities':capabilities,'accounts':[{'account_uid':self.binding.account_uid}]}
         return [adapter.publish_catalog(payload) for adapter in self.adapters.values()]
     def replay_events(self,first_seq,last_seq):
         """Bounded administrator recovery; immutable native facts, read-only replay.

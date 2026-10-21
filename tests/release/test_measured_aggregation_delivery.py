@@ -96,7 +96,8 @@ def test_selected_repository_profile_and_all_benchmark_sources_are_package_input
         assert (ROOT/relative).is_file()
         assert files.get(relative) == ROOT/relative
     env = build_offline.template_is_clean(ROOT/'config/xunjia.env.example')
-    assert env['XUNJIA_RUN_BACKGROUND'] == env['XUNJIA_ENABLE_LIVE_TRANSPORT'] == '0'
+    assert env['XUNJIA_RUN_BACKGROUND'] == '1'
+    assert 'XUNJIA_ENABLE_LIVE_TRANSPORT' not in env
 
 
 @pytest.mark.parametrize('benchmarks_present', [False, True])

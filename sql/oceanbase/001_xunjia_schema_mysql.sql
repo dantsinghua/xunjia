@@ -33,12 +33,12 @@ CREATE TABLE IF NOT EXISTS xj2_group (
 
 CREATE TABLE IF NOT EXISTS xj2_thread (
         thread_id VARCHAR(64) PRIMARY KEY, owner_id VARCHAR(160) NOT NULL,
-        account_uid VARCHAR(80) NOT NULL, peer_uid VARCHAR(160) NOT NULL,
+        workbench_id VARCHAR(160), account_uid VARCHAR(80) NOT NULL, peer_uid VARCHAR(160) NOT NULL,
         ingest_revision BIGINT NOT NULL, analyzed_revision BIGINT NOT NULL,
         pending_since DOUBLE, last_ingest_at DOUBLE,
         source_watermark BIGINT NOT NULL DEFAULT 0, dispatch_version BIGINT NOT NULL DEFAULT 0,
         receiver_fence_id VARCHAR(160), receiver_fence_version BIGINT NOT NULL DEFAULT 0,
-        UNIQUE(owner_id,account_uid,peer_uid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+        UNIQUE(owner_id,workbench_id,account_uid,peer_uid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE IF NOT EXISTS xj2_peer (
         member_id VARCHAR(64) PRIMARY KEY, group_id VARCHAR(64) NOT NULL,
@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS xj2_command (
         basis_json LONGTEXT NOT NULL, result_json LONGTEXT NOT NULL,
         cancel_requested INTEGER NOT NULL, sent_at DOUBLE, native_id VARCHAR(160),
         created_at DOUBLE NOT NULL, expires_at DOUBLE NOT NULL,
+        account_epoch BIGINT NOT NULL DEFAULT 0,
         UNIQUE(member_id,request_id), KEY idx_xj2_cmd_pending (thread_id,state,created_at), KEY idx_xj2_cmd_group (group_id,state)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE IF NOT EXISTS xj2_decision (
@@ -123,3 +124,14 @@ CREATE TABLE IF NOT EXISTS xj2_reply_job (
         lease_until DOUBLE NOT NULL, attempts BIGINT NOT NULL,
         result_json LONGTEXT NOT NULL, created_at DOUBLE NOT NULL,
         UNIQUE(member_id,request_id), KEY idx_xj2_reply_job (state,lease_until)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS xj2_session_reset (
+        reset_id VARCHAR(64) PRIMARY KEY, owner_id VARCHAR(160) NOT NULL,
+        workbench_id VARCHAR(160) NOT NULL, account_uid VARCHAR(80) NOT NULL,
+        binding_version BIGINT NOT NULL, request_id VARCHAR(160) NOT NULL,
+        request_hash VARCHAR(64) NOT NULL, account_epoch BIGINT NOT NULL,
+        state VARCHAR(24) NOT NULL, code VARCHAR(160) NOT NULL,
+        request_json LONGTEXT NOT NULL, snapshot_hash VARCHAR(64) NOT NULL,
+        snapshot_json LONGTEXT NOT NULL, local_cut_json LONGTEXT NOT NULL,
+        created_at DOUBLE NOT NULL, updated_at DOUBLE NOT NULL,
+        UNIQUE(owner_id,request_id), UNIQUE(owner_id,workbench_id,account_uid,account_epoch), KEY idx_xj2_reset_scope (owner_id,account_uid,state)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

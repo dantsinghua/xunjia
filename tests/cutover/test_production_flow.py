@@ -54,7 +54,7 @@ def desk(tmp_path):
     app=create_app(database_url='sqlite:///'+str(tmp_path/'current.db'),auth_config=AuthConfig(sso_secret='synthetic-sso',session_secret='synthetic-session-at-least-32-characters',clock=clock),
                    enable_background=False,chatflows=flows,transport=transport,
                    # This is a TEST policy, not a measured production profile.
-                   aggregation=Aggregation(0,0,1000,'synthetic-fixture-only'),enable_live_transport=True)
+                   aggregation=Aggregation(0,0,1000,'synthetic-fixture-only'))
     token=app.state.auth.issue_token(User())
     app.state.repository.bind_account(OWNER,'synthetic-account','synthetic-wb')
     with TestClient(app) as client:

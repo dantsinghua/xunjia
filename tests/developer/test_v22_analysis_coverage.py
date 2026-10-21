@@ -20,6 +20,7 @@ def desk(tmp_path):
     app = create_app(database_url='sqlite:///' + str(tmp_path / 'coverage.db'),
         enable_background=False, auth_config=AuthConfig(clock=lambda: 1792202400.0), chatflows=flows)
     store = app.state.repository
+    store.bind_account(OWNER, 'synthetic-account', 'synthetic-workbench')
     group = store.create_group(OWNER, bond_code='SYN-A', our_side='BUY', target_volume='1000',
         trade_day=DAY, policy=LimitPolicy('ABSOLUTE', '3.12'))
     mid, thread = store.add_member(OWNER, group, account_uid='synthetic-account', peer_uid='synthetic-peer')

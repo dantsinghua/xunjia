@@ -50,6 +50,53 @@ class Store:
             tx.execute("SELECT owner_id FROM xj2_owner WHERE owner_id=?" + lock, (owner,)).fetchone()
             yield tx
             tx.execute("UPDATE xj2_owner SET projection_version=projection_version+1 WHERE owner_id=?", (owner,))
+    def _account_reset(self,tx,owner,account_uid,*,workbench_id=None,applied_only=False):
+        if workbench_id is None:
+            binding=tx.execute('SELECT account_uid,workbench_id FROM xj2_binding WHERE owner_id=?',(owner,)).fetchone()
+            if not binding or binding['account_uid']!=account_uid:return None
+            workbench_id=binding['workbench_id']
+        if not workbench_id:return None # Unattributed legacy threads never inherit a selected collector.
+        state=" AND r.state IN ('local_applied','complete')" if applied_only else ''
+        row=tx.execute('SELECT r.* FROM xj2_session_reset r WHERE r.owner_id=? AND r.account_uid=? AND r.workbench_id=?'+state+' ORDER BY r.account_epoch DESC LIMIT 1',(owner,account_uid,workbench_id)).fetchone()
+        return dict(row) if row else None
+    def account_epoch(self,tx,owner,account_uid,*,workbench_id=None,require_complete=False):
+        reset=self._account_reset(tx,owner,account_uid,workbench_id=workbench_id)
+        if reset and require_complete and reset['state']!='complete':
+            raise InvalidFact('SESSION_RESET_IN_PROGRESS:'+reset['state'])
+        return reset['account_epoch'] if reset else 0
+    @staticmethod
+    def thread_is_current(tx,thread):
+        binding=tx.execute('SELECT account_uid,workbench_id FROM xj2_binding WHERE owner_id=?',(thread['owner_id'],)).fetchone()
+        return binding is None or (thread.get('workbench_id') is not None and (thread['account_uid'],thread['workbench_id'])==(binding['account_uid'],binding['workbench_id']))
+    def require_current_thread(self,tx,owner,thread_id):
+        thread=self._thread(tx,owner,thread_id)
+        if not self.thread_is_current(tx,thread):raise InvalidFact('Thread does not belong to the selected collector/account')
+        return thread
+    def _restore_thread_reset(self,tx,owner,account_uid,peer_uid,thread_id,workbench_id):
+        reset=self._account_reset(tx,owner,account_uid,workbench_id=workbench_id or '',applied_only=True)
+        if not reset:return
+        peer=json.loads(reset['snapshot_json'])['peers'].get(peer_uid,{})
+        tx.execute('UPDATE xj2_thread SET source_watermark=?,dispatch_version=?,receiver_fence_id=?,receiver_fence_version=? WHERE thread_id=?',
+            (peer.get('source_watermark',0),max(0,peer.get('min_control_version',1)-1),peer.get('receiver_fence_id',''),peer.get('receiver_fence_version',0),thread_id))
+    def _reset_message_filter(self,tx,thread,alias=''):
+        reset=self._account_reset(tx,thread['owner_id'],thread['account_uid'],workbench_id=thread.get('workbench_id') or '',applied_only=True)
+        if not reset:return '',[]
+        cut=json.loads(reset['local_cut_json']);prefix=alias+'.' if alias else ''
+        return (' AND '+prefix+'ingest_revision>? AND ('+prefix+'source_seq<=0 OR '+prefix+'source_seq>?) AND '+prefix+'historical=0',
+            [cut.get('local_revisions',{}).get(thread['thread_id'],0),cut['source_highwater']])
+    def _eligible_messages(self,tx,thread,after,limit=100):
+        clause,args=self._reset_message_filter(tx,thread)
+        return [dict(r) for r in tx.execute('SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>?'+clause+' ORDER BY ingest_revision LIMIT ?',
+            (thread['thread_id'],after,*args,limit)).fetchall()]
+    def _analysis_pending(self,tx,thread):
+        if not self.thread_is_current(tx,thread):return False
+        reset=self._account_reset(tx,thread['owner_id'],thread['account_uid'],workbench_id=thread.get('workbench_id') or '')
+        if not reset:return thread['analyzed_revision']<thread['ingest_revision']
+        if reset['state']!='complete':return False
+        return bool(self._eligible_messages(tx,thread,thread['analyzed_revision'],1))
+    def source_before_reset(self,tx,thread,source_seq):
+        reset=self._account_reset(tx,thread['owner_id'],thread['account_uid'],workbench_id=thread.get('workbench_id') or '',applied_only=True)
+        return bool(reset and type(source_seq) is int and source_seq>0 and source_seq<=json.loads(reset['local_cut_json'])['source_highwater'])
     def _group(self, tx, owner, group_id):
         row = tx.execute("SELECT * FROM xj2_group WHERE group_id=? AND owner_id=?", (group_id, owner)).fetchone()
         if row is None:
@@ -163,7 +210,7 @@ class Store:
     def correct_association(self, owner, thread_id, message_id, member_ids, expected_revision, reason):
         identity(reason, 'correction reason', 1000)
         with self.write(owner) as tx:
-            self._thread(tx, owner, thread_id)
+            self.require_current_thread(tx, owner, thread_id)
             current = tx.execute('SELECT projection_version FROM xj2_owner WHERE owner_id=?', (owner,)).fetchone()['projection_version']
             if type(expected_revision) is not int or current != expected_revision:
                 raise InvalidFact('Projection changed; refresh before correcting association')
@@ -192,11 +239,11 @@ class Store:
                     encoded(asdict(policy)),encoded(boundary),encoded(asdict(valuation) if valuation else None),
                     int(send_allowed),encoded(plan or {}),self.clock()))
         return group_id
-    def add_member(self, owner, group_id, *, account_uid, peer_uid):
+    def add_member(self, owner, group_id, *, account_uid, peer_uid, workbench_id=None):
         identity(account_uid, "account", 80)
         identity(peer_uid, "counterparty")
         with self.write(owner) as tx:
-            return self._add_member(tx,owner,group_id,account_uid=account_uid,peer_uid=peer_uid)
+            return self._add_member(tx,owner,group_id,account_uid=account_uid,peer_uid=peer_uid,workbench_id=workbench_id)
     MAX_ACTIVE_COUNTERPARTIES = 50
     def _active_peers(self, tx, owner, account_uid):
         # A pause keeps analysis alive and therefore keeps the slot. Only a
@@ -221,16 +268,26 @@ class Store:
         return {'active':active,'limit':self.MAX_ACTIVE_COUNTERPARTIES,
                 'available':max(0,self.MAX_ACTIVE_COUNTERPARTIES-active),
                 'unit':'distinct_counterparties','paused_counts':True}
-    def _add_member(self,tx,owner,group_id,*,account_uid,peer_uid):
+    def _add_member(self,tx,owner,group_id,*,account_uid,peer_uid,workbench_id=None):
+        binding=tx.execute('SELECT account_uid,workbench_id FROM xj2_binding WHERE owner_id=?',(owner,)).fetchone()
+        if binding:
+            if account_uid!=binding['account_uid'] or workbench_id is not None and workbench_id!=binding['workbench_id']:
+                raise InvalidFact('New member must belong to the selected collector/account')
+            workbench_id=binding['workbench_id']
+        if workbench_id is not None:identity(workbench_id,'workbench',160)
         group = self._group(tx, owner, group_id)
+        existing_pairs=tx.execute('SELECT t.account_uid,t.workbench_id FROM xj2_peer p JOIN xj2_thread t ON t.thread_id=p.thread_id WHERE p.group_id=?',(group_id,)).fetchall()
+        if any((p['account_uid'],p['workbench_id'])!=(account_uid,workbench_id) for p in existing_pairs):
+            raise InvalidFact('A bond group cannot mix collector/account identities')
         if group["state"] == "OPEN" and not group["archived"]:
             self._ensure_peer_capacity(tx,owner,account_uid,[peer_uid])
-        thread = tx.execute("SELECT thread_id FROM xj2_thread WHERE owner_id=? AND account_uid=? AND peer_uid=?", (owner, account_uid, peer_uid)).fetchone()
+        thread = tx.execute("SELECT thread_id FROM xj2_thread WHERE owner_id=? AND account_uid=? AND peer_uid=? AND (workbench_id=? OR (workbench_id IS NULL AND ? IS NULL))", (owner, account_uid, peer_uid,workbench_id,workbench_id)).fetchone()
         if thread:
             tid = thread["thread_id"]
         else:
             tid = new_id()
-            tx.execute("INSERT INTO xj2_thread(thread_id,owner_id,account_uid,peer_uid,ingest_revision,analyzed_revision) VALUES(?,?,?,?,0,0)", (tid, owner, account_uid, peer_uid))
+            tx.execute("INSERT INTO xj2_thread(thread_id,owner_id,workbench_id,account_uid,peer_uid,ingest_revision,analyzed_revision) VALUES(?,?,?,?,?,0,0)", (tid, owner,workbench_id, account_uid, peer_uid))
+            self._restore_thread_reset(tx,owner,account_uid,peer_uid,tid,workbench_id)
         existing = tx.execute("SELECT member_id FROM xj2_peer WHERE group_id=? AND thread_id=?", (group_id, tid)).fetchone()
         if existing:
             return existing["member_id"], tid
@@ -286,7 +343,7 @@ class Store:
             tx.execute("UPDATE xj2_thread SET ingest_revision=?,pending_since=?,last_ingest_at=? WHERE thread_id=?", (revision, first, self.clock(), thread_id))
             if direction == 'in' and not historical:
                 tx.execute("UPDATE xj2_thread SET source_watermark=CASE WHEN source_watermark<? THEN ? ELSE source_watermark END WHERE thread_id=?",(source_seq,source_seq,thread_id))
-            if target_id and not historical:
+            if target_id and not historical and not self.source_before_reset(tx,thread,source_seq):
                 touched=[]
                 members=self._evidence_dependents(tx,thread_id,target_id)
                 for member in members:
@@ -301,7 +358,7 @@ class Store:
         if type(limit) is not int or not 1 <= limit <= 500:
             raise InvalidFact("Raw message page size must be 1..500")
         with self.db.transaction(write=False) as tx:
-            self._thread(tx, owner, thread_id)
+            self.require_current_thread(tx, owner, thread_id)
             return [dict(row) for row in tx.execute("SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>? ORDER BY ingest_revision LIMIT ?", (thread_id, after_revision, limit)).fetchall()]
     def quote(self, owner, member_id, side):
         with self.db.transaction(write=False) as tx:
@@ -343,10 +400,13 @@ class Store:
             raise InvalidFact("Choose exactly one sending scope")
         with self.write(owner) as tx:
             if member_id:
-                self._member(tx, owner, member_id)
+                member=self._member(tx, owner, member_id)
+                self.require_current_thread(tx,owner,member['thread_id'])
                 tx.execute("UPDATE xj2_peer SET send_allowed=?,control_version=control_version+1 WHERE member_id=?", (int(allowed), member_id))
             elif group_id:
                 group = self._group(tx, owner, group_id)
+                for peer in tx.execute('SELECT thread_id FROM xj2_peer WHERE group_id=?',(group_id,)).fetchall():
+                    self.require_current_thread(tx,owner,peer['thread_id'])
                 if allowed and group["state"] == "HANDOFF":
                     raise InvalidFact("Completed handoff needs an explicit new round, not a toggle")
                 tx.execute("UPDATE xj2_group SET send_allowed=?,control_version=control_version+1 WHERE group_id=?", (int(allowed), group_id))
@@ -366,9 +426,14 @@ class Store:
             else:
                 tx.execute("UPDATE xj2_group SET version=version+1 WHERE group_id=?", (gid,))
 
+    @staticmethod
+    def _context_thread(tx,member_id):
+        return dict(tx.execute('SELECT t.* FROM xj2_peer p JOIN xj2_thread t ON t.thread_id=p.thread_id WHERE p.member_id=?',(member_id,)).fetchone())
     def _context(self, tx, member_id, through_revision):
         # A new authorization round does not erase actual chat history. Scope
         # history by owner + physical thread + bond, while facts stay per round.
+        thread=self._context_thread(tx,member_id)
+        clause,args=self._reset_message_filter(tx,thread,'m')
         rows = tx.execute("""SELECT m.* FROM xj2_message m
             JOIN xj2_peer cp ON cp.member_id=? JOIN xj2_group cg ON cg.group_id=cp.group_id
             WHERE m.thread_id=cp.thread_id AND m.ingest_revision<=?
@@ -377,10 +442,11 @@ class Store:
                 JOIN xj2_group hg ON hg.group_id=hp.group_id WHERE s.message_id=m.message_id
                 AND hp.thread_id=cp.thread_id AND hg.owner_id=cg.owner_id AND hg.bond_code=cg.bond_code
                 AND s.relation IN ('MENTION','UNRESOLVED','INVALID'))
-            ORDER BY m.occurred_at DESC,m.ingest_revision DESC LIMIT ?""",
-                          (member_id, through_revision, self.settings.context_messages)).fetchall()
+            """+clause+" ORDER BY m.occurred_at DESC,m.ingest_revision DESC LIMIT ?",
+                          (member_id, through_revision, *args, self.settings.context_messages)).fetchall()
         return [dict(row) for row in reversed(rows)]
     def _history_message(self, tx, member_id, message_id, through_revision, *, allow_invalid=False):
+        clause,args=self._reset_message_filter(tx,self._context_thread(tx,member_id),'m')
         return tx.execute("""SELECT m.* FROM xj2_message m
             JOIN xj2_peer cp ON cp.member_id=? JOIN xj2_group cg ON cg.group_id=cp.group_id
             WHERE m.message_id=? AND m.thread_id=cp.thread_id AND m.ingest_revision<=?
@@ -388,13 +454,13 @@ class Store:
             AND EXISTS (SELECT 1 FROM xj2_scope s JOIN xj2_peer hp ON hp.member_id=s.member_id
                 JOIN xj2_group hg ON hg.group_id=hp.group_id WHERE s.message_id=m.message_id
                 AND hp.thread_id=cp.thread_id AND hg.owner_id=cg.owner_id AND hg.bond_code=cg.bond_code
-                AND (s.relation='MENTION' OR (?=1 AND s.relation='INVALID')))""",
-                          (member_id,message_id,through_revision,int(allow_invalid))).fetchone()
+                AND (s.relation='MENTION' OR (?=1 AND s.relation='INVALID')))"""+clause,
+                          (member_id,message_id,through_revision,int(allow_invalid),*args)).fetchone()
     def context(self, owner, member_id, *, anchors=(), through_revision=None):
         """One global last-N window; explicit references are added, not guessed."""
         with self.db.transaction(write=False) as tx:
             member = self._member(tx, owner, member_id)
-            thread = self._thread(tx, owner, member["thread_id"])
+            thread = self.require_current_thread(tx, owner, member["thread_id"])
             through=thread['ingest_revision'] if through_revision is None else through_revision
             if type(through) is not int or not 0<=through<=thread['ingest_revision']:
                 raise InvalidFact('Invalid fixed history watermark')
@@ -535,8 +601,7 @@ class Store:
         now = self.clock()
         with self.write(owner) as tx:
             thread = self._thread(tx, owner, thread_id)
-            if thread["analyzed_revision"] >= thread["ingest_revision"]:
-                return None
+            if not self._analysis_pending(tx,thread):return None
             old = tx.execute("SELECT * FROM xj2_analysis WHERE thread_id=? AND state IN ('RUNNING','RETRY') ORDER BY through_revision LIMIT 1", (thread_id,)).fetchone()
             if old:
                 if old["lease_until"] > now:
@@ -547,7 +612,8 @@ class Store:
                         "snapshot": json.loads(old["snapshot_json"]), "attempt": old["attempts"] + 1}
             if not force and not aggregation.ready(now=now, first_pending=thread["pending_since"], last_received=thread["last_ingest_at"]):
                 return None
-            raw = [dict(r) for r in tx.execute("SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>? ORDER BY ingest_revision LIMIT 100", (thread_id, thread["analyzed_revision"])).fetchall()]
+            raw = self._eligible_messages(tx,thread,thread['analyzed_revision'])
+            if not raw:return None
             through = raw[-1]["ingest_revision"]
             peers = [dict(r) for r in tx.execute("""SELECT p.*,g.bond_code,g.trade_day,g.plan_json,g.our_side
                 FROM xj2_peer p JOIN xj2_group g ON g.group_id=p.group_id
@@ -573,7 +639,8 @@ class Store:
                         peer['reconfirm_sent_at'] = sent['sent_at']
             snapshot = {"thread_id": thread_id, "from_revision": thread["analyzed_revision"],
                         "through_revision": through, "messages": raw, "members": peers,
-                        "context_messages": self.settings.context_messages}
+                        "context_messages": self.settings.context_messages,
+                        "account_epoch": self.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or '',require_complete=True)}
             known=self._known_outbound_scopes(tx,thread_id,raw,peers) if include_known_outbound_scopes else {}
             if known:snapshot['known_outbound_scopes']=known
             analysis_id, token = new_id(), new_id()
@@ -698,6 +765,9 @@ class Store:
                         or set(scopes[ref])!=set(expected) or unresolved.get(ref)):
                     raise InvalidFact('Cannot replace the application-owned outbound association')
             thread = self._thread(tx, owner, analysis["thread_id"])
+            if not self.thread_is_current(tx,thread):raise StaleDecision('Analysis belongs to another selected collector/account')
+            if self.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or '',require_complete=True)!=snapshot.get('account_epoch',0):
+                raise StaleDecision('Analysis belongs to a reset authorization round')
             if thread["analyzed_revision"] != analysis["from_revision"]:
                 raise StaleDecision("This analysis no longer follows the committed message watermark")
             touched = {}
@@ -812,20 +882,26 @@ class Store:
         Repeated equal economics is a no-op. A competing refresh/round may not
         be overwritten by a snapshot fetched before that transaction committed.
         """
+        def boundary_for(group):
+            policy=LimitPolicy(**json.loads(group['policy_json']))
+            if group['archived'] or policy.mode!='CHINABOND_BP':return None
+            if expected_policy_version is not None and group['policy_version']!=expected_policy_version:return None
+            boundary=policy.resolve(bond_code=group['bond_code'],valuation=valuation,expected_valuation_date=expected_valuation_date)
+            if boundary is None:raise InvalidFact('A sourced ChinaBond valuation is required for refresh')
+            previous=json.loads(group['valuation_json'])
+            if (json.loads(group['boundary_json'])==boundary and previous
+                    and Valuation(**previous).authorization_key()==valuation.authorization_key()):
+                return None  # A new quote carrying identical valuation is not a new trading decision.
+            return boundary
+
+        # Stable polling is a read, not a UI revision or owner-row write.
+        with self.db.transaction(write=False) as tx:
+            if boundary_for(self._group(tx,owner,group_id)) is None:return False
         with self.write(owner) as tx:
             group=self._group(tx,owner,group_id)
-            policy=LimitPolicy(**json.loads(group['policy_json']))
-            if group['archived'] or policy.mode!='CHINABOND_BP':return False
-            if expected_policy_version is not None and group['policy_version']!=expected_policy_version:return False
-            boundary=policy.resolve(bond_code=group['bond_code'],valuation=valuation,expected_valuation_date=expected_valuation_date)
-            if boundary is None:raise InvalidFact('A verified latest valuation is required for refresh')
-            if valuation.trading_date>group['trade_day']:raise InvalidFact('Valuation is newer than the group day')
+            boundary=boundary_for(group)  # Recheck under the owner lock.
+            if boundary is None:return False
             previous=json.loads(group['valuation_json'])
-            if previous and previous['trading_date']>valuation.trading_date:return False
-            if (json.loads(group['boundary_json'])==boundary and previous
-                    and previous['trading_date']==valuation.trading_date
-                    and number(previous['yield_pct'])==number(valuation.yield_pct)):
-                return False  # A new quote carrying identical valuation is not a new trading decision.
             tx.execute('UPDATE xj2_group SET boundary_json=?,valuation_json=?,policy_version=policy_version+1 WHERE group_id=?',
                        (encoded(boundary),encoded(asdict(valuation)),group_id))
             self._cancel_commands(tx,group_id=group_id,reason='CHINABOND_VALUATION_REFRESHED')

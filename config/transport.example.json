@@ -5,12 +5,10 @@
     "workbench_id": "REPLACE_WORKBENCH_ID",
     "seal_key_env": "XUNJIA_SEAL_KEY",
     "sign_key_env": "XUNJIA_SIGN_KEY",
-    "oss": {
-      "endpoint": "https://REPLACE_OSS_BUCKET_ENDPOINT",
-      "sts_url": "http://nginx.mq.dq.yingmi-inc.com/its-accesspoint/v1/api/sts",
-      "expected_bucket": "qtrade-nyoss-lab",
-      "auth_key_env": "XUNJIA_STS_AUTH_KEY",
-      "sm4_key_env": "XUNJIA_STS_SM4_KEY"
+    "file_gateway": {
+      "uplink_url": "https://REPLACE_UPLINK_MQ_URL/its-relay/v1",
+      "downlink_url": "https://REPLACE_DOWNLINK_MQ_URL/its-relay/v1",
+      "auth_file": "config.yaml"
     }
   }
 ]

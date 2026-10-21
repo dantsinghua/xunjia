@@ -44,6 +44,12 @@ class Commands:
         group = self.store._group(tx, owner, member["group_id"])
         thread = self.store._thread(tx, owner, member["thread_id"])
         control = tx.execute("SELECT * FROM xj2_owner WHERE owner_id=?", (owner,)).fetchone()
+        if not self.store.thread_is_current(tx,thread):return 'COLLECTOR_ACCOUNT_CHANGED'
+        foreign=tx.execute('SELECT p.member_id FROM xj2_peer p JOIN xj2_thread t ON t.thread_id=p.thread_id JOIN xj2_binding b ON b.owner_id=? WHERE p.group_id=? AND (t.owner_id<>b.owner_id OR t.account_uid<>b.account_uid OR t.workbench_id IS NULL OR t.workbench_id<>b.workbench_id) LIMIT 1',(owner,group['group_id'])).fetchone()
+        if foreign:return 'COLLECTOR_ACCOUNT_CHANGED'
+        reset=self.store._account_reset(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or '')
+        if reset and reset['state']!='complete':return 'SESSION_RESET_IN_PROGRESS'
+        if group['archived']:return 'AUTHORIZATION_ROUND_ARCHIVED'
         current = self._basis(tx, owner, member_id, basis.get("group_volume_version") is not None)
         if kind!='MANUAL' and self.current_day is not None and group['trade_day']!=self.current_day():
             return 'DAILY_ROLLOVER_REQUIRED'
@@ -57,7 +63,7 @@ class Commands:
             return "INVALID_WATERMARK"
         if kind != "MANUAL" and (not control["send_allowed"] or not group["send_allowed"] or not member["send_allowed"] or group["state"] != "OPEN"):
             return "SENDING_PAUSED"
-        if kind != "MANUAL" and thread["analyzed_revision"] != thread["ingest_revision"]:
+        if kind != "MANUAL" and self.store._analysis_pending(tx,thread):
             return "WAITING_ANALYSIS"
         if kind not in ("MANUAL","CLARIFY") and tx.execute("SELECT message_id FROM xj2_scope WHERE member_id=? AND relation IN ('UNRESOLVED','INVALID') LIMIT 1", (member_id,)).fetchone():
             return "UNRESOLVED_BOND_REFERENCE"
@@ -121,8 +127,10 @@ class Commands:
         member=self.store._member(tx,owner,member_id)
         digest=hashlib.sha256(encoded(body).encode()).hexdigest()
         command_id=new_id()
-        tx.execute("INSERT INTO xj2_command(command_id,request_id,member_id,group_id,thread_id,state,content_hash,body_json,basis_json,result_json,cancel_requested,created_at,expires_at) VALUES(?,?,?,?,?,'QUEUED',?,?,?,'{}',0,?,?)",
-                   (command_id,request_id,member_id,member['group_id'],member['thread_id'],digest,encoded(body),encoded(basis),self.store.clock(),expires_at))
+        thread=self.store.require_current_thread(tx,owner,member['thread_id'])
+        epoch=self.store.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or '',require_complete=True)
+        tx.execute("INSERT INTO xj2_command(command_id,request_id,member_id,group_id,thread_id,state,content_hash,body_json,basis_json,result_json,cancel_requested,created_at,expires_at,account_epoch) VALUES(?,?,?,?,?,'QUEUED',?,?,?,'{}',0,?,?,?)",
+                   (command_id,request_id,member_id,member['group_id'],member['thread_id'],digest,encoded(body),encoded(basis),self.store.clock(),expires_at,epoch))
         for mid in set(body.get('scope_members',[]))|{member_id}:
             tx.execute('INSERT INTO xj2_command_member(command_id,member_id) VALUES(?,?)',(command_id,mid))
             tx.execute('UPDATE xj2_peer SET pending_command_id=? WHERE member_id=?',(command_id,mid))
@@ -196,7 +204,11 @@ class Commands:
             if reason:
                 self._cancel_unsubmitted(tx, row, reason)
                 return None
-            busy = tx.execute("SELECT command_id FROM xj2_command WHERE thread_id=? AND state IN ('PENDING','UNKNOWN') AND command_id<>? LIMIT 1", (row["thread_id"], command_id)).fetchone()
+            thread=self.store._thread(tx,owner,row['thread_id'])
+            if row['account_epoch']!=self.store.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or ''):
+                self._cancel_unsubmitted(tx,row,'ACCOUNT_EPOCH_CHANGED')
+                return None
+            busy = tx.execute("SELECT command_id FROM xj2_command WHERE thread_id=? AND account_epoch=? AND state IN ('PENDING','UNKNOWN') AND command_id<>? LIMIT 1", (row["thread_id"],row['account_epoch'], command_id)).fetchone()
             if busy:
                 return None
             thread = self.store._thread(tx, owner, row["thread_id"])
@@ -213,6 +225,8 @@ class Commands:
             row = self._command(tx, owner, command_id)
             if row["state"] != "PENDING" or row["cancel_requested"]:
                 return False
+            thread=self.store._thread(tx,owner,row['thread_id'])
+            if row['account_epoch']!=self.store.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or ''):return False
             reason = self._scope_gate(tx, owner, row["member_id"], json.loads(row["basis_json"]), json.loads(row["body_json"]), command_id=command_id)
             if reason or row["expires_at"] <= self.store.clock():
                 tx.execute("UPDATE xj2_command SET cancel_requested=1 WHERE command_id=?", (command_id,))
@@ -233,9 +247,10 @@ class Commands:
         else:
             message_id = "out_" + row["command_id"]
             revision = thread["ingest_revision"] + 1
-            tx.execute("INSERT INTO xj2_message(message_id,thread_id,event_id,content_hash,source_seq,ingest_revision,direction,kind,text,native_id,occurred_at,received_at,trade_day,historical) VALUES(?,?,?,?,?,?,'out','message',?,?,?,?,?,0)",
+            old_epoch=row['account_epoch']<self.store.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or '')
+            tx.execute("INSERT INTO xj2_message(message_id,thread_id,event_id,content_hash,source_seq,ingest_revision,direction,kind,text,native_id,occurred_at,received_at,trade_day,historical) VALUES(?,?,?,?,?,?,'out','message',?,?,?,?,?,?)",
                        (message_id, row["thread_id"], "command:" + row["command_id"], row["content_hash"], -1, revision,
-                        body["text"], native_id, occurred_at, self.store.clock(), basis["trade_day"]))
+                        body["text"], native_id, occurred_at, self.store.clock(), basis["trade_day"],int(old_epoch)))
             first = thread["pending_since"] if thread["pending_since"] is not None else self.store.clock()
             tx.execute("UPDATE xj2_thread SET ingest_revision=?,pending_since=?,last_ingest_at=? WHERE thread_id=?", (revision, first, self.store.clock(), row["thread_id"]))
         for mid in set(body.get('scope_members',[]))|{row['member_id']}:

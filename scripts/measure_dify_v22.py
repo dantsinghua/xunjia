@@ -18,7 +18,7 @@ import subprocess
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from dify.negotiation_v22.cases import cases,snapshot,reference_snapshot,FixtureClock
+from dify.negotiation_v22.cases import cases,review_cases,snapshot,reference_snapshot,FixtureClock
 from dify.negotiation_v22.measurement import (summarize,distribution,analysis_repair_summary,reply_repair_summary,
     calibration_exclusion_reasons,calibration_summary,path_distributions)
 from dify.negotiation_v22.node_code import validate_result
@@ -93,7 +93,7 @@ def run_case(case,config,timeout,*,stage_budget_seconds=150):
             def decide(self,context):return self.call('reply',context)
         class References:
             def snapshot(self):
-                return reference_snapshot(case['id'])
+                return reference_snapshot(case.get("reference_case_id", case["id"]))
         class RecordedTools(BondTools):
             def invoke(self,name,arguments):
                 began=time.monotonic()
@@ -243,6 +243,7 @@ def main():
     parser.add_argument('--stage-budget-seconds',type=int,default=150,choices=range(1,541))
     parser.add_argument('--policy-revision',choices=['latest_quote_confirmation_v1','explicit_anchors_v0'],default='latest_quote_confirmation_v1')
     parser.add_argument('--frozen-manifest',type=Path,help=argparse.SUPPRESS)
+    parser.add_argument("--review-regressions",action="store_true",help="Include six independent BP/negative-yield review scenarios")
     args=parser.parse_args()
     from dify.negotiation_v22.freeze import freeze_sources,drift
     if args.frozen_manifest is None:
@@ -254,13 +255,15 @@ def main():
                  '--stage-budget-seconds',str(args.stage_budget_seconds),
                  '--policy-revision',args.policy_revision,
                  '--frozen-manifest',str((args.output/'source-manifest.json').resolve())]
+        if args.review_regressions:command.append("--review-regressions")
         if args.cases:command+=['--cases',*args.cases]
         return subprocess.run(command,cwd=manifest['frozen_root']).returncode
     manifest=json.loads(args.frozen_manifest.read_text())
     if Path(manifest['frozen_root']).resolve()!=ROOT or drift(manifest):
         raise ValueError('Frozen measurement source integrity check failed before execution')
     config=json.loads(args.credentials.read_text())
-    selected=[c for c in cases() if not args.cases or c['id'] in args.cases]
+    corpus=cases()+(review_cases() if args.review_regressions else [])
+    selected=[c for c in corpus if not args.cases or c['id'] in args.cases]
     if not selected:parser.error('No matching cases')
     for case in selected:
         case['policy_revision']=args.policy_revision

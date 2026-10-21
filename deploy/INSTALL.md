@@ -87,10 +87,32 @@ CREATE TABLE IF NOT EXISTS 不是旧表迁移，数据库升级另行审查。
 - 客户Dify导入 `dify/negotiation_v22/` 对应版本A/B画布，仅填 `XUNJIA_DIFY_URL`、`XUNJIA_DIFY_ANALYSIS_APP_KEY`、`XUNJIA_DIFY_REPLY_APP_KEY`。旧单APP_KEY不能作为新两阶段合同。公开Tool免Token，客户不需要提供管理权限。
 - `XUNJIA_AGGREGATION_PROFILE` 指向实测报告生成的参数；未测量时不启用自动分析窗口。`XUNJIA_BOND_CONTEXT_MESSAGES` 默认20、范围10..30。`XUNJIA_REFERENCE_CONFIG` 为可选公开资料/发布日历adapter配置，缺少真实源必须显示未配置。
 - `XUNJIA_DIFY_TIMEOUT_SECONDS` 为每次HTTP调用超时（模板90秒、范围1–300秒），`XUNJIA_DIFY_STAGE_BUDGET_SECONDS` 为包含工具/历史补取的阶段总预算（模板150秒、最大540秒）。实际HTTP超时还受当前剩余阶段预算限制；租约为阶段预算加30秒。部署时须显式沿用所选模型报告的HTTP/阶段预算，不能把默认值冒充已验证配置。
-- `config/aggregation-profile.measured.json` 提供本轮已测 qwen-max/shim 链路的四字段聚合配置：1463ms静默窗、4389ms累计上限；溯源及字节摘要位于 `config/aggregation-measurement.json`。应用的 `XUNJIA_AGGREGATION_PROFILE` 指向前者。首次安装带入配置目录；升级保留现场文件，运维可另存新测量配置并显式选择。该配置来自46对真实清洁实耗与固定合成到达实验；其他模型/运行环境按对应链路重新测量，累计上限不包含忙时排队。后台与真实发送默认仍关闭。
-- `XUNJIA_RUN_BACKGROUND=1` 可与 `XUNJIA_ENABLE_LIVE_TRANSPORT=0` 配合，仅接收、分析、对账；新包默认两者均0，不自动向真实对手发送。
+- `config/aggregation-profile.measured.json` 提供本轮已测 qwen-max/shim 链路的四字段聚合配置：1463ms静默窗、4389ms累计上限；溯源及字节摘要位于 `config/aggregation-measurement.json`。应用的 `XUNJIA_AGGREGATION_PROFILE` 指向前者。首次安装带入配置目录；升级保留现场文件，运维可另存新测量配置并显式选择。该配置来自46对真实清洁实耗与固定合成到达实验；其他模型/运行环境按对应链路重新测量，累计上限不包含忙时排队。后台任务使用统一生命周期配置。
+- 标准部署默认 `XUNJIA_RUN_BACKGROUND=1`，启动入站、分析、派发和对账；有效授权指令通过用户暂停状态、有效期、水位和去重检查后派发，不另设真实发送开关。需要暂停时使用工作台现有暂停功能。
 - 构建包先执行 `scripts/build_collector_runtime.py --output <fresh-dir> --wheelhouse <local-build-wheels>`；主包构建增加 `--collector-wheel <fresh-dir>/xunjia_collector_runtime-2.2.0-py3-none-any.whl`。打包会核wheel代码与本版源码逐文件一致。
 - QTrade采集端需先部署本轮 `qtrade_agent/ossbox/xunjia_v22.py`、Bus/UI guard与app互斥接线，再在其**专用Python环境**离线安装包内 `collector-runtime/*.whl`。依赖cryptography与QTrade现有依赖一致；安装前检查 `pip show xunjia-collector-runtime`，安装后检查 `pip check` 和模块路径。不能在其他服务的共用Python环境中覆盖同名server/relay包。该wheel不含Web服务、现场密钥或运行数据。
-- QTrade以 `XUNJIA_COLLECTOR_VERSION=2.2` 和 `XUNJIA_COLLECTOR_CONFIG_FILE` 显式启用新宿主。私有JSON仅引用seal/sign key文件，默认 `allow_native_send=false`；旧XunjiaInbox必须互斥关闭，其他业务仍使用的旧CatalogPublisher保留。缺依赖不回退v1、不虚报V2能力。
+- QTrade以 `XUNJIA_COLLECTOR_VERSION=2.2` 和 `XUNJIA_COLLECTOR_CONFIG_FILE` 显式启用新宿主。私有JSON仅引用seal/sign key文件，有效授权指令默认交给绑定账号发送，不另设真实发送开关；旧XunjiaInbox必须互斥关闭，其他业务仍使用的旧CatalogPublisher保留。缺依赖不回退v1、不虚报V2能力。
 - V2通讯录路径为 `wb/{workbench}/out/xunjia/{account}/contacts.bin`；旧 `qidian/{account}/contacts.json` 属于共享历史协议，不能覆盖。
 - wheel真实安装及合成跨仓联合通过不等于完整QTrade安装EXE、真实OSS或IM已验收。上线前仍需在指定测试对手范围核真实native ACK；OSS accepted始终不算已发。
+
+## 安装后统一现场检查
+见 `deploy/SITE-ACCEPTANCE.md` 与 `deploy/site_acceptance.py`。默认仅只读检查；`--probe-dify` 明确调用普通App API测试合成报价，不发送IM。完整放行条件未满足时返回2，不以HTTP200替代同版链路验收。
+# 页面配置采集端与企点号
+
+普通安装保留 `XUNJIA_TRANSPORT_CONFIG` 与 `XUNJIA_MQ_CONNECTION_CONFIG` 为空时，
+服务复用现有 MQ 文件协调器，在实际 `XUNJIA_STATE_DIR` 下保存本人连接、目录账本与账号选择。
+登录工作台的“采集通道”页面，填写 `base_url` 和 `config.yaml` 内容，保存后刷新采集端目录，
+选择工作台及该台内企点号并读取对应通讯录。首次安装不预设账号、工作台或绑定记录。
+保存和测试连接只检查配置及 pending；目录刷新才取件，仍只有一个队列消费者。
+
+MQ 的 key/sm4_key 用于文件接口认证。已有采集端报文的 AES/HMAC 密钥仍需在受保护的
+共享 `xunjia.env` 中配置 `XUNJIA_SEAL_KEY`、`XUNJIA_SIGN_KEY`（base64，和采集端部署一致），
+不能拿 MQ 的 SM4 凭据代替。缺少这两项时页面允许保存 MQ 和测试 pending，
+会明确说明不能认证目录，不生成虚假可选账号。正式 runtime 只使用共享配置文件，
+不会继承外部 shell 临时导出的 `XUNJIA_*` 值。
+HTTPS为默认；现场明确使用内网HTTP网关时，在同一共享配置中设置 `XUNJIA_MQ_ALLOW_HTTP=1`。
+本机协调接口使用独立生成的受保护凭据，不复用远端MQ的key/sm4_key。
+
+显式设置两项现有外部连接配置路径的部署继续使用该既有协调器，不另启动托管取件器。
+切换账号保留暂停、版本和在途命令检查；目录刷新或配置保存不会授权发送。
+

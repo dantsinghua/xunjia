@@ -15,7 +15,8 @@ import sqlite3
 import time
 import uuid
 
-from relay.protocol import Binding, Codec, ProtocolError, canonical, digest, result, validate_command
+from relay.protocol import (Binding, Codec, ProtocolError, RESET_FIELDS, canonical, digest,
+                            result, validate_command, validate_session_reset)
 
 
 @contextmanager
@@ -70,6 +71,10 @@ class ReceiverLedger:
             CREATE TABLE IF NOT EXISTS rx_manual_fence (scope TEXT NOT NULL,peer_id TEXT NOT NULL,fence_id TEXT NOT NULL,version INTEGER NOT NULL,PRIMARY KEY(scope,peer_id));
             CREATE TABLE IF NOT EXISTS rx_event_fence (scope TEXT NOT NULL,event_id TEXT NOT NULL,fence_id TEXT NOT NULL,version INTEGER NOT NULL,PRIMARY KEY(scope,event_id));
             CREATE TABLE IF NOT EXISTS rx_inbound_event (scope TEXT NOT NULL,event_id TEXT NOT NULL,peer_id TEXT NOT NULL,source_seq INTEGER,PRIMARY KEY(scope,event_id));
+            CREATE TABLE IF NOT EXISTS rx_reset (scope TEXT NOT NULL,reset_id TEXT NOT NULL,
+                request_hash TEXT NOT NULL,request_json TEXT NOT NULL,expected_epoch INTEGER NOT NULL,
+                account_epoch INTEGER NOT NULL,state TEXT NOT NULL,snapshot_json TEXT,
+                updated REAL NOT NULL,PRIMARY KEY(scope,reset_id),UNIQUE(scope,account_epoch));
             ''')
 
     @contextmanager
@@ -88,6 +93,145 @@ class ReceiverLedger:
 
     def _account_lock(self):
         return account_lock(self.path, self.binding)
+
+    def _latest_reset(self, db):
+        return db.execute('SELECT * FROM rx_reset WHERE scope=? ORDER BY account_epoch DESC LIMIT 1',
+                          (self.scope,)).fetchone()
+
+    def account_epoch(self):
+        with self._db() as db:
+            row = self._latest_reset(db)
+            return row['account_epoch'] if row else 0
+
+    def _epoch_permitted(self, db, command):
+        row = self._latest_reset(db)
+        epoch = row['account_epoch'] if row else 0
+        return command.get('account_epoch', 0) == epoch and (row is None or row['state'] == 'complete')
+
+    def reset_status(self, reset_id=None):
+        with self._db() as db:
+            row = (self._latest_reset(db) if reset_id is None else
+                   db.execute('SELECT * FROM rx_reset WHERE scope=? AND reset_id=?',
+                              (self.scope, reset_id)).fetchone())
+        if row is None:
+            return None
+        request = json.loads(row['request_json'])
+        snapshot = json.loads(row['snapshot_json']) if row['snapshot_json'] else None
+        return {**self._reset_ack(request, row['state'], snapshot,
+                                 'SESSION_RESET_' + row['state'].upper()),
+                'state': row['state'], 'updated_at': row['updated']}
+
+    def pending_session_resets(self):
+        with self._db() as db:
+            rows = db.execute("SELECT request_json FROM rx_reset WHERE scope=? AND state!='complete' ORDER BY account_epoch",
+                              (self.scope,)).fetchall()
+        return [json.loads(row['request_json']) for row in rows]
+
+    @staticmethod
+    def _reset_ack(request, phase, snapshot, code):
+        return {**{key: request[key] for key in (*RESET_FIELDS, 'request_hash')},
+                'phase': phase, 'snapshot': snapshot,
+                'snapshot_hash': digest(snapshot) if snapshot is not None else '', 'code': code}
+
+    def _reset_snapshot(self, db, request, highwater, running):
+        peers = {}
+        def peer(key):
+            return peers.setdefault(key, {'source_watermark': 0, 'receiver_fence_id': '',
+                                          'receiver_fence_version': 0, 'min_control_version': 1})
+        inbound = db.execute('SELECT peer_id,source_seq FROM rx_inbound_event WHERE scope=?', (self.scope,)).fetchall()
+        for row in inbound:
+            entry = peer(row['peer_id'])
+            if row['source_seq'] is not None:
+                entry['source_watermark'] = max(entry['source_watermark'], row['source_seq'])
+        for row in db.execute('SELECT peer_id,fence_id,version FROM rx_manual_fence WHERE scope=?', (self.scope,)):
+            peer(row['peer_id']).update(receiver_fence_id=row['fence_id'], receiver_fence_version=row['version'])
+        for row in db.execute('SELECT peer_id,min_version FROM rx_control WHERE scope=?', (self.scope,)):
+            peer(row['peer_id'])['min_control_version'] = row['min_version']
+        unresolved = []
+        for row in db.execute('SELECT command_id,command_json,status FROM rx_command WHERE scope=?', (self.scope,)):
+            command = json.loads(row['command_json'])
+            peer(command['peer_id'])
+            if row['status'] in ('unknown', 'pending', 'held'):
+                unresolved.append({'command_id': row['command_id'], 'peer_id': command['peer_id'],
+                                   'account_epoch': command.get('account_epoch', 0), 'status': row['status']})
+        highwater = highwater() if callable(highwater) else highwater
+        if type(highwater) is not int or highwater < 0:
+            raise ProtocolError('SESSION_RESET_SOURCE_HIGHWATER_INVALID')
+        if any(item['source_watermark'] > highwater for item in peers.values()):
+            raise ProtocolError('SESSION_RESET_SOURCE_HIGHWATER_BEHIND')
+        return {'account_epoch': request['account_epoch'], 'snapshot_at': self.clock(),
+                'published_source_highwater': highwater, 'peers': peers, 'unresolved_history': unresolved,
+                'old_native_tasks_running': int(running),
+                'pending_inbound_count': sum(row['source_seq'] is None for row in inbound),
+                'pending_echo_count': db.execute("SELECT COUNT(*) FROM rx_deferred WHERE scope=? AND state!='published'",
+                                                 (self.scope,)).fetchone()[0]}
+
+    def session_reset(self, payload, *, native_quiescent=None, published_source_highwater=0):
+        """Install the account barrier before waiting; never invent native outcomes."""
+        validate_session_reset(payload, self.binding)
+        request = {**{key: payload[key] for key in (*RESET_FIELDS, 'request_hash')}, 'phase': 'request'}
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM rx_reset WHERE scope=? AND reset_id=?',
+                             (self.scope, payload['reset_id'])).fetchone()
+            if old and old['request_hash'] != payload['request_hash']:
+                return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_ID_CONFLICT')
+            if old is None:
+                if payload['phase'] != 'request':
+                    return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_REQUEST_NOT_FOUND')
+                latest = self._latest_reset(db)
+                current = latest['account_epoch'] if latest else 0
+                if latest and latest['state'] != 'complete':
+                    return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_IN_PROGRESS')
+                if current != payload['expected_account_epoch']:
+                    return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_EPOCH_CONFLICT')
+                db.execute('INSERT INTO rx_reset VALUES(?,?,?,?,?,?,?,?,?)',
+                           (self.scope, request['reset_id'], request['request_hash'], canonical(request).decode(),
+                            request['expected_account_epoch'], request['account_epoch'], 'waiting_native', None, self.clock()))
+                old = db.execute('SELECT * FROM rx_reset WHERE scope=? AND reset_id=?',
+                                 (self.scope, request['reset_id'])).fetchone()
+            snapshot = json.loads(old['snapshot_json']) if old['snapshot_json'] else None
+            if payload['phase'] == 'applied':
+                if old['state'] not in ('barrier_ready', 'complete') or snapshot is None:
+                    return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_BARRIER_NOT_READY')
+                if payload['snapshot_hash'] != digest(snapshot):
+                    return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_SNAPSHOT_CONFLICT')
+                db.execute("UPDATE rx_reset SET state='complete',updated=? WHERE scope=? AND reset_id=?",
+                           (self.clock(), self.scope, request['reset_id']))
+                return self._reset_ack(request, 'complete', snapshot, 'SESSION_RESET_COMPLETE')
+            if old['state'] in ('barrier_ready', 'complete'):
+                return self._reset_ack(request, old['state'], snapshot, 'SESSION_RESET_' + old['state'].upper())
+        if not callable(native_quiescent):
+            return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_NATIVE_QUIESCENCE_UNAVAILABLE')
+        try:
+            # A timed-out native future can still run after execute() released
+            # this lock. Both the OS lock and the actual future must be quiet.
+            with account_lock(self.path, self.binding, blocking=False):
+                try:
+                    quiet = native_quiescent()
+                except Exception:
+                    return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_NATIVE_QUIESCENCE_UNAVAILABLE')
+                if type(quiet) is not bool:
+                    return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_NATIVE_QUIESCENCE_UNAVAILABLE')
+                with self._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    old = db.execute('SELECT * FROM rx_reset WHERE scope=? AND reset_id=?',
+                                     (self.scope, request['reset_id'])).fetchone()
+                    if old['state'] in ('barrier_ready', 'complete'):
+                        return self._reset_ack(request, old['state'], json.loads(old['snapshot_json']),
+                                               'SESSION_RESET_' + old['state'].upper())
+                    snapshot = self._reset_snapshot(db, request, published_source_highwater, not quiet)
+                    phase = ('barrier_ready' if quiet and not snapshot['pending_inbound_count']
+                             and not snapshot['pending_echo_count'] else 'waiting_native')
+                    db.execute('UPDATE rx_reset SET state=?,snapshot_json=?,updated=? WHERE scope=? AND reset_id=?',
+                               (phase, canonical(snapshot).decode() if phase == 'barrier_ready' else None,
+                                self.clock(), self.scope, request['reset_id']))
+                    return self._reset_ack(request, phase, snapshot, 'SESSION_RESET_' + phase.upper())
+        except BlockingIOError:
+            with self._db() as db:
+                db.execute('BEGIN')
+                snapshot = self._reset_snapshot(db, request, published_source_highwater, True)
+            return self._reset_ack(request, 'waiting_native', snapshot, 'SESSION_RESET_WAITING_NATIVE')
 
     def _fingerprint(self, command):
         validate_command(command, self.binding)
@@ -139,7 +283,9 @@ class ReceiverLedger:
             db.execute('INSERT OR IGNORE INTO rx_source VALUES(?,?,?,?,?)',(self.scope,source,fingerprint,reason,self.clock()))
 
     def _peer_commands(self, db, peer):
-        return [(row,json.loads(row['command_json'])) for row in db.execute('SELECT * FROM rx_command WHERE scope=?',(self.scope,)) if json.loads(row['command_json'])['peer_id']==peer]
+        latest = self._latest_reset(db)
+        epoch = latest['account_epoch'] if latest else 0
+        return [(row,json.loads(row['command_json'])) for row in db.execute('SELECT * FROM rx_command WHERE scope=?',(self.scope,)) if json.loads(row['command_json'])['peer_id']==peer and json.loads(row['command_json']).get('account_epoch',0)==epoch]
 
     def _manual_barrier(self, db, peer, event_id):
         old=db.execute('SELECT 1 FROM rx_event_fence WHERE scope=? AND event_id=?',(self.scope,event_id)).fetchone()
@@ -246,6 +392,7 @@ class ReceiverLedger:
         fingerprint=self._fingerprint(command)
         with self._db() as db:
             db.execute('BEGIN')
+            if not self._epoch_permitted(db, command):return False
             row=db.execute('SELECT * FROM rx_command WHERE scope=? AND command_id=?',(self.scope,command['command_id'])).fetchone()
             if not row or row['fingerprint']!=fingerprint or row['status']!='pending':return False
             if command['expires_at']<=self.clock():return False
@@ -268,7 +415,8 @@ class ReceiverLedger:
         control=db.execute('SELECT min_version FROM rx_control WHERE scope=? AND peer_id=?',(self.scope,command['peer_id'])).fetchone()
         fence=db.execute('SELECT fence_id,version FROM rx_manual_fence WHERE scope=? AND peer_id=?',(self.scope,command['peer_id'])).fetchone()
         evidence=None
-        if tomb:evidence='durable-cancellation-tombstone'
+        if not self._epoch_permitted(db, command):evidence='account-epoch-not-active'
+        elif tomb:evidence='durable-cancellation-tombstone'
         elif control and command['control_version']<control['min_version']:evidence='stale-control-version'
         elif fence and (command.get('receiver_fence_id')!=fence['fence_id'] or command.get('receiver_fence_version')!=fence['version']):evidence='manual-fence-not-observed'
         if evidence:return self._record(db,command,fingerprint,'cancelled',evidence)
@@ -294,6 +442,8 @@ class ReceiverLedger:
                     if row['status'] in ('sent', 'failed', 'cancelled', 'unknown'):
                         return self._result(db,command,row['status'],row['evidence'])
                     return self._record(db, command, fingerprint, 'unknown', 'durable-pending-requires-reconciliation')
+                if not self._epoch_permitted(db, command):
+                    return self._record(db, command, fingerprint, 'cancelled', 'account-epoch-not-active')
                 control = db.execute('SELECT min_version FROM rx_control WHERE scope=? AND peer_id=?', (self.scope,command['peer_id'])).fetchone()
                 if control and command['control_version'] < control['min_version']:
                     return self._record(db, command, fingerprint, 'cancelled', 'stale-control-version')
@@ -364,7 +514,8 @@ class ReceiverLedger:
             tomb = db.execute('SELECT * FROM rx_tombstone WHERE scope=? AND command_id=?', (self.scope, command['command_id'])).fetchone()
             self._check(row, fingerprint); self._check(tomb, fingerprint)
             db.execute('INSERT OR IGNORE INTO rx_tombstone VALUES(?,?,?,?)', (self.scope, command['command_id'], fingerprint, self.clock()))
-            db.execute('INSERT INTO rx_control VALUES(?,?,?) ON CONFLICT(scope,peer_id) DO UPDATE SET min_version=MAX(min_version,excluded.min_version)', (self.scope, command['peer_id'], command['control_version']+1))
+            if self._epoch_permitted(db, command):
+                db.execute('INSERT INTO rx_control VALUES(?,?,?) ON CONFLICT(scope,peer_id) DO UPDATE SET min_version=MAX(min_version,excluded.min_version)', (self.scope, command['peer_id'], command['control_version']+1))
             if row and row['status'] in ('sent', 'failed', 'cancelled'):
                 return self._result(db,command,row['status'],row['evidence'])
             if row and row['status']!='held':

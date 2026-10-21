@@ -719,7 +719,7 @@ function onJump(cpId: string, bondName: string) {
 .bot-sw .knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left .3s; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
 .bot-sw.on .knob { left: 18px; }
 .hero-note { font-size: 12px; color: rgba(255,240,235,.65); }
-.hero-stats { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; align-content: center; min-width: 0; }
+.hero-stats { position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; align-content: center; min-width: 0; }
 .stat { border-radius: 12px; padding: 10px 12px; min-width: 0; overflow: hidden; background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.2); backdrop-filter: blur(10px); transition: all .25s; }
 .stat:hover { background: rgba(255,255,255,.16); box-shadow: 0 0 18px rgba(255,200,180,.25); }
 .stat-top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; white-space: nowrap; }

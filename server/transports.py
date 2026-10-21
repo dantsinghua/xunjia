@@ -1,7 +1,7 @@
-"""Authenticated, durable OSS/mail adapters. No implicit route failover.
+"""Authenticated, durable file-gateway/mail transport core. No implicit failover.
 
-Network factories are injectable; defaults use STS-backed OSSHTTP and TLS SMTP/
-IMAP. poll() stages verified input; only ack() after the caller commits advances
+Network factories are injectable; mail uses TLS SMTP/IMAP and the file gateway
+is implemented by FileGatewayTransport. Only ack() after the caller commits advances
 transport cursors. A submission is never evidence that the native IM sent it.
 """
 from __future__ import annotations
@@ -23,11 +23,9 @@ import sqlite3
 import ssl
 import time
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from imlink.oss_http import OSSHTTP
 from .receiver_ledger import account_lock
-from relay.protocol import Binding, Codec, ProtocolError, canonical, digest, envelope, result, token, validate_command
+from relay.protocol import (Binding, Codec, ProtocolError, canonical, digest, envelope,
+                            result, token, validate_command, validate_session_reset)
 
 
 class TransportUnavailable(RuntimeError):
@@ -216,6 +214,11 @@ class _Store:
             row=db.execute('SELECT data FROM tx_event_control WHERE scope=? AND id=?',(self.scope,identity)).fetchone()
         return json.loads(row['data']) if row else {}
 
+    def source_highwater(self):
+        with self.db() as db:
+            return db.execute('SELECT COALESCE(MAX(seq),0) FROM tx_event WHERE scope=?',
+                              (self.scope,)).fetchone()[0]
+
 
 class _Transport:
     route=''
@@ -274,6 +277,33 @@ class _Transport:
         return rows
     def publish_catalog(self,payload):return self._publish_document('catalog',payload)
     def publish_contacts(self,payload):return self._publish_document('contacts',payload)
+
+    def _queue_reset_control(self, kind, payload):
+        validate_session_reset(payload, self.binding, ack=kind == 'session_reset_ack')
+        if payload['transport'] != self.route:
+            raise ProtocolError('SESSION_RESET_TRANSPORT_MISMATCH')
+        # Only these idempotent controls receive distinct retry envelopes.
+        # Ordinary uncertain text uploads retain their existing protection.
+        bucket = int(self.clock() // 30)
+        snapshot = payload.get('snapshot_hash') if payload['phase'] in ('applied', 'barrier_ready', 'complete') else ''
+        identity = kind + '-' + digest([payload['reset_id'], payload['request_hash'], payload['phase'],
+                                       snapshot, payload.get('code', ''), bucket])[:48]
+        with account_lock(self.store.path, self.binding):
+            with self.store.db() as db:
+                old = db.execute('SELECT data FROM tx_publication WHERE scope=? AND id=? AND route=?',
+                                 (self.store.scope, identity, self.route)).fetchone()
+            if old:
+                return identity
+            data = envelope(self.binding, kind, payload, message_id=identity,
+                            created_at=self.clock(), expires_at=self.clock() + self.envelope_ttl)
+            self._queue_publication(data)
+        return identity
+
+    def queue_session_reset(self, payload):
+        return self._queue_reset_control('session_reset', payload)
+
+    def queue_session_reset_ack(self, payload):
+        return self._queue_reset_control('session_reset_ack', payload)
     def _publish_document(self,kind,payload):
         data=envelope(self.binding,kind,payload,message_id=kind+'-'+digest(payload)[:32],created_at=self.clock(),expires_at=self.clock()+self.envelope_ttl)
         self._publish_durable(data)
@@ -302,20 +332,60 @@ class _Transport:
             db.execute('INSERT INTO tx_publication(scope,id,route,data) VALUES(?,?,?,?) ON CONFLICT(scope,id,route) DO UPDATE SET uploaded=0,data=excluded.data',(self.store.scope,data['message_id'],self.route,canonical(data).decode()))
 
     def _publish_durable(self,data):
-        self._queue_publication(data)
-        self.flush_publications()
+        if data['kind'] not in ('catalog','contacts'):
+            self._queue_publication(data)
+            self.flush_publications()
+            return
+        # Full directory snapshots have independent identities. An older unknown
+        # snapshot must remain auditable without suppressing a new observation.
+        with account_lock(self.store.path,self.binding):
+            with self.store.db() as db:
+                old=db.execute('SELECT data,uploaded FROM tx_publication WHERE scope=? AND id=? AND route=?',
+                               (self.store.scope,data['message_id'],self.route)).fetchone()
+            if old:
+                saved=json.loads(old['data'])
+                data={**data,'created_at':saved['created_at'],'expires_at':saved['expires_at']}
+            # Reusing a snapshot may neither renew its report time nor re-sign an
+            # expired packet. A later observation needs its own snapshot payload.
+            self.codec._validate(data)
+            if not old:self._queue_publication(data)
+            blob=self.store.packet(data['message_id'],data,self.codec)
+            if old and old['uploaded']:return
+            self._publish(data,blob)
+            with self.store.db() as db:
+                db.execute('UPDATE tx_publication SET uploaded=1 WHERE scope=? AND id=? AND route=?',
+                           (self.store.scope,data['message_id'],self.route))
 
     def flush_publications(self,limit=50):
         if not 1<=limit<=200:raise ValueError('发布批量须为1至200')
         with account_lock(self.store.path,self.binding):
-            with self.store.db() as db:rows=db.execute('SELECT id,data FROM tx_publication WHERE scope=? AND route=? AND uploaded=0 ORDER BY rowid LIMIT ?',(self.store.scope,self.route,limit)).fetchall()
+            # Handshake retries supersede only older envelopes for the same
+            # logical reset. An uncertain text/receipt is never reissued here.
+            with self.store.db() as db:
+                controls=db.execute('''SELECT p.id,p.data FROM tx_publication p
+                    WHERE p.scope=? AND p.route=? AND p.uploaded=0
+                    AND json_extract(p.data,'$.kind') IN ('session_reset','session_reset_ack')
+                    AND p.rowid=(SELECT MAX(q.rowid) FROM tx_publication q WHERE q.scope=p.scope AND q.route=p.route
+                        AND json_extract(q.data,'$.kind')=json_extract(p.data,'$.kind')
+                        AND json_extract(q.data,'$.payload.reset_id')=json_extract(p.data,'$.payload.reset_id'))
+                    ORDER BY p.rowid LIMIT ?''',(self.store.scope,self.route,limit)).fetchall()
+            control_error=None
+            for row in controls:
+                try:
+                    data=json.loads(row['data'])
+                    self._publish(data,self.store.packet(row['id'],data,self.codec))
+                    with self.store.db() as db:db.execute('UPDATE tx_publication SET uploaded=1 WHERE scope=? AND id=? AND route=?',(self.store.scope,row['id'],self.route))
+                except Exception as exc:
+                    control_error=exc
+            with self.store.db() as db:rows=db.execute("SELECT id,data FROM tx_publication WHERE scope=? AND route=? AND uploaded=0 AND json_extract(data,'$.kind') NOT IN ('session_reset','session_reset_ack') ORDER BY rowid LIMIT ?",(self.store.scope,self.route,limit-len(controls))).fetchall()
             for row in rows:
                 data=json.loads(row['data'])
                 if data['expires_at']<=self.clock():
                     data['created_at']=self.clock();data['expires_at']=self.clock()+self.envelope_ttl
                 self._publish(data,self.store.packet(row['id'],data,self.codec))
                 with self.store.db() as db:db.execute('UPDATE tx_publication SET uploaded=1 WHERE scope=? AND id=? AND route=?',(self.store.scope,row['id'],self.route))
-            return len(rows)
+            if control_error is not None:raise control_error
+            return len(rows)+len(controls)
 
     def _event_envelope(self,value,control=None):
         data=envelope(self.binding,'event',value,message_id=value['event_id'],peer_id=token(value['peer_id']),created_at=self.clock(),expires_at=self.clock()+self.envelope_ttl)
@@ -377,93 +447,6 @@ class _Transport:
         with self.store.db() as db:
             rows=db.execute("SELECT token,stream,epoch,position,reason FROM tx_source WHERE scope=? AND kind='quarantine' ORDER BY rowid DESC LIMIT ?",(self.store.scope,min(max(int(limit),1),200))).fetchall()
         return [dict(row) for row in rows]
-
-
-class OSSTransport(_Transport):
-    route='oss'
-    def __init__(self,binding:Binding,client:OSSHTTP,path,**kwargs):
-        if client is None:raise TransportUnavailable('NOT_CONFIGURED: OSS')
-        super().__init__(binding,path,**kwargs);self.client=client
-        self.root=f'wb/{token(binding.workbench_id)}'
-        self.out=f'{self.root}/out/xunjia/{token(binding.account_uid)}'
-
-    def _get(self,name):
-        status,body=self.client.request('GET',name)
-        if status==404:return None
-        if status!=200:raise TransportUnavailable('OSS_READ_UNAVAILABLE')
-        return body
-    def _put(self,name,blob):
-        status,_=self.client.request('PUT',name,blob)
-        if status not in (200,201,204):raise TransportUnavailable('OSS_WRITE_UNAVAILABLE')
-    def _publish(self,data,blob):
-        kind=data['kind'];cid=data['command_id']
-        if kind=='catalog':name=f'{self.out}/catalog.bin'
-        elif kind=='contacts':name=f'{self.out}/contacts.bin'
-        elif kind=='receipt':name=f'{self.root}/ack/{cid}.bin'
-        elif kind in ('command','cancel','query'):name=f'{self.root}/in/xunjia/{data["message_id"]}.bin'
-        else:raise ProtocolError('不支持的OSS指令对象')
-        self._put(name,blob)
-
-    def reconcile(self,command):
-        self._command(command,'query')
-        raw=self._get(f'{self.root}/ack/{token(command["command_id"])}.bin')
-        if raw:
-            try:data=self._incoming(raw)
-            except ProtocolError:
-                self._submit(command,'query')
-                raise
-            if data['kind']!='receipt' or data['command_id']!=command['command_id']:raise ProtocolError('ACK对象身份不匹配')
-            self.store.message(data)
-        receipt=self.store.receipt(command)
-        if receipt and receipt['status'] in ('sent','failed','cancelled'):return receipt
-        self._submit(command,'query')
-        return receipt or self._waiting(command)
-
-    def _publish_event(self,data,blob):
-        self._put(f'{self.out}/{data["payload"]["source_seq"]:020d}.bin',blob)
-
-    def _after_events(self):
-        with self.store.db() as db:
-            rows=db.execute('SELECT e.seq,COALESCE(r.uploaded,0) AS uploaded FROM tx_event e LEFT JOIN tx_event_route r ON e.scope=r.scope AND e.id=r.id AND r.route=? WHERE e.scope=? ORDER BY e.seq',(self.route,self.store.scope)).fetchall()
-        last=0
-        for row in rows:
-            if not row['uploaded']:break
-            last=row['seq']
-        manifest=envelope(self.binding,'manifest',{'first_seq':1,'last_seq':last},message_id='manifest-'+str(last),created_at=self.clock(),expires_at=self.clock()+self.envelope_ttl)
-        self._put(f'{self.out}/manifest.bin',self.codec.pack(manifest))
-
-    def poll(self,limit=50):
-        if not 1<=limit<=200:raise ValueError('读取批量须为1至200')
-        raw=self._get(f'{self.out}/manifest.bin')
-        if not raw:return self._pending('oss-events',limit)
-        manifest=self._incoming(raw)
-        if manifest['kind']!='manifest':raise ProtocolError('消息清单种类不符')
-        first,last=manifest['payload'].get('first_seq'),manifest['payload'].get('last_seq')
-        if type(first) is not int or type(last) is not int or first<1 or last<0:raise ProtocolError('消息清单水位无效')
-        cursor=self.store.cursor('oss-events','v2')
-        if last<cursor or first>cursor+1:raise ProtocolError(f'消息清单缺口: cursor={cursor}, first_seq={first}, last_seq={last}')
-        for seq in range(cursor+1,min(last,cursor+limit)+1):
-            body=self._get(f'{self.out}/{seq:020d}.bin')
-            if body is None:
-                if self.store.pending('oss-events'):break
-                raise ProtocolError(f'消息清单对象缺口: source_seq={seq}')
-            try:data=self._incoming(body)
-            except ProtocolError:raise ProtocolError(f'源事件认证或有效期失败: source_seq={seq}; 请核对源账本后有界重放') from None
-            if data['kind']!='event' or data['payload'].get('source_seq')!=seq or data['message_id']!=data['payload'].get('event_id'):
-                raise ProtocolError('消息身份或源序号不匹配')
-            self.store.stage('oss-events','v2',seq,data)
-        return self._pending('oss-events',limit)
-
-    def catalog(self):
-        return self._book(f'{self.out}/catalog.bin','catalog')
-    def contacts(self):
-        return self._book(f'{self.out}/contacts.bin','contacts')
-    def _book(self,name,kind):
-        raw=self._get(name)
-        if not raw:raise TransportUnavailable('NOT_CONFIGURED: DIRECTORY')
-        data=self._incoming(raw)
-        if data['kind']!=kind:raise ProtocolError('目录种类不符')
-        return data['payload']
 
 
 @dataclass(frozen=True)

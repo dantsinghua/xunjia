@@ -11,12 +11,13 @@ server/legacy_app.py、legacy_schema.py、legacy_health.py 只保留为明确命
 暂停只关闭发送，解析和消息展示不停止。上下文默认20条（全局范围10..30）。
 每券按目标方向汇总各对手当前有效、达价且最终确认的整量，>=目标量可提前交人工。
 到价仍可改善时继续谈；不自动拆一家整量，不自动成交。
-跨日必须向对手本人确认当天价格；我方绝对限价沿用，BP限价按最新交易日中债估值重新计算。
+跨日必须向对手本人确认当天价格；我方绝对限价沿用，BP限价按当前可用的中债估值重新计算。按[2026-10-20用户裁决](docs/implementation/2026-10-20-valuation-date-advisory.md)，Innodealing中债估值可直接用于估算，估值日期和发布日历仅作提示、不阻断；不改变对手报价的交易日确认和二次授权。
 净价/全价必须取得对手确认的结算日，并使用已验收条款的计算结果；条款未配置保留原价但不伪造收益率。
 ## 新表（与旧库不是就地自动迁移）
-sql/oceanbase/001_xunjia_schema_mysql.sql 是当前正式的15张V2.2表、13个二级索引。
+sql/oceanbase/001_xunjia_schema_mysql.sql 是当前正式的16张V2.2表、14个二级索引。
 sql/oceanbase/archive/001_legacy_schema_mysql.sql 仅供历史对照，不是部署入口。
 OceanBase部署不会在服务启动时自动建表；由运维明确选择专属库并执行SQL。
+已有库的会话清空与双端同步升级使用 `002_session_reset.sql`、`003_thread_workbench.sql`，先检查实际列和索引再执行；历史采集端来源不得猜填。功能与迁移边界见 [会话清空说明](docs/implementation/2026-10-20-session-reset.md)。
 测试显式SQLite按当前schema创建，无真实客户数据。
 ## Dify
 使用 dify/chatflow_v22/analysis.yml 与 reply.yml，两份Dify0.15.3兼容Chatflow，各3个基础节点。
@@ -32,7 +33,7 @@ XUNJIA_AGGREGATION_PROFILE 必须指向经过真实成功解析+回复耗时测�
 字段为quiet_ms、max_wait_ms、reference_ms、measurement_id，满足0<=quiet_ms<=max_wait_ms<reference_ms/2。
 源码及配置模板不填800/1500/3000等未经测量的默认值。
 缺少两阶段Key或测量报告时健康接口明确报告analysis_blockers，不能把代码测试通过说成真实对话已运行。
-XUNJIA_ENABLE_LIVE_TRANSPORT 默认0；即使开启，采集宿主还必须明确公布 negotiation-v22-watermark 能力。
+有效授权指令由后台按用户暂停状态、有效期与水位检查派发，不另设真实发送开关；采集宿主仍须公布 negotiation-v22-watermark 能力。
 旧QTrade宿主不具备此能力时不得绕过此门槛发送。
 ## 分组验收
 scripts/check_v22_release.py 每次只运行一个组，默认100秒上限：

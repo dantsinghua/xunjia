@@ -34,7 +34,6 @@ class Port:
     def __init__(self, binding):
         self.binding = binding
         self.adapters = {}
-        self.allow_native_send = False
         self.execution_permission = None
         self.calls = []
     def _account(self):
@@ -44,7 +43,7 @@ class Port:
                 "direction": row["dir"], "text": row["text"], "kind": "message", "ext_msg_id": row["ext_msg_id"],
                 "occurred_at": row["ts_ms"] / 1000, "historical": not live}
     def native_send(self, command):
-        if not self.allow_native_send or not self.execution_permission(command):
+        if not self.execution_permission(command):
             return {"status": "failed", "evidence": "synthetic permission blocked"}
         self.calls.append(command)
         return {"status": "unknown", "evidence": "synthetic unknown"}
@@ -58,6 +57,9 @@ class Bridge:
         self.binding = binding
         self.order, self.published = [], []
         self.ledger = Ledger(self.order)
+        # Existing directory publisher reads adapter codec limits, even for an
+        # empty synthetic book. No network adapter or thread is substituted.
+        self.adapters = {"oss": SimpleNamespace(codec=SimpleNamespace(max_bytes=4*1024*1024))}
         self.fail_publication = False
         self.runs = 0
         self.catalogs = 0
@@ -74,13 +76,13 @@ class Bridge:
         self.catalogs += 1
 
 
-def build(tmp_path, loop, *, enabled=False, legacy_disabled=lambda: True, bus_guard=True):
+def build(tmp_path, loop, *, legacy_disabled=lambda: True, bus_guard=True):
     binding = SimpleNamespace(owner_user_id="synthetic-owner", account_uid="synthetic-account", workbench_id="synthetic-workbench")
     bridge, port = Bridge(binding), Port(binding)
     host = XunjiaV22Host(store=SimpleNamespace(outbox_seq_bounds=lambda: (0, 0)),
         bus=SimpleNamespace(supports_xunjia_v22_guard=bus_guard), loop=loop, binding=binding,
         bridge=bridge, port=port, state_path=tmp_path / "host.sqlite3",
-        legacy_inbox_disabled=legacy_disabled, allow_native_send=enabled)
+        legacy_inbox_disabled=legacy_disabled)
     return host, bridge, port
 
 
@@ -100,19 +102,19 @@ def test_host_rejects_legacy_overlap_and_missing_bus_guard(tmp_path):
     asyncio.run(run())
 
 
-def test_host_defaults_disable_native_send_and_start_is_single_worker(tmp_path):
+def test_host_defaults_allow_authorized_native_send_only_while_single_worker_active(tmp_path):
     async def run():
         host, bridge, port = build(tmp_path, asyncio.get_running_loop())
-        assert not host.permission({}) and not port.allow_native_send
+        assert not host.permission({}) and not hasattr(port,"allow_native_send")
         await host.start()
         worker = host._worker
         await host.start()
         assert host._worker is worker
-        assert not host.permission({}) and not port.allow_native_send
-        assert bridge.native_send({"business_version": "2.2"})["status"] == "failed"
-        assert port.calls == []
+        assert host.permission({}) and not hasattr(port,"allow_native_send")
+        assert bridge.native_send({"business_version": "2.2"})["status"] == "unknown"
+        assert len(port.calls) == 1
         await host.stop()
-        assert not port.allow_native_send and not host.permission({})
+        assert not hasattr(port,"allow_native_send") and not host.permission({})
     asyncio.run(run())
 
 
@@ -174,7 +176,7 @@ def test_restart_replays_unpublished_native_events_without_resending(tmp_path):
 
 def test_host_never_accepts_old_business_commands_or_another_account_event(tmp_path):
     async def run():
-        host, bridge, port = build(tmp_path, asyncio.get_running_loop(), enabled=True)
+        host, bridge, port = build(tmp_path, asyncio.get_running_loop())
         assert bridge.native_send({"business_version": "1"})["status"] == "failed"
         observe(host, account="qd91")
         await host.run_once()
@@ -231,7 +233,8 @@ def test_capability_is_published_only_by_active_guarded_host(tmp_path):
         try:
             await asyncio.wait_for(announced.wait(), timeout=2)
             assert bridge.catalogs == 1
-            assert not port.allow_native_send, "Receiving V2 capability does not opt into native sending"
+            assert not hasattr(port,"allow_native_send")
+            assert callable(port.execution_permission) and host.permission({}), "Active host uses existing ledger permission without extra native flag"
         finally:
             await host.stop()
         await host.run_once()
@@ -246,7 +249,7 @@ def test_missing_private_config_or_key_reference_cannot_enable_host(tmp_path, mo
         path = tmp_path / "private-config.json"
         path.write_text(json.dumps({"owner_user_id": "synthetic-owner", "account_uid": "synthetic-account",
             "workbench_id": "synthetic-workbench", "seal_key_file": "missing-seal.txt",
-            "sign_key_file": "missing-sign.txt", "allow_native_send": True}))
+            "sign_key_file": "missing-sign.txt"}))
         monkeypatch.setenv("XUNJIA_COLLECTOR_CONFIG_FILE", str(path))
     else:
         monkeypatch.delenv("XUNJIA_COLLECTOR_CONFIG_FILE", raising=False)

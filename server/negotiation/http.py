@@ -15,16 +15,20 @@ from .service import digest
 from .store import encoded
 from ..market import parse_filter
 from ..quote_runtime import public_static
-def router(service,market,tools,transport):
+def router(service,market,tools,transport,*,collector_selection=None):
     r=APIRouter(prefix='/api');store=service.store;commands=service.commands_core
     def owner(req):return req.state.user.user_id
+    def require_online(req):
+        guard=getattr(collector_selection,"require_online",None)
+        if callable(guard):guard(owner(req))
     def bound(req):
         binding=store.binding_for(owner(req))
         if not binding:raise PermissionError('尚未绑定本人采集账号')
         return binding
     def thread_for(who,peer):
+        selected=store.binding_for(who)
         with store.db.transaction(write=False) as tx:
-            row=tx.execute('SELECT thread_id FROM xj2_thread WHERE owner_id=? AND peer_uid=? ORDER BY thread_id',(who,peer)).fetchall()
+            row=tx.execute('SELECT thread_id FROM xj2_thread WHERE owner_id=? AND peer_uid=? AND account_uid=? AND workbench_id=? ORDER BY thread_id',(who,peer,selected['account_uid'] if selected else '',selected['workbench_id'] if selected else '')).fetchall()
         if len(row)!=1:raise InvalidFact('请明确选择唯一对手聊天线程')
         return row[0]['thread_id']
     def adapter(b,route=None):
@@ -32,6 +36,10 @@ def router(service,market,tools,transport):
         a=adapters.get((b['owner_user_id'],b['account_uid'],route))
         if a is None:raise InvalidFact('传输适配器尚未配置')
         return a
+    def current_command(who,command_id):
+        row=commands.get(who,command_id)
+        with store.db.transaction(write=False) as tx:store.require_current_thread(tx,who,row['thread_id'])
+        return row
     def label(group,peer=None):
         if group['state']=='HANDOFF':return '待人工确认'
         if not group['send_allowed'] or peer and not peer['send_allowed']:return '已暂停'
@@ -65,10 +73,12 @@ def router(service,market,tools,transport):
             body.get('member_ids'),body.get('expected_revision'),body.get('reason'))}
     @r.post('/negotiation/groups/{group_id}/sending')
     def group_sending(request:Request,group_id:str,body:dict=Body(default_factory=dict)):
+        if body.get("allowed") is True:require_online(request)
         store.set_sending(owner(request),body.get('allowed'),group_id=group_id)
         return {'ok':True,'data':{'group_id':group_id,'analysis_enabled':True}}
     @r.post('/negotiation/members/{member_id}/sending')
     def member_sending(request:Request,member_id:str,body:dict=Body(default_factory=dict)):
+        if body.get("allowed") is True:require_online(request)
         store.set_sending(owner(request),body.get('allowed'),member_id=member_id)
         return {'ok':True,'data':{'member_id':member_id,'analysis_enabled':True}}
     @r.get('/negotiation/members/{member_id}/context')
@@ -76,17 +86,40 @@ def router(service,market,tools,transport):
     @r.get('/negotiation/members/{member_id}/decisions')
     def decisions(request:Request,member_id:str):
         with store.db.transaction(write=False) as tx:
-            store._member(tx,owner(request),member_id)
+            member=store._member(tx,owner(request),member_id)
+            store.require_current_thread(tx,owner(request),member['thread_id'])
             rows=tx.execute('SELECT * FROM xj2_decision WHERE member_id=? ORDER BY created_at DESC LIMIT 100',(member_id,)).fetchall()
         return {'ok':True,'data':[{**dict(row),'result':json.loads(row['result_json'])} for row in rows]}
     @r.post('/im/binding')
     def bind(request:Request,body:dict=Body(default_factory=dict)):
+        if collector_selection and collector_selection.configured:
+            raise InvalidFact('请从采集端目录选择工作台和企点号，使用版本校验的选择接口')
         return {'ok':True,'data':store.bind_account(owner(request),body.get('account_uid'),body.get('workbench_id'),body.get('transport','oss'))}
+    @r.post('/im/binding/select')
+    def select_collector(request:Request,body:dict=Body(default_factory=dict)):
+        if not collector_selection or not collector_selection.configured:raise InvalidFact('当前服务尚未接入采集端目录发现')
+        return {'ok':True,'data':collector_selection.select(owner(request),body)}
+    @r.post('/im/catalog/refresh')
+    def refresh_collectors(request:Request):
+        if not collector_selection or not collector_selection.configured:raise InvalidFact('当前服务尚未接入采集端目录发现')
+        return {'ok':True,'data':collector_selection.catalog(owner(request),refresh=True)}
+    @r.post('/im/session-reset')
+    def request_reset(request:Request,body:dict=Body(default_factory=dict)):
+        require_online(request)
+        return {'ok':True,'data':service.session_reset.request(owner(request),body)}
+    @r.get('/im/session-reset')
+    def latest_reset(request:Request):
+        return {'ok':True,'data':service.session_reset.get(owner(request))}
+    @r.get('/im/session-reset/{reset_id}')
+    def reset_status(request:Request,reset_id:str):
+        return {'ok':True,'data':service.session_reset.get(owner(request),reset_id)}
     @r.post('/im/rfq/preview')
     def preview(request:Request,body:dict=Body(default_factory=dict)):
+        require_online(request)
         return {'ok':True,'data':service.preview(owner(request),body.get('request_id'),body.get('items'))}
     @r.post('/im/rfq/send')
     def confirm(request:Request,body:dict=Body(default_factory=dict)):
+        require_online(request)
         if 'items' in body:raise InvalidFact('须先预览并确认，不能直接发送原始明细')
         return {'ok':True,'data':service.confirm(owner(request),body.get('batch_id'),body.get('expected_version'),body.get('request_id'))}
     @r.get('/im/rfq/status')
@@ -99,6 +132,7 @@ def router(service,market,tools,transport):
         return {'ok':True,'data':{'engine':'v22','items':items,'sessions':sessions}}
     @r.post('/bot/toggle')
     def bot(request:Request,body:dict=Body(default_factory=dict)):
+        if body.get("status")=="正常":require_online(request)
         if body.get('status') not in ('正常','停止'):raise InvalidFact('指定正常或停止')
         return {'ok':True,'data':service.set_bot(owner(request),body['status']=='正常')}
     @r.get('/monitor/summary')
@@ -168,9 +202,11 @@ def router(service,market,tools,transport):
             'analysis_pending':s['analysis_pending'],'trader':request.state.user.display_name} for s in rows]}
     @r.post('/monitor/send')
     def send(request:Request,body:dict=Body(default_factory=dict)):
+        require_online(request)
         return {'ok':True,'data':service.manual_send(owner(request),body.get('cp'),body.get('text'),body.get('request_id'))}
     @r.post('/im/send')
     def im_send(request:Request,body:dict=Body(default_factory=dict)):
+        require_online(request)
         return {'ok':True,'data':service.manual_send(owner(request),body.get('uin'),body.get('text'),body.get('request_id'))}
     @r.post('/session/{session_id}/takeover')
     def takeover(request:Request,session_id:str):
@@ -184,6 +220,7 @@ def router(service,market,tools,transport):
         return {'ok':True,'data':{'member_id':mid,'analysis_enabled':True}}
     @r.post('/im/inquiry/session/resume')
     def resume(request:Request,body:dict=Body(default_factory=dict)):
+        require_online(request)
         mid=body.get('member_id') or body.get('session_id')
         if not mid:raise InvalidFact('请选择需要恢复的单券对手子会话')
         store.set_sending(owner(request),True,member_id=mid)
@@ -196,20 +233,22 @@ def router(service,market,tools,transport):
     def archive(request:Request,member_id:str):
         with store.write(owner(request)) as tx:
             member=store._member(tx,owner(request),member_id);g=store._group(tx,owner(request),member['group_id'])
+            for participant in tx.execute('SELECT thread_id FROM xj2_peer WHERE group_id=?',(g['group_id'],)).fetchall():
+                store.require_current_thread(tx,owner(request),participant['thread_id'])
             active=tx.execute("SELECT c.command_id FROM xj2_command c LEFT JOIN xj2_command_member cm ON cm.command_id=c.command_id LEFT JOIN xj2_peer participant ON participant.member_id=cm.member_id WHERE (c.group_id=? OR participant.group_id=?) AND c.state IN ('QUEUED','PENDING','UNKNOWN') LIMIT 1",(g['group_id'],g['group_id'])).fetchone()
             if active or g['send_allowed']:raise InvalidFact('先停止券组并完成所有命令对账')
             tx.execute('UPDATE xj2_group SET archived=1,version=version+1 WHERE group_id=?',(g['group_id'],))
         return {'ok':True,'data':{'archived_group':g['group_id']}}
     @r.get('/im/receipts/{command_id}')
     def receipt(request:Request,command_id:str):
-        row=commands.get(owner(request),command_id);result=json.loads(row['result_json'])
+        row=current_command(owner(request),command_id);result=json.loads(row['result_json'])
         return {'ok':True,'data':{'cmd_id':command_id,'status':row['state'].lower(),'ok':row['state']=='SENT','reason':result.get('reason',''),'expected_result_hash':digest(result),'native_id':row['native_id']}}
     @r.get('/im/commands/unknown')
     def unknown(request:Request):
         return {'ok':True,'data':[{'cmd_id':c['command_id'],'peer_id':c['peer_id'],'text':c['text'],'created_at':c['created_at'],'expected_result_hash':digest(json.loads(c['result_json'])),'conflict':json.loads(c['result_json']).get('conflict',False)} for c in service.commands(owner(request)) if c['state']=='UNKNOWN']}
     @r.post('/im/receipts/{command_id}/reconcile')
     def reconcile(request:Request,command_id:str,body:dict=Body(default_factory=dict)):
-        row=commands.get(owner(request),command_id)
+        row=current_command(owner(request),command_id)
         if not body.get('confirmed') or body.get('expected_result_hash')!=digest(json.loads(row['result_json'])):raise InvalidFact('请刷新原始执行证据后明确确认')
         with store.db.transaction(write=False) as tx:thread=store._thread(tx,owner(request),row['thread_id'])
         status=str(body.get('status','')).upper()
@@ -217,26 +256,52 @@ def router(service,market,tools,transport):
         value=commands.receipt(owner(request),command_id,account_uid=thread['account_uid'],peer_uid=thread['peer_uid'],content_hash=row['content_hash'],status=status,evidence=body.get('evidence'),native_id=body.get('native_id'))
         return {'ok':True,'data':{'state':value,'needs_review':value=='UNKNOWN'}}
     def links_view(request):
+        if (collector_selection and collector_selection.configured
+                and store.binding_for(owner(request)) is None):
+            return {'links':[],'hints':{'selection':'请先配置文件中转，再选择采集端工作台与台内企点号'}}
         b=bound(request);links=[]
+        checks=store.preferences(owner(request)).get('collector_directory_checks',{}) if collector_selection and collector_selection.configured else {}
         for route in ('oss','mail'):
             try:adapter(b,route);configured=True
             except InvalidFact:configured=False
+            check=checks.get(route,{})
+            tested=bool(configured and all(check.get(k)==b[k] for k in ('account_uid','workbench_id','version')))
+            stale=True
+            if tested:
+                if route=='oss' and collector_selection and collector_selection.configured:
+                    try:
+                        fresh=collector_selection.freshness(owner(request))
+                        if any(fresh.get(k)!=check.get(k) for k in ('publication_id','publication_hash')):check=fresh
+                    except PermissionError:raise
+                    except (ValueError,OSError):check={**check,'stale':True}
+                try:stale=bool(check.get('stale')) or not 0<=store.clock()-float(check['updated_at'])<=300
+                except (KeyError,TypeError,ValueError):pass
             links.append({'id':b['account_uid']+':'+route,'account_id':b['account_uid'],'account_uid':b['account_uid'],'self_uid':b['account_uid'],
               'mode':route,'name':request.state.user.display_name,'workbench_id':b['workbench_id'],'active':route==b['transport'],
-              'configured':configured,'version':b['version'],'tested':False,'catalog_stale':True,'state':'未检查' if configured else '未配置',
+              'configured':configured,'version':b['version'],'tested':tested,'catalog_stale':stale,
+              'state':('缓存目录已校验' if stale else '目录已校验') if tested else '未检查' if configured else '未配置',
               'account':{'id':b['account_uid'],'self_uid':b['account_uid'],'label':b['account_uid'],'state':'已绑定'},
               'form':{route:{'workbench_id':b['workbench_id'],'account_uid':b['account_uid']}},'contacts':[],'secret_set':configured})
         return {'active_id':b['account_uid']+':'+b['transport'],'links':links,'binding_version':b['version']}
     @r.get('/im/links')
     def links(request:Request):return {'ok':True,'data':links_view(request)}
     @r.get('/im/contacts')
-    def contacts(request:Request):
+    def contacts(request:Request,refresh:int=Query(0,ge=0,le=1)):
+        if collector_selection and collector_selection.configured:
+            return {'ok':True,'data':collector_selection.contacts(owner(request),refresh=bool(refresh))}
         b=bound(request);data=adapter(b).contacts()
         if data.get('account_uid')!=b['account_uid']:raise InvalidFact('通讯录账号不匹配')
         people=[{k:str(row.get(k) or '') for k in ('uin','name','remark')} for row in data.get('contacts',[]) if isinstance(row,dict)]
         return {'ok':True,'data':{'source':b['transport'],'contacts':people,'org':data.get('org',{}),'name':request.state.user.display_name,'account_id':b['account_uid']}}
+    @r.get('/im/files')
+    def files(request:Request,before:int|None=Query(None,ge=1),limit:int=Query(50,ge=1,le=100)):
+        if set(request.query_params)-{'before','limit'}:raise InvalidFact('文件记录只读取本人已选采集端与账号')
+        if not collector_selection or not collector_selection.configured:raise InvalidFact('当前服务尚未接入文件中转目录')
+        return {'ok':True,'data':collector_selection.files(owner(request),before=before,limit=limit)}
     @r.get('/im/catalog')
     def catalog(request:Request):
+        if collector_selection and collector_selection.configured:
+            return {'ok':True,'data':collector_selection.catalog(owner(request))}
         b=bound(request);data=adapter(b).catalog()
         if data.get('account_uid')!=b['account_uid'] or data.get('workbench_id')!=b['workbench_id']:raise InvalidFact('采集目录身份不一致')
         return {'ok':True,'data':{'workbenches':[{'workbench_id':b['workbench_id'],'stale':False,'accounts':[{'account_uid':b['account_uid'],'account_nick':request.state.user.display_name}],'capabilities':data.get('capabilities',[])}]}}
@@ -250,11 +315,14 @@ def router(service,market,tools,transport):
     def test_link(request:Request,link_id:str):
         b=bound(request);account,_,route=link_id.rpartition(':')
         if account!=b['account_uid']:raise PermissionError('通道不属于本人')
+        if collector_selection and collector_selection.configured and route=='oss':
+            book=collector_selection.check(owner(request))
+            return {'ok':True,'data':{'passed':True,'steps':[{'name':'所选账号目录校验','ok':True,
+                'detail':'已校验认证缓存，目录已过期，尚未确认实时连接' if book.get('stale') else '已校验所选账号目录；不代表原生发送成功'}],
+                'link':next(x for x in links_view(request)['links'] if x['mode']==route)}}
         a=adapter(b,route);data=a.catalog();book=a.contacts()
         valid=data.get('account_uid')==book.get('account_uid')==b['account_uid']
         return {'ok':True,'data':{'passed':valid,'steps':[{'name':'目录只读检查','ok':valid,'detail':'不代表原生发送成功'}],'link':next(x for x in links_view(request)['links'] if x['mode']==route)}}
-    @r.get('/im/quote')
-    def quote_source():return {'ok':True,'data':{'configured':market.rows_provider is not None,'managed':True,'source':'innodealing' if market.rows_provider else 'not_configured'}}
     @r.get('/bonds')
     def bonds(request:Request,filter:str='',groups:str='',channel:str='best',broker:str='',before:int=0,beforeUni:str='',limit:int=Query(50,ge=1,le=500)):
         spec=parse_filter(filter) if filter else parse_filter({'groups':[x for x in groups.split(',') if x] or ['bond-all'],'channel':channel,'broker':broker})
@@ -348,8 +416,9 @@ def router(service,market,tools,transport):
         lo,hi=stamp(start),stamp(end,True)
         if hi<lo:raise InvalidFact('日期范围错误')
         from ..db import stream_rows
-        query='SELECT m.occurred_at,m.direction,m.text FROM xj2_message m JOIN xj2_thread t ON t.thread_id=m.thread_id WHERE t.owner_id=? AND m.occurred_at>=? AND m.occurred_at<?'
-        params=[owner(request),lo,hi]
+        selected=bound(request)
+        query='SELECT m.occurred_at,m.direction,m.text FROM xj2_message m JOIN xj2_thread t ON t.thread_id=m.thread_id WHERE t.owner_id=? AND t.account_uid=? AND t.workbench_id=? AND m.occurred_at>=? AND m.occurred_at<?'
+        params=[owner(request),selected['account_uid'],selected['workbench_id'],lo,hi]
         if peer:query+=' AND t.peer_uid=?';params.append(peer)
         return spreadsheet(stream_rows(store.db,query+' ORDER BY m.occurred_at,m.message_id LIMIT 100001',tuple(params)),[('occurred_at','时间'),('direction','方向'),('text','原文')])
     return r

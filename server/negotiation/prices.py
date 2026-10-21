@@ -130,16 +130,29 @@ class Price:
 @dataclass(frozen=True)
 class Valuation:
     bond_code: str
-    trading_date: str
+    trading_date: str | None
     yield_pct: str
     snapshot_id: str
     provider: str = "CHINABOND"
+    source: str | None = None
 
     def __post_init__(self):
-        iso_day(self.trading_date)
+        # The source date is advisory; never substitute today's/quote's date.
+        if self.trading_date is not None:
+            try:iso_day(self.trading_date)
+            except InvalidFact:object.__setattr__(self, "trading_date", None)
         number(self.yield_pct, "valuation")
         if self.provider != "CHINABOND" or not self.snapshot_id or not self.bond_code:
             raise InvalidFact("A sourced ChinaBond valuation snapshot is required")
+        if self.source is None:
+            # Existing persisted JSON predates the explicit origin field.
+            object.__setattr__(self, "source", "innodealing" if self.snapshot_id.startswith("innodealing-cnbd:") else "reference")
+        if self.source not in ("innodealing", "reference"):
+            raise InvalidFact("Unknown ChinaBond valuation origin")
+
+    def authorization_key(self):
+        # Date/republication metadata does not change the authorized economics.
+        return self.bond_code, self.provider, self.source, number(self.yield_pct)
 
 
 @dataclass(frozen=True)
@@ -164,10 +177,10 @@ class LimitPolicy:
         if self.mode == "ABSOLUTE":
             # Keep the authorized absolute value unchanged across trading days.
             return {"kind": self.price_kind, "value": self.value}
-        if valuation is None or expected_valuation_date is None:
+        if valuation is None:
             return None
-        if valuation.bond_code != bond_code or valuation.trading_date != iso_day(expected_valuation_date):
-            raise InvalidFact("Valuation does not match the required bond/latest trading date")
+        if valuation.bond_code != bond_code:
+            raise InvalidFact("Valuation does not match the required bond")
         return {"kind": "YIELD", "value": format(valuation_quote(valuation.yield_pct, self.value), ".2f")}
 
 

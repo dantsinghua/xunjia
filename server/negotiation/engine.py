@@ -883,7 +883,11 @@ class Engine:
         if self.client is None:return {'analyzed':0,'decided':0}
         if self.aggregation is None and not force:raise InvalidFact('AGGREGATION_MEASUREMENT_REQUIRED')
         with self.store.db.transaction(write=False) as tx:
-            threads=tx.execute('SELECT thread_id,owner_id FROM xj2_thread WHERE analyzed_revision<ingest_revision ORDER BY pending_since LIMIT 10').fetchall()
+            candidates=tx.execute('SELECT * FROM xj2_thread WHERE analyzed_revision<ingest_revision ORDER BY pending_since').fetchall()
+            threads=[]
+            for candidate in candidates:
+                if self.store._analysis_pending(tx,dict(candidate)):threads.append(candidate)
+                if len(threads)==10:break
         analyzed=0
         for t in threads:
             if self.analyze_thread(t['owner_id'],t['thread_id'],force=force) is not None:analyzed+=1

@@ -18,7 +18,7 @@
 
 门户SSO复用存款项目签名口径；设置`XUNJIA_SSO_SECRET`与独立不少于32字节的`XUNJIA_AUTH_SECRET`。五名交易员分别通过管理CLI绑定本人账号，前端不能更改归属或领取他人账号。反向代理提供HTTPS及同域`/api`、`/ws`，开发代理默认8120；跨域WS仅允许`XUNJIA_ALLOWED_ORIGINS`显式列出的来源。避免记录带SSO签名的入口URL。
 
-`XUNJIA_RUN_BACKGROUND=1`启动入站、分析和对账；`XUNJIA_ENABLE_LIVE_TRANSPORT=1`才允许外发链执行，两者在初始化配置中均为0。仅开启后台而保持live=0可以持续分析。没有配置真实transport或Dify不会补成合成服务，仅启动HTTP不等于完整链路就绪。
+标准部署默认 `XUNJIA_RUN_BACKGROUND=1`，启动入站、分析、派发和对账。确认授权后的指令按用户暂停状态、有效期、水位和去重规则派发，不再另设真实发送开关。需要暂停时使用现有用户／券组／会话暂停功能；没有配置真实transport或Dify不会补成合成服务，仅启动HTTP不等于完整链路就绪。
 
 本次新增MQ认证地址与源码核对详见[STS MQ更新](sts-mq-update.md)。
 

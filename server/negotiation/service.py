@@ -12,6 +12,11 @@ from .commands import Commands
 from .prices import InvalidFact, LimitPolicy, Price, Valuation, iso_day, number
 from .store import encoded, identity, new_id
 def digest(value):return hashlib.sha256(encoded(value).encode()).hexdigest()
+def pricing_preferences(value):
+    # Directory freshness is runtime evidence, not a price authorization input.
+    # Keep every other preference in the fence, including future policy keys.
+    return {key: item for key, item in value.items() if key != 'collector_directory_checks'}
+
 class Inquiry:
     engine='v22'
     def __init__(self,store:ApplicationStore,*,reference_provider=None,calendar=None,valuation_source=None):
@@ -20,44 +25,63 @@ class Inquiry:
         self.commands_core=Commands(store,current_day=self.trade_day)
         self.reference_provider=reference_provider
         self.calendar=calendar
-        self.valuation_source=valuation_source  # Optional verified ChinaBond values carried by Inno rows.
+        self.valuation_source=valuation_source  # Explicitly labelled ChinaBond values carried by Inno rows.
         self.diagnostics=Diagnostics(clock=self.clock)
     def trade_day(self):
         # Counterparty quotes require confirmation on EVERY new local day.
-        # The publication calendar is separate and is used only for valuation.
+        # Valuation publication dates never change this counterparty guard.
         return datetime.fromtimestamp(self.clock(),ZoneInfo('Asia/Shanghai')).date().isoformat()
     def valuation(self,code):
+        return self._resolve_valuation(code,*self._valuation_inputs())
+    def _valuation_inputs(self,*,refresh_reference=False):
+        # No publication-calendar lookup: source dates are display metadata.
+        # Load a formal snapshot at most once, only as a fallback to Innodealing.
         if self.reference_provider is None and self.valuation_source is None:
             raise InvalidFact('CHINABOND_SOURCE_NOT_CONFIGURED')
-        if self.calendar is None or not callable(getattr(self.calendar,'latest_valuation_day',None)):
-            raise InvalidFact('CHINABOND_PUBLICATION_CALENDAR_NOT_CONFIGURED')
-        expected=iso_day(self.calendar.latest_valuation_day(self.clock()))
-        if expected>self.trade_day():raise InvalidFact('ChinaBond calendar is in the future')
-        candidates=[];failures=[]
-        if self.reference_provider is not None:
-            try:
-                snapshot=self.reference_provider.snapshot()
-                rows=[b for b in snapshot.bonds if b.get('code',b.get('bond_id'))==code]
-                if len(rows)!=1:raise InvalidFact('No unique ChinaBond valuation for this bond')
-                row=rows[0];day=iso_day(row.get('valuation_date',snapshot.as_of))
-                candidates.append(Valuation(code,day,str(row.get('valuation_yield_pct',row.get('val_yield',''))),snapshot.snapshot_id))
-            except Exception as exc:failures.append(type(exc).__name__)
+        loaded=False;snapshot=None;failure=None
+        def reference():
+            nonlocal loaded,snapshot,failure
+            if not loaded:
+                loaded=True
+                if self.reference_provider is not None:
+                    if refresh_reference:
+                        invalidate=getattr(self.reference_provider,'invalidate_valuation_cache',None)
+                        if callable(invalidate):
+                            try:invalidate()
+                            except Exception:pass  # Still attempt the existing source read.
+                    try:snapshot=self.reference_provider.snapshot()
+                    except Exception as exc:failure=type(exc).__name__
+            return snapshot,failure
+        return None,reference,[]
+    def _resolve_valuation(self,code,expected,reference,warnings):
+        failures=[]
         if self.valuation_source is not None:
             try:
                 value=self.valuation_source(code)
                 if value is not None:
                     if not isinstance(value,Valuation) or value.bond_code!=code:
                         raise InvalidFact('Inno valuation adapter returned a different bond')
-                    candidates.append(value)
+                    return value,expected
             except Exception as exc:failures.append(type(exc).__name__)
-        valid=[v for v in candidates if v.trading_date==expected]
-        if not valid:
-            raise InvalidFact('CHINABOND_LATEST_VALUATION_UNAVAILABLE:'+expected+':'+','.join(failures))
-        if len({number(v.yield_pct) for v in valid})>1:
-            # No arbitrary precedence when two purported same-day ChinaBond
-            # values disagree. This is a data issue, never a peer quotation.
-            raise InvalidFact('CHINABOND_SOURCES_DISAGREE:'+code+':'+expected)
-        return valid[0],expected
+        snapshot,failure=reference()
+        if failure:failures.append(failure)
+        if snapshot is not None:
+            try:
+                rows=[b for b in snapshot.bonds if b.get('code',b.get('bond_id'))==code]
+                if len(rows)!=1:raise InvalidFact('No unique ChinaBond valuation for this bond')
+                row=rows[0]
+                value=Valuation(code,row.get('valuation_date',snapshot.as_of),
+                    str(row.get('valuation_yield_pct',row.get('val_yield',''))),snapshot.snapshot_id)
+                return value,expected
+            except Exception as exc:failures.append(type(exc).__name__)
+        raise InvalidFact('CHINABOND_VALUATION_UNAVAILABLE:'+code+':'+','.join(failures))
+    def _valuation_details(self,code):
+        inputs=self._valuation_inputs()
+        value,expected=self._resolve_valuation(code,*inputs)
+        warnings=list(inputs[2])
+        if value.trading_date is None:
+            warnings.append('来源未提供有效估值日期；按所示中债估值计算。')
+        return value,expected,warnings
     def refresh_valuations(self,*,refresh_reference=True):
         """Retry recovery even AFTER the group day advanced; no model/native I/O.
         The same entry is called after a successful source polling tick and
@@ -68,13 +92,16 @@ class Inquiry:
         with self.store.db.transaction(write=False) as tx:
             groups=[dict(g) for g in tx.execute('SELECT * FROM xj2_group WHERE archived=0').fetchall()]
         bp_codes={g['bond_code'] for g in groups if json.loads(g['policy_json'])['mode']=='CHINABOND_BP'}
-        if refresh_reference and bp_codes:
-            for provider in {id(p):p for p in (self.reference_provider,self.calendar) if p is not None}.values():
-                invalidate=getattr(provider,'invalidate_valuation_cache',None)
-                if callable(invalidate):invalidate()
-        resolved={};errors={}
+        resolved={};errors={};inputs=None;input_error=None
+        if bp_codes:
+            try:
+                inputs=self._valuation_inputs(refresh_reference=refresh_reference)
+            except Exception as exc:input_error=str(exc)[:300]
         for code in sorted(bp_codes):
-            try:resolved[code]=self.valuation(code)
+            if input_error is not None:
+                errors[code]=input_error
+                continue
+            try:resolved[code]=self._resolve_valuation(code,*inputs)
             except Exception as exc:errors[code]=str(exc)[:300]
         result={'rolled':0,'revalued':0,'pending':[]}
         for g in groups:
@@ -110,14 +137,14 @@ class Inquiry:
         if volume<=0 or step<=0:raise InvalidFact('Target amount and step must be positive')
         opening=Price('YIELD',str(item.get('opening_yield_pct','')))
         policy=LimitPolicy('ABSOLUTE',str(item.get('limit_yield_pct','')))
-        valuation=None;valuation_date=None
+        valuation=None;valuation_date=None;valuation_warnings=[]
         if item.get('pricing_basis','absolute')=='bp':
             prefs=preferences if preferences is not None else self.repo.preferences(owner)
             floor=prefs.get('floors',{}).get(code,{})
             if floor.get('kind')!='bp':raise InvalidFact('BP pricing requires a saved per-bond BP offset')
             offset=number(str(floor['value']))*(1 if side=='BUY' else -1)
             policy=LimitPolicy('CHINABOND_BP',str(offset))
-            valuation,valuation_date=self.valuation(code)
+            valuation,valuation_date,valuation_warnings=self._valuation_details(code)
         elif item.get('pricing_basis','absolute')!='absolute':raise InvalidFact('Unknown limit pricing basis')
         boundary=policy.resolve(bond_code=code,valuation=valuation,expected_valuation_date=valuation_date)
         if boundary is None:raise InvalidFact('Limit valuation is unavailable')
@@ -131,6 +158,11 @@ class Inquiry:
               'volume_wan':str(volume),'opening_yield_pct':opening.value,
               'limit_yield_pct':boundary['value'],'step_bp':str(step),
               'pricing_basis':item.get('pricing_basis','absolute'),'trade_day':day}
+        if valuation is not None:
+            plan['valuation_snapshot']={'snapshot_id':valuation.snapshot_id,
+                'valuation_date':valuation.trading_date,'yield_pct':valuation.yield_pct,
+                'provider':valuation.provider,'source':valuation.source}
+            plan['valuation_warnings']=valuation_warnings
         direction='收' if side=='BUY' else '出'
         plan['text']=f'{name} {code}，{opening.value}%{direction}。请报可做价格和数量。'
         return {'plan':plan,'policy':asdict(policy),'boundary':boundary,
@@ -152,6 +184,7 @@ class Inquiry:
         if any(len(v['text'])>1500 for v in previews):raise InvalidFact('Initial combined message exceeds collector limit; reduce this batch')
         with self.repo.write(owner) as tx:
             binding=self.repo.require_binding(tx,owner)
+            epoch=self.repo.account_epoch(tx,owner,binding['account_uid'])
             old=tx.execute('SELECT * FROM xj2_batch WHERE owner_id=? AND request_id=?',(owner,request_id)).fetchone()
             if old:
                 if old['content_hash']!=content_hash:raise InvalidFact('Preview idempotency key reused with different inputs')
@@ -159,7 +192,7 @@ class Inquiry:
             self.repo._ensure_peer_capacity(tx,owner,binding['account_uid'],per_peer)
             bid=new_id()
             public={'batch_id':bid,'version':1,'status':'preview','engine':'v22','items':lines,'commands_preview':previews}
-            payload={'public':public,'items':normalized,'preferences_hash':digest(prefs)}
+            payload={'public':public,'items':normalized,'preferences_hash':digest(pricing_preferences(prefs)),'preferences_scope':'pricing-v1','account_epoch':epoch}
             tx.execute("INSERT INTO xj2_batch(batch_id,owner_id,request_id,content_hash,version,state,binding_version,preview_json,result_json,created_at) VALUES(?,?,?,?,1,'PREVIEW',?,?,'{}',?)",(bid,owner,request_id,content_hash,binding['version'],encoded(payload),self.clock()))
             self.repo.audit(tx,owner,'rfq_preview',bid,{'bond_count':len(codes),'peers':len(per_peer)})
         return public
@@ -175,10 +208,14 @@ class Inquiry:
             b=self.repo.require_binding(tx,owner)
             row=tx.execute('SELECT * FROM xj2_batch WHERE batch_id=? AND owner_id=?',(batch_id,owner)).fetchone()
             if row['state']=='CONFIRMED':return json.loads(row['result_json'])
+            epoch=self.repo.account_epoch(tx,owner,b['account_uid'],require_complete=True)
+            if preview.get('account_epoch',0)!=epoch:raise InvalidFact('Preview belongs to an earlier account reset; regenerate preview')
             if type(expected_version) is not int or expected_version!=row['version']:raise InvalidFact('Preview version changed')
             if row['binding_version']!=b['version']:raise InvalidFact('Account binding changed since preview')
             if self.clock()-row['created_at']>900:raise InvalidFact('Preview expired; review a fresh preview')
-            if digest(json.loads(b['config_json']))!=preview['preferences_hash']:raise InvalidFact('Saved pricing settings changed; regenerate preview')
+            prefs=json.loads(b['config_json'])
+            checked=pricing_preferences(prefs) if preview.get('preferences_scope')=='pricing-v1' else prefs
+            if digest(checked)!=preview['preferences_hash']:raise InvalidFact('Saved pricing settings changed; regenerate preview')
             control=tx.execute('SELECT send_allowed FROM xj2_owner WHERE owner_id=?',(owner,)).fetchone()
             if not control['send_allowed']:
                 # Confirm authorizes only this batch. Preserve the existing
@@ -195,7 +232,8 @@ class Inquiry:
                 valuation=Valuation(**item['valuation']) if item['valuation'] else None
                 if code in fresh:
                     actual,date=fresh[code]
-                    if asdict(actual)!=item['valuation'] or date!=item['valuation_date']:raise InvalidFact('ChinaBond snapshot changed after preview')
+                    if actual.authorization_key()!=valuation.authorization_key():
+                        raise InvalidFact('ChinaBond valuation changed after preview; regenerate preview')
                 policy=LimitPolicy(**item['policy'])
                 gid=self.repo._create_group(tx,owner,bond_code=code,our_side=plan['our_side'],target_volume=plan['volume_wan'],trade_day=plan['trade_day'],policy=policy,boundary=item['boundary'],valuation=valuation,send_allowed=True,plan=plan)
                 group_ids.append(gid)
@@ -234,7 +272,8 @@ class Inquiry:
         if not isinstance(text,str) or not text.strip() or len(text)>1500:raise InvalidFact('Manual message must have 1..1500 characters')
         with self.repo.write(owner) as tx:
             b=self.repo.require_binding(tx,owner)
-            rows=tx.execute('SELECT p.member_id,p.thread_id FROM xj2_peer p JOIN xj2_thread t ON t.thread_id=p.thread_id WHERE t.owner_id=? AND t.account_uid=? AND t.peer_uid=? ORDER BY p.member_id',(owner,b['account_uid'],peer)).fetchall()
+            self.repo.account_epoch(tx,owner,b['account_uid'],require_complete=True)
+            rows=tx.execute('SELECT p.member_id,p.thread_id FROM xj2_peer p JOIN xj2_thread t ON t.thread_id=p.thread_id JOIN xj2_group g ON g.group_id=p.group_id WHERE t.owner_id=? AND t.workbench_id=? AND t.account_uid=? AND t.peer_uid=? AND g.archived=0 ORDER BY p.member_id',(owner,b['workbench_id'],b['account_uid'],peer)).fetchall()
             if not rows:raise InvalidFact('Select an existing bond/counterparty conversation before human sending')
             old=tx.execute('SELECT * FROM xj2_command WHERE member_id=? AND request_id=?',(rows[0]['member_id'],request_id)).fetchone()
             if old:
@@ -266,6 +305,6 @@ class Inquiry:
         return [{'conversation_id':t['thread_id'],'peer_id':t['peer_uid'],**t} for t in self.repo.snapshot(owner)['threads']]
     def commands(self,owner):
         with self.repo.db.transaction(write=False) as tx:
-            rows=tx.execute('SELECT c.*,t.peer_uid FROM xj2_command c JOIN xj2_thread t ON t.thread_id=c.thread_id WHERE t.owner_id=? ORDER BY c.created_at,c.command_id',(owner,)).fetchall()
+            rows=tx.execute('SELECT c.*,t.peer_uid FROM xj2_command c JOIN xj2_thread t ON t.thread_id=c.thread_id WHERE t.owner_id=? AND (NOT EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=t.owner_id) OR EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=t.owner_id AND b.account_uid=t.account_uid AND b.workbench_id=t.workbench_id)) ORDER BY c.created_at,c.command_id',(owner,)).fetchall()
         return [{**dict(r),'status':r['state'].lower(),'peer_id':r['peer_uid'],'text':json.loads(r['body_json'])['text']} for r in rows]
     status_commands=commands

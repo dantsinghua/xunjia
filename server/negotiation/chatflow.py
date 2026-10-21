@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
+import ssl
 import time
 from urllib.parse import urlsplit
 import urllib.error
@@ -16,6 +18,29 @@ class FlowUnavailable(RuntimeError):
     def __init__(self,code,status=None):
         self.code,self.status=code,status
         super().__init__(code+(f' HTTP {status}' if status else ''))
+def _http_error_code(status,raw):
+    # Return safe codes only. Dify may wrap a provider TLS failure in HTTP 400.
+    # Do not expose arbitrary upstream text, URLs, prompts or credentials.
+    if status==401:return "DIFY_AUTH_FAILED"
+    if status==403:return "DIFY_ACCESS_DENIED"
+    if status==429:return "DIFY_RATE_LIMITED"
+    if not isinstance(raw,bytes) or len(raw)>16384:return "DIFY_HTTP_ERROR"
+    try:
+        value=json.loads(raw)
+        message=value.get("message","") if isinstance(value,dict) else ""
+        if not isinstance(message,str):return "DIFY_HTTP_ERROR"
+        upstream=re.match(r"^(?:Run failed:\s*)?\[[a-zA-Z0-9_.-]+\] Error: API request failed with status code (\d{3}):",message)
+        if upstream:
+            body=message[upstream.end():].lower()
+            if any(marker in body for marker in ("[ssl:","certificate_verify_failed","tls handshake")):
+                return "DIFY_UPSTREAM_TLS_ERROR"
+            code=int(upstream[1])
+            if code in (401,403):return "DIFY_UPSTREAM_AUTH_FAILED"
+            if code==429:return "DIFY_UPSTREAM_RATE_LIMITED"
+            if code>=500:return "DIFY_UPSTREAM_UNAVAILABLE"
+    except (ValueError,TypeError,UnicodeError):pass
+    return "DIFY_HTTP_ERROR"
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,request,fp,code,message,headers,newurl):
         # An App API key is scoped to the exact configured origin. Require the
@@ -68,9 +93,16 @@ class ChatflowClient:
                     raw=response.read(2*1024*1024+1)
                     if len(raw)>2*1024*1024:raise FlowUnavailable('DIFY_RESPONSE_TOO_LARGE')
                     if response.status!=200:raise FlowUnavailable('DIFY_HTTP_ERROR',response.status)
-            except urllib.error.HTTPError as exc:raise FlowUnavailable('DIFY_HTTP_ERROR',exc.code) from None
+            except urllib.error.HTTPError as exc:
+                status=exc.code
+                try:body=exc.read(16385)
+                except (OSError,ValueError):body=b""
+                finally:exc.close()
+                raise FlowUnavailable(_http_error_code(status,body),status) from None
             except TimeoutError:raise FlowUnavailable('DIFY_TIMEOUT') from None
+            except ssl.SSLError:raise FlowUnavailable("DIFY_TLS_ERROR") from None
             except urllib.error.URLError as exc:
+                if isinstance(exc.reason,ssl.SSLError):raise FlowUnavailable("DIFY_TLS_ERROR") from None
                 raise FlowUnavailable('DIFY_TIMEOUT' if isinstance(exc.reason,TimeoutError) else 'DIFY_NETWORK_ERROR') from None
             try:
                 wrapper=json_object(raw.decode('utf8'))

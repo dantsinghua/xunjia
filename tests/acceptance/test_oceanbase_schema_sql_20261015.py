@@ -12,12 +12,12 @@ def test_readable_sql_is_generated_from_current_authoritative_schema():
     assert SQL_FILE.read_text(encoding="utf-8") == render()
 
 
-def test_sql_has_fifteen_v22_tables_and_thirteen_secondary_indexes():
+def test_sql_has_sixteen_v22_tables_and_fourteen_secondary_indexes():
     content = SQL_FILE.read_text(encoding="utf-8")
     executable = "\n".join(line for line in content.splitlines()
                            if line.strip() and not line.lstrip().startswith("--"))
     entries = [statement.strip() for statement in executable.split(";") if statement.strip()]
-    assert len(entries) == len(TABLES) == 15
+    assert len(entries) == len(TABLES) == 16
     tables = [re.search(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\(", entry).group(1)
               for entry in entries]
     assert tuple(tables) == TABLES
@@ -25,7 +25,7 @@ def test_sql_has_fifteen_v22_tables_and_thirteen_secondary_indexes():
                "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin" in entry
                for entry in entries)
     secondary = re.findall(r"\bKEY (idx_\w+)\s*\(", executable)
-    assert len(secondary) == len(set(secondary)) == 13
+    assert len(secondary) == len(set(secondary)) == 14
 
 
 def test_sql_is_not_privileged_and_contains_no_password_or_customer_data():

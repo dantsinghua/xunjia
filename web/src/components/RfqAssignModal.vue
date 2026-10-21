@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /** 开始询价：左侧填每只债，右侧勾当前号的好友和组织架构。确认后才发。 */
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { App } from 'ant-design-vue'
 import { api, type RfqPolicy, type RfqPreview, type RfqSubmission, type CounterpartyCapacity } from '../api'
 import type { BondRow, Strategy } from '../lib/types'
 import { useBodyScrollLock } from '../lib/useModal'
 import {
-  imContacts, imCurrent, imBoundAccount, imIdentityText, imOrg, orgTree, refreshImContacts, visibleOrgBranch,
+  imContacts, imCurrent, imBoundAccount, imIdentityText, imOrg, imOrgStatus, orgEmptyLabel, orgReadNotice, orgTree, refreshImContacts, visibleOrgBranch,
   type VisibleOrgNode,
 } from '../lib/imLink'
 import { renderQuote, yieldAfterBp, type RfqFields } from '../lib/rfqAssign'
@@ -27,6 +27,7 @@ interface Draft {
   limit_yield_pct: string
   step_bp: string
   pricing_basis: 'absolute' | 'bp'
+  valuation_date: string
 }
 
 const drafts = ref<Draft[]>([])
@@ -53,13 +54,13 @@ const previewNotice = ref('')
 let generation = 0
 let previewAttempt: { fingerprint: string; id: string } | null = null
 let confirmRequestId = ''
-function accountKey() { const b = imBoundAccount.value; return `${b?.id || ''}:${b?.workbench_id || ''}:${b?.account_uid || ''}:${b?.version || ''}` }
+function accountKey() { const b = imBoundAccount.value; return JSON.stringify([b?.workbench_id || '', b?.account_uid || '', b?.version ?? 0]) }
 function invalidatePreview() {
   generation++
   if (preview.value) previewNotice.value = '参数、收件人或账号已变化，请重新生成预览并核对。'
   preview.value = null; submission.value = null; confirmationStarted.value = false; confirmRequestId = ''; previewAttempt = null
 }
-watch(drafts, invalidatePreview, {deep:true,flush:'sync'})
+watch(drafts, () => { invalidatePreview(); formError.value = '' }, {deep:true,flush:'sync'})
 watch(()=>props.strategy?.strict,invalidatePreview,{flush:'sync'})
 watch(accountKey, () => {
   invalidatePreview()
@@ -107,7 +108,8 @@ function seed(bond: BondRow): Draft {
   const floor = props.savedFloors?.[code]
   return { code, uins: [], fields, text: renderQuote(code, fields), our_side:'', volume_wan:'', opening_yield_pct:'',
     limit_yield_pct: floor?.kind === 'yield' && Number.isFinite(floor.value) ? String(floor.value) : '',
-    step_bp: props.strategy && Number.isFinite(props.strategy.step) ? String(props.strategy.step) : '', pricing_basis:'absolute' }
+    step_bp: props.strategy?.configured && Number.isFinite(props.strategy.step) ? String(props.strategy.step) : '',
+    pricing_basis:floor?.kind === 'bp' ? 'bp' : 'absolute', valuation_date:clean(bond.valDate) }
 }
 
 watch(() => props.open, (on) => {
@@ -140,23 +142,80 @@ watch(() => [props.open, accountKey()], async () => {
   } catch { /* A missing advisory never bypasses the server's atomic admission. */ }
 }, { immediate: true })
 onScopeDispose(() => { capacityRequest++ })
+type DraftField = 'our_side' | 'uins' | 'volume_wan' | 'opening_yield_pct' | 'limit_yield_pct' | 'step_bp' | 'pricing_basis' | 'valuation'
+interface DraftIssue { field: DraftField; reason: string }
+function numeric(value: unknown): boolean {
+  const text = String(value ?? '').trim()
+  return /^-?\d{1,8}(?:\.\d{1,8})?$/.test(text) && Number.isFinite(Number(text))
+}
+function valuationReady(d: Draft): boolean {
+  // Public display values are arithmetic references, never trusted authorization evidence.
+  return numeric(d.fields.cnbd)
+}
+function fillSavedBpBoundary(d: Draft) {
+  if (editingLocked.value || !d.our_side || d.pricing_basis !== 'bp') return
+  const floor = props.savedFloors?.[d.code]
+  if (floor?.kind !== 'bp' || !Number.isFinite(floor.value)) return
+  if (d.limit_yield_pct.trim()) {
+    previewNotice.value = '方向已变化，已填边界保持原值，请核对；BP口径仍由服务端按当前中债估值重算。'
+    return
+  }
+  if (!valuationReady(d)) return
+  try {
+    d.limit_yield_pct = yieldAfterBp(d.fields.cnbd.trim(), String((d.our_side === 'BUY' ? 1 : -1) * floor.value))
+    previewNotice.value = '已按明确方向返显保存BP的边界参考；未改变授权口径，服务端将按当前中债估值重算。'
+  } catch { previewNotice.value = '保存BP无法按页面参考估值换算，请填写本批边界并交由服务端按当前中债估值重算。' }
+}
+function draftIssues(d: Draft): DraftIssue[] {
+  const issues: DraftIssue[] = []
+  if (d.our_side !== 'BUY' && d.our_side !== 'SELL') issues.push({field:'our_side',reason:'请选择本方买入或卖出'})
+  if (!d.uins.length) issues.push({field:'uins',reason:'请选择收件人'})
+  for (const [field, name] of [['volume_wan','询价量'],['opening_yield_pct','起始收益率'],['limit_yield_pct','收益率边界'],['step_bp','步幅']] as const) {
+    if (!numeric(d[field])) issues.push({field,reason:`${name}须填写有限数字`})
+    else if ((field === 'volume_wan' || field === 'step_bp') && Number(d[field]) <= 0) issues.push({field,reason:`${name}必须大于0`})
+  }
+  if (numeric(d.opening_yield_pct) && numeric(d.limit_yield_pct) && d.our_side
+      && (d.our_side === 'BUY' ? Number(d.opening_yield_pct) < Number(d.limit_yield_pct) : Number(d.opening_yield_pct) > Number(d.limit_yield_pct))) {
+    issues.push({field:'opening_yield_pct',reason:'起始收益率不能越过授权边界'})
+  }
+  if (d.pricing_basis === 'bp') {
+    const floor = props.savedFloors?.[d.code]
+    if (floor?.kind !== 'bp' || !Number.isFinite(floor.value)) issues.push({field:'pricing_basis',reason:'BP口径需要该券已保存的有效BP参考；也可明确选择绝对收益率填写本批边界'})
+    if (!valuationReady(d) && !d.limit_yield_pct.trim()) issues.push({field:'valuation',reason:'页面无可用估值，未能按BP返显；可填写本批边界，服务端将读取中债估值；日期缺失不影响估算'})
+  }
+  return issues
+}
+const blockedDrafts = computed(() => drafts.value.map((draft,index) => ({index,code:draft.code,label:draft.fields.name || draft.code,issues:draftIssues(draft)})).filter(row => row.issues.length))
+const globalReasons = computed(() => {
+  const reasons: string[] = []
+  if (!imBoundAccount.value?.account_uid) reasons.push('本人尚未绑定企点账号，不能预览授权')
+  if (!drafts.value.length) reasons.push('没有可询价的债券')
+  if (outgoingCount.value > 50) reasons.push('同一企点账号最多同时与50个不同对手询价，请减少收件人；同一对手多券只计一人。')
+  return reasons
+})
 function validationError(): string {
   if (outgoingCount.value > 50) return '同一企点账号最多同时与50个不同对手询价，请减少收件人；同一对手多券只计一人。'
   if (!drafts.value.length) return '没有可询价的债券'
-  for (const d of drafts.value) {
-    const label = d.fields.name || d.code
-    if (d.our_side !== 'BUY' && d.our_side !== 'SELL') return `${label}：请选择本方买入或卖出`
-    if (!d.uins.length) return `${label}：请选择收件人`
-    for (const [key, name] of [['volume_wan','询价量'],['opening_yield_pct','起始收益率'],['limit_yield_pct','收益率边界'],['step_bp','步幅']] as const) {
-      const value = String(d[key] ?? '').trim()
-      if (!/^-?\d{1,8}(?:\.\d{1,8})?$/.test(value) || !Number.isFinite(Number(value))) return `${label}：${name}须填写有限数字`
-    }
-    if (Number(d.volume_wan) <= 0 || Number(d.step_bp) <= 0) return `${label}：询价量和步幅必须大于0`
-    if (d.our_side === 'BUY' ? Number(d.opening_yield_pct) < Number(d.limit_yield_pct) : Number(d.opening_yield_pct) > Number(d.limit_yield_pct)) return `${label}：起始收益率不能越过授权边界`
-  }
-  return ''
+  const first = blockedDrafts.value[0]
+  return first ? `${first.label}：${first.issues[0]!.reason}` : ''
 }
 const canPreview = computed(() => !validationError() && !!imBoundAccount.value?.account_uid)
+async function locateIssue(index: number, field: DraftField) {
+  active.value = index
+  await nextTick()
+  const bond = document.querySelector<HTMLElement>(`[data-testid="rfq-modal"] .bond[data-index="${index}"]`)
+  bond?.scrollIntoView({block:'nearest'})
+  const names: Partial<Record<DraftField,string>> = {our_side:'rfq-side',volume_wan:'rfq-volume',opening_yield_pct:'rfq-opening',limit_yield_pct:'rfq-limit',step_bp:'rfq-step',pricing_basis:'rfq-pricing-basis',valuation:'rfq-limit'}
+  const target = field === 'uins' ? document.querySelector<HTMLElement>('[data-testid="rfq-book"] input') : bond?.querySelector<HTMLElement>(`[data-testid="${names[field]}"]`)
+  target?.focus()
+}
+watch(() => props.savedFloors, () => {
+  if (!props.open || editingLocked.value) return
+  for (const d of drafts.value) {
+    const floor = props.savedFloors?.[d.code]
+    if (!d.limit_yield_pct.trim() && d.pricing_basis === 'absolute' && floor?.kind === 'yield' && Number.isFinite(floor.value)) d.limit_yield_pct = String(floor.value)
+  }
+}, {deep:true})
 function policyItems(): (RfqPolicy & {peer_ids:string[]})[] {
   return drafts.value.map(d => ({code:d.code.trim(),name:d.fields.name.trim(),peer_ids:[...d.uins],our_side:d.our_side as 'BUY'|'SELL',
     volume_wan:d.volume_wan.trim(),opening_yield_pct:d.opening_yield_pct.trim(),limit_yield_pct:d.limit_yield_pct.trim(),step_bp:d.step_bp.trim(),pricing_basis:d.pricing_basis,...(props.strategy?.configured ? {strict_match:props.strategy.strict} : {})}))
@@ -165,23 +224,25 @@ function prefillFromSaved(d: Draft) {
   if (editingLocked.value) return
   if (!d.our_side) { formError.value = '请先明确本方方向'; return }
   const floor = props.savedFloors?.[d.code]
-  const valuation = Number(d.fields.cnbd.trim())
-  const hasValuation = !!d.fields.cnbd.trim() && Number.isFinite(valuation)
+  const hasValuation = valuationReady(d)
+  const strategy = props.strategy?.configured ? props.strategy : null
   const sign = d.our_side === 'BUY' ? 1 : -1
-  const bpPrefill = !d.limit_yield_pct.trim() && !d.opening_yield_pct.trim()
-    && floor?.kind === 'bp' && hasValuation && !!props.strategy?.configured
-  // Only fill empty drafts after an explicit click; user edits are never overwritten.
-  if (!d.limit_yield_pct.trim() && floor && Number.isFinite(floor.value)) {
-    if (floor.kind === 'yield') d.limit_yield_pct = String(floor.value)
-    else if (hasValuation) d.limit_yield_pct = yieldAfterBp(d.fields.cnbd.trim(),String(sign*floor.value))
-  }
-  if (!d.opening_yield_pct.trim() && props.strategy && hasValuation && Number.isFinite(props.strategy.startDev)) {
-    d.opening_yield_pct = yieldAfterBp(d.fields.cnbd.trim(),String(sign*props.strategy.startDev))
-  }
-  if (!d.step_bp.trim() && props.strategy && Number.isFinite(props.strategy.step)) d.step_bp = String(props.strategy.step)
-  d.pricing_basis = bpPrefill ? 'bp' : 'absolute'
-  previewNotice.value = bpPrefill ? 'BP 换算仅供预填，服务端会按可信估值日重新计算并核验。'
-    : '绝对收益率由交易员明确确认，页面估值不构成服务端估值依据。'
+  try {
+    // The explicit click fills blanks only, and never changes the chosen pricing basis.
+    if (!d.limit_yield_pct.trim() && floor && Number.isFinite(floor.value)) {
+      if (floor.kind === 'yield') d.limit_yield_pct = String(floor.value)
+      else if (hasValuation) d.limit_yield_pct = yieldAfterBp(d.fields.cnbd.trim(),String(sign*floor.value))
+    }
+    if (!d.opening_yield_pct.trim() && strategy && hasValuation && Number.isFinite(strategy.startDev)) {
+      d.opening_yield_pct = yieldAfterBp(d.fields.cnbd.trim(),String(sign*strategy.startDev))
+    }
+    if (!d.step_bp.trim() && strategy && Number.isFinite(strategy.step)) d.step_bp = String(strategy.step)
+    previewNotice.value = d.pricing_basis === 'bp'
+      ? 'BP口径保持不变；仅补空值，参考估值与估值日须由服务端按可信数据重新核验。'
+      : '绝对收益率口径保持不变；仅补空值，已编辑价格不覆盖，本批仍须本人核对确认。'
+    if (!hasValuation && (floor?.kind === 'bp' || strategy)) previewNotice.value += ' 页面参考估值缺失，相关价格未预填；可填写本批边界交由服务端核验。'
+    if (!strategy) previewNotice.value += ' 尚无已保存策略，起始收益率和步幅请本批明确填写。'
+  } catch { formError.value = '参考估值或BP无法换算，未改变授权口径，请核对数据后填写本批价格' }
 }
 async function copySource(d: Draft) {
   try { await navigator.clipboard.writeText(d.text); message.success('行情原文已复制，请在人工发送前核对') }
@@ -265,8 +326,9 @@ async function readBook() {
   reading.value = true
   try {
     const got = await refreshImContacts()
-    if (!got.org.departments.length && !got.org.members.length && !got.contacts.length) {
-      message.warning('这个号还没有通讯录')
+    if (got.org_state === 'error') message.warning(orgReadNotice(imOrg.value, got))
+    else if (!got.org.departments.length && !got.org.members.length && !got.contacts.length) {
+      message.warning(orgEmptyLabel(got.org, got) || '当前账号暂无可读联系人')
     }
   } catch (err) {
     message.error(err instanceof Error ? err.message : '读通讯录失败')
@@ -402,6 +464,15 @@ function commandStatus(status: string): string {
           <p v-if="(pickedCount || 0) > bonds.length" class="warn">已选数量与服务端解析结果不一致，请关闭弹窗并重新核对选择。</p>
         </div>
 
+        <section v-if="!preview && !confirmationStarted && (globalReasons.length || blockedDrafts.length)" class="validation-summary" data-testid="rfq-validation-summary" role="status" aria-live="polite">
+          <b>预览前待完善：{{ blockedDrafts.length }} 只券；每券收件人数在券卡中单独显示。</b>
+          <p v-for="reason in globalReasons" :key="reason" class="warn">{{ reason }}</p>
+          <div v-for="row in blockedDrafts" :key="row.code + ':' + row.index" data-testid="rfq-bond-validation" :data-code="row.code" :data-index="row.index" class="validation-row">
+            <strong>{{ row.label }} · {{ row.code }}</strong>
+            <button v-for="(issue,index) in row.issues" :key="issue.field + ':' + index" class="validation-issue" type="button" data-testid="rfq-validation-issue" :data-field="issue.field" @click="locateIssue(row.index,issue.field)">{{ issue.reason }}</button>
+          </div>
+        </section>
+
         <div class="mdl-bd rfq-bd">
           <div v-if="!drafts.length" class="empty">服务端解析的选择里没有可询价的债券。</div>
           <div v-else class="rfq-grid">
@@ -411,6 +482,8 @@ function commandStatus(status: string): string {
                 v-for="(draft, index) in drafts"
                 :key="draft.code + ':' + index"
                 class="bond"
+                :data-index="index"
+                :data-code="draft.code"
                 :class="{ on: index === active }"
                 @click="active = index"
               >
@@ -418,23 +491,25 @@ function commandStatus(status: string): string {
                   <b>{{ draft.fields.name || '未填简称' }}</b>
                   <em :class="{ missing: !(floors || {})[draft.code] }">{{ (floors || {})[draft.code] ? '已保存参考：' + (floors || {})[draft.code] : '未保存底价参考，可填写本批边界' }}</em>
                   <em>{{ draft.uins.length }} 人</em>
+                  <span v-if="draftIssues(draft).length" class="bond-issue-count">待补 {{ draftIssues(draft).length }} 项</span>
                 </div>
                 <div v-if="index === active" class="bond-bd" @click.stop>
                   <label class="fld">本方方向（必选）
-                    <select v-model="draft.our_side" class="ny-input" data-testid="rfq-side" :disabled="editingLocked"><option value="">请选择本方方向</option><option value="BUY">买入 BUY</option><option value="SELL">卖出 SELL</option></select>
+                    <select v-model="draft.our_side" class="ny-input" data-testid="rfq-side" :disabled="editingLocked" @change="fillSavedBpBoundary(draft)"><option value="">请选择本方方向</option><option value="BUY">买入 BUY</option><option value="SELL">卖出 SELL</option></select>
                   </label>
                   <label class="fld">券组目标总量（万，必填）<input v-model="draft.volume_wan" class="ny-input" inputmode="decimal" data-testid="rfq-volume" :disabled="editingLocked" /></label>
                   <label class="fld">授权价格口径
                     <select v-model="draft.pricing_basis" class="ny-input" data-testid="rfq-pricing-basis" :disabled="editingLocked">
                       <option value="absolute">绝对收益率（本人确认）</option>
-                      <option value="bp">保存 BP（服务端按可信估值重算）</option>
+                      <option value="bp">保存 BP（按中债估值估算）</option>
                     </select>
                   </label>
                   <label class="fld">起始收益率（%）<input v-model="draft.opening_yield_pct" class="ny-input" inputmode="decimal" data-testid="rfq-opening" :disabled="editingLocked" /></label>
                   <label class="fld">收益率边界（%）<input v-model="draft.limit_yield_pct" class="ny-input" inputmode="decimal" data-testid="rfq-limit" :disabled="editingLocked" /></label>
                   <label class="fld">每轮步幅（BP）<input v-model="draft.step_bp" class="ny-input" inputmode="decimal" data-testid="rfq-step" :disabled="editingLocked" /></label>
-                  <button class="btn-ghost" type="button" :disabled="editingLocked || !draft.our_side" @click="prefillFromSaved(draft)">用已保存底价/策略补充空值</button>
-                  <p class="source-note">买入：起始收益率 ≥ 边界；卖出：起始收益率 ≤ 边界。BP 模式必须有服务端可信估值，缺失则拒绝预览。</p>
+                  <button class="btn-ghost" type="button" data-testid="rfq-prefill" :disabled="editingLocked || !draft.our_side" @click="prefillFromSaved(draft)">用已保存底价/策略补充空值</button>
+                  <p v-if="draft.pricing_basis === 'bp'" class="source-note" data-testid="rfq-valuation">预填参考估值：{{ draft.fields.cnbd || '未提供' }}% · 估值日：{{ draft.valuation_date || '未提供' }}；日期仅作提示，未提供也可按中债估值估算。</p>
+                  <p class="source-note">买入：起始收益率 ≥ 边界；卖出：起始收益率 ≤ 边界。BP 模式使用服务端中债估值估算；没有估值数值时会说明原因，估值日期不作为前置条件。</p>
                   <label class="fld source-note">行情原文（仅复制或人工发送，不进入自动首句）
                     <textarea v-model="draft.text" class="ny-input msg" rows="4" data-testid="rfq-text" :disabled="editingLocked" />
                   </label>
@@ -465,6 +540,7 @@ function commandStatus(status: string): string {
                   @click="togglePerson(person.uin)"
                 >{{ person.name || person.uin }} · <em class="mono">{{ person.uin }}</em></button>
                 <div class="book-k">组织架构</div>
+                <p v-if="imOrgStatus.org_state === 'error' && orgRows.length" class="warn">{{ orgReadNotice(imOrg, imOrgStatus) }}</p>
                 <template v-if="needle">
                   <p v-if="!orgHits.length" class="muted">没有匹配的人</p>
                   <button
@@ -479,7 +555,7 @@ function commandStatus(status: string): string {
                   >{{ member.name }} · <em class="mono">{{ member.uin }}</em><span v-if="member.dept" class="dept">{{ member.dept }}</span></button>
                 </template>
                 <template v-else>
-                  <p v-if="!orgRows.length" class="muted">这个账号还没有组织架构</p>
+                  <p v-if="!orgRows.length" class="muted">{{ orgEmptyLabel(imOrg, imOrgStatus) }}</p>
                   <template v-for="row in orgRows" :key="row.kind + ':' + row.id">
                     <button
                       v-if="row.kind === 'dept'"
@@ -518,8 +594,9 @@ function commandStatus(status: string): string {
           <p>以下正文按本方授权生成，未使用上方行情原文。确认将授权机器人按当前边界询价，不能成交。</p>
           <div v-for="item in preview.items" :key="item.peer_id + ':' + item.code" class="policy-summary">
             {{ item.name }} {{ item.code }} · {{ item.our_side === 'BUY' ? '本方买入' : '本方卖出' }} {{ item.volume_wan }} 万 · 起始 {{ item.opening_yield_pct }}% · 边界 {{ item.limit_yield_pct }}% · 步幅 {{ item.step_bp }} BP
-            <span v-if="item.pricing_basis === 'bp' && item.valuation_snapshot"> · 中债估值 {{ item.valuation_snapshot.yield_pct }}%（{{ item.valuation_snapshot.valuation_date }}，快照 {{ item.valuation_snapshot.snapshot_id }}）</span>
+            <span v-if="item.pricing_basis === 'bp' && item.valuation_snapshot" data-testid="rfq-valuation-snapshot"> · {{ item.valuation_snapshot.source === 'innodealing' ? 'Innodealing 中债估值' : '中债资料源估值' }} {{ item.valuation_snapshot.yield_pct }}%（估算参考；估值日：{{ item.valuation_snapshot.valuation_date || '未提供' }}）</span>
             <span v-else> · 绝对收益率由本人确认</span>
+            <span v-for="warning in item.valuation_warnings || []" :key="warning" class="valuation-advisory" data-testid="rfq-valuation-advisory">提示：{{ warning }}</span>
           </div>
           <div v-for="command in preview.commands_preview" :key="command.peer_id" class="final-command">
             <b>收件人：{{ personName(command.peer_id) }} · {{ command.peer_id }}</b><pre>{{ command.text }}</pre>
@@ -552,11 +629,14 @@ function commandStatus(status: string): string {
 .sub, .warn { margin: 8px 0 0; font-size: 12.5px; line-height: 1.55; color: #6E6258; }
 .warn { color: #8E1620; }
 .rfq-bd { overflow: auto; }
+.validation-summary { flex:none;max-height:18vh;overflow:auto;padding:10px 24px;border-top:1px solid #ead9d3;border-bottom:1px solid #ead9d3;background:#fff8f2;font-size:12px;line-height:1.6; }
+.validation-row { display:flex;flex-wrap:wrap;align-items:center;gap:5px 8px;margin-top:6px; }.validation-row strong { width:100%;overflow-wrap:anywhere; }.validation-issue { border:1px solid #e0c5bc;border-radius:6px;padding:2px 7px;background:#fff;color:#8e1620;font:inherit;text-align:left;cursor:pointer; }.validation-issue:focus { outline:2px solid #b01c24;outline-offset:1px; }.bond-issue-count { color:#8e1620;font-size:11px;white-space:nowrap; }
 .review-note, .server-preview { padding: 12px 24px; font-size: 12px; }
 .server-preview { max-height: 30vh; overflow: auto; border-top: 1px solid rgba(176,28,36,.16); }
 .server-preview h3 { margin: 0 0 6px; }
 .final-command pre { white-space: pre-wrap; overflow-wrap: anywhere; background: rgba(255,255,255,.8); padding: 10px; border-radius: 8px; }
 .policy-summary { margin: 6px 0; }
+.valuation-advisory { display:block;color:#7c654a;line-height:1.6; }
 .source-note { grid-column: 1 / -1; font-size: 12px; color: #6E6258; margin: 2px 0; }
 .msg { width: 100%; box-sizing: border-box; }
 .rfq-bd::after { display: none; }

@@ -3,31 +3,26 @@ from server.business import InquiryService
 from server.repository import Repository
 from server.runtime import Dispatcher
 from server.receiver_ledger import ReceiverLedger
-from server.transports import OSSTransport, MailTransport, MailConfig, TransportRouter
+from server.transports import MailTransport, MailConfig, TransportRouter
+from server.file_gateway_transport import FileGatewayTransport
+from tests.cutover.file_gateway_fakes import Gateway
 from relay.protocol import Binding
 from relay.collector_bridge import CollectorBridge
 from tests.developer.test_transports_io import Mailboxes, mailcfg
 
 NOW=1800000000
 B=Binding('owner-a','account-a','wb-a',b's'*32,b'h'*32)
-class Objects:
-    def __init__(self):self.objects={}
-    def request(self,method,name,body=None,timeout=20):
-        if method=='PUT':self.objects[name]=body;return 200,b''
-        return (200,self.objects[name]) if name in self.objects else (404,b'')
-    def list(self,prefix):return [name for name in self.objects if name.startswith(prefix)]
-    def get(self,name):return self.objects.get(name)
 
 def setup(tmp_path,route):
-    objects=Objects();boxes=Mailboxes()
+    objects=Gateway();boxes=Mailboxes()
     repo=Repository('sqlite:///'+str(tmp_path/'business.db'));repo.bind_account(B.owner_user_id,B.account_uid,B.workbench_id,transport=route)
     service=InquiryService(repo,clock=lambda:NOW)
     preview=service.preview(B.owner_user_id,'preview',[{'code':'000100.IB','name':'合成券','peer_ids':['peer-a'],'our_side':'BUY','volume_wan':'1000','opening_yield_pct':'2.5','limit_yield_pct':'2.4','step_bp':'2'}])
     service.confirm(B.owner_user_id,preview['batch_id'],preview['version'],'confirm')
-    inner={'oss':OSSTransport(B,objects,tmp_path/'inner.db',clock=lambda:NOW),'mail':MailTransport(B,mailcfg(),tmp_path/'inner.db',smtp_factory=boxes.smtp,imap_factory=boxes.imap,clock=lambda:NOW)}
-    outer={'oss':OSSTransport(B,objects,tmp_path/'outer.db',clock=lambda:NOW),'mail':MailTransport(B,mailcfg(True),tmp_path/'outer.db',smtp_factory=boxes.smtp,imap_factory=boxes.imap,clock=lambda:NOW)}
+    inner={'oss':FileGatewayTransport(B,objects.client('up'),objects.client('down'),tmp_path/'inner.db',role='service',clock=lambda:NOW),'mail':MailTransport(B,mailcfg(),tmp_path/'inner.db',smtp_factory=boxes.smtp,imap_factory=boxes.imap,clock=lambda:NOW)}
+    outer={'oss':FileGatewayTransport(B,objects.client('down'),objects.client('up'),tmp_path/'outer.db',role='collector',clock=lambda:NOW),'mail':MailTransport(B,mailcfg(True),tmp_path/'outer.db',smtp_factory=boxes.smtp,imap_factory=boxes.imap,clock=lambda:NOW)}
     ledger=ReceiverLedger(tmp_path/'receiver.db',B,clock=lambda:NOW);calls=[]
-    bridge=CollectorBridge(ledger=ledger,adapters=outer,object_store=objects,native_send=lambda command:(calls.append(command) or {'status':'sent','evidence':'verified-native','native_id':'native-out-1'}),native_reconcile=lambda command:None,primary_transport=route)
+    bridge=CollectorBridge(ledger=ledger,adapters=outer,object_store=None,native_send=lambda command:(calls.append(command) or {'status':'sent','evidence':'verified-native','native_id':'native-out-1'}),native_reconcile=lambda command:None,primary_transport=route)
     return service,Dispatcher(service,TransportRouter(inner),clock=lambda:NOW),bridge,inner,outer,calls,objects
 
 def test_oss_backend_to_bridge_to_native_to_backend_sent(tmp_path):
@@ -36,9 +31,14 @@ def test_oss_backend_to_bridge_to_native_to_backend_sent(tmp_path):
     bridge.run_once();dispatcher.run_once()
     assert service.commands(B.owner_user_id)[0]['status']=='sent' and len(calls)==1
     bridge.run_once();assert len(calls)==1
+    # Dispatcher already persisted the native receipt; ACK that real MQ input
+    # before sampling a later event on this destructive FIFO subscription.
+    for receipt in inner['oss'].poll():
+        assert receipt['kind']=='receipt'
+        inner['oss'].ack(receipt['source_token'])
     event={'ext_msg_id':'native-out-1','peer_id':'peer-a','direction':'out','text':calls[0]['text'],'occurred_at':NOW}
     bridge.publish_native(event)
-    payload=inner['oss'].poll()[0]['envelope']['payload']
+    payload=next(row for row in inner['oss'].poll() if row['kind']=='event')['envelope']['payload']
     assert payload['source_command_id']==calls[0]['command_id']
     assert payload['historical'] is False
 
@@ -62,15 +62,13 @@ def test_cancel_objects_have_priority_over_earlier_send_objects(tmp_path):
 
 def test_native_uplink_both_routes_same_sequence_one_failure_does_not_block_other(tmp_path):
     service,dispatcher,bridge,inner,outer,calls,objects=setup(tmp_path,'mail')
-    original=objects.request
-    def fail_put(method,name,body=None,timeout=20):
-        if method=='PUT':raise TimeoutError('OSS unavailable')
-        return original(method,name,body,timeout)
-    objects.request=fail_put
+    # An explicit auth rejection is safely retryable; an ambiguous FIFO upload
+    # must remain UNKNOWN rather than inheriting old object-overwrite retries.
+    objects.forced_status=401
     seq=bridge.publish_native({'ext_msg_id':'native-in-1','peer_id':'peer-a','direction':'in','text':'对方报价','occurred_at':NOW})
     mail_rows=inner['mail'].poll()
     assert len(mail_rows)==1 and mail_rows[0]['envelope']['payload']['source_seq']==seq==1
-    objects.request=original
+    objects.forced_status=None
     bridge.run_once()
     oss_rows=inner['oss'].poll()
     assert len(oss_rows)==1
@@ -80,8 +78,8 @@ def test_native_uplink_both_routes_same_sequence_one_failure_does_not_block_othe
 def test_duplicate_wire_on_both_inputs_executes_native_once(tmp_path):
     service,dispatcher,bridge,inner,outer,calls,objects=setup(tmp_path,'oss')
     dispatcher.run_once()
-    name=next(name for name in objects.objects if '/in/xunjia/' in name)
-    blob=objects.objects[name];env=inner['oss'].codec.unpack(blob)
+    blob=next(blob for _name,blob in objects.queues['down.invalid'] if inner['oss'].codec.unpack(blob)['kind']=='command')
+    env=inner['oss'].codec.unpack(blob)
     inner['mail']._publish(env,blob)  # Deliberate duplicated delivery, not route fallback.
     bridge.run_once();dispatcher.run_once()
     assert len(calls)==1 and service.commands(B.owner_user_id)[0]['status']=='sent'
@@ -109,7 +107,10 @@ def test_bounded_admin_replay_keeps_facts_and_marks_history_transport_metadata(t
     bridge.publish_native({'ext_msg_id':'native-history','peer_id':'peer-a','direction':'in','text':'原生事实','occurred_at':NOW-20})
     original=inner['oss'].poll()[0]['envelope']
     assert bridge.replay_events(1,1)['source_sequences']==[1]
-    renewed=inner['oss'].poll()[0]['envelope']
+    # An unACKed local event holds intake; inspect the newly authenticated
+    # upload bytes rather than pretending FIFO supports object-key rereads.
+    assert inner['oss'].poll()[0]['envelope']==original
+    renewed=inner['oss'].codec.unpack(objects.queues['up.invalid'][-1][1])
     assert renewed['payload']==original['payload'] and renewed['content_hash']==original['content_hash']
     assert renewed['transport_replay'] is True
     assert calls==[]
@@ -130,7 +131,7 @@ def test_echo_before_native_return_is_deferred_then_exactly_linked(tmp_path):
         return {'status':'sent','evidence':'native-verified','native_id':'native-out-1'}
     bridge.native_send=send
     dispatcher.run_once();bridge.run_once();dispatcher.run_once()
-    payload=inner['oss'].poll()[0]['envelope']['payload']
+    payload=next(row for row in inner['oss'].poll() if row['kind']=='event')['envelope']['payload']
     assert payload['source_command_id']==calls[0]['command_id']
     assert service.commands(B.owner_user_id)[0]['status']=='sent'
 
@@ -148,7 +149,7 @@ def test_unmatched_manual_out_holds_new_auto_and_query_never_executes_it(tmp_pat
         return {'status':'sent','evidence':'native-verified','native_id':'native-out-1'}
     bridge.native_send=send
     dispatcher.run_once();bridge.run_once()
-    payload=inner['oss'].poll()[0]['envelope']['payload']
+    payload=next(row for row in inner['oss'].poll() if row['kind']=='event')['envelope']['payload']
     assert 'source_command_id' not in payload
     assert bridge.ledger.execute(held[0],lambda c:(_ for _ in ()).throw(AssertionError('manual barrier bypass')))['status']=='cancelled'
     assert len(calls)==1
@@ -170,11 +171,13 @@ def test_trusted_human_is_immediate_and_late_mapping_never_reverses_manual(tmp_p
     service,dispatcher,bridge,inner,outer,calls,objects=setup(tmp_path,'oss')
     def send(command):
         bridge.publish_native(native_out(role='human'))
-        assert 'source_command_id' not in inner['oss'].poll()[0]['envelope']['payload']
+        payload=next(row for row in inner['oss'].poll() if row['kind']=='event')['envelope']['payload']
+        assert 'source_command_id' not in payload
         return {'status':'sent','evidence':'verified','native_id':'native-out-1'}
     bridge.native_send=send;dispatcher.run_once();bridge.run_once()
     bridge.publish_native(native_out(role='human'))
-    assert 'source_command_id' not in inner['oss'].poll()[0]['envelope']['payload']
+    payload=next(row for row in inner['oss'].poll() if row['kind']=='event')['envelope']['payload']
+    assert 'source_command_id' not in payload
 
 
 def test_deferred_timeout_and_restart_fail_closed_without_late_reclassification(tmp_path):
@@ -185,14 +188,16 @@ def test_deferred_timeout_and_restart_fail_closed_without_late_reclassification(
             bridge.publish_native(native_out())
             if mode=='timeout':bridge.ledger.clock=lambda:NOW+6
             else:
-                recovered=CollectorBridge(ledger=ReceiverLedger(root/'receiver.db',B,clock=lambda:NOW),adapters=outer,object_store=objects,native_send=lambda c:False,native_reconcile=lambda c:None)
+                recovered=CollectorBridge(ledger=ReceiverLedger(root/'receiver.db',B,clock=lambda:NOW),adapters=outer,object_store=None,native_send=lambda c:False,native_reconcile=lambda c:None)
                 recovered.flush_deferred()
             if mode=='timeout':bridge.flush_deferred()
             return {'status':'sent','evidence':'verified','native_id':'native-out-1'}
         bridge.native_send=send;dispatcher.run_once();bridge.run_once()
-        assert 'source_command_id' not in inner['oss'].poll()[0]['envelope']['payload']
+        payload=next(row for row in inner['oss'].poll() if row['kind']=='event')['envelope']['payload']
+        assert 'source_command_id' not in payload
         bridge.publish_native(native_out())
-        assert 'source_command_id' not in inner['oss'].poll()[0]['envelope']['payload']
+        payload=next(row for row in inner['oss'].poll() if row['kind']=='event')['envelope']['payload']
+        assert 'source_command_id' not in payload
 
 
 def test_held_mail_keeps_original_source_until_echo_resolves_and_native_runs_once(tmp_path):
@@ -234,13 +239,13 @@ def test_echo_wait_budget_rejects_unbounded_or_inconsistent_values(tmp_path):
 def test_manual_control_is_signed_top_level_same_on_both_routes_and_history(tmp_path):
     service,dispatcher,bridge,inner,outer,calls,objects=setup(tmp_path,'oss')
     bridge.publish_native(native_out('manual-one',role='human'))
-    oss=inner['oss'].poll()[0]['envelope'];mail=inner['mail'].poll()[0]['envelope']
+    oss=next(row for row in inner['oss'].poll() if row['kind']=='event')['envelope'];mail=inner['mail'].poll()[0]['envelope']
     assert oss['manual_fence_id']==mail['manual_fence_id']
     assert oss['manual_fence_version']==mail['manual_fence_version']==1
     assert 'manual_fence_id' not in oss['payload']
     from relay.protocol import digest
     assert oss['content_hash']==digest(oss['payload'])
     bridge.replay_events(1,1)
-    renewed=inner['oss'].poll()[0]['envelope']
+    renewed=inner['oss'].codec.unpack(objects.queues['up.invalid'][-1][1])
     assert renewed['manual_fence_id']==oss['manual_fence_id'] and renewed['manual_fence_version']==1
     assert renewed['payload']==oss['payload']

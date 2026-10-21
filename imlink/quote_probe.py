@@ -38,7 +38,7 @@ async def probe_quote(
     if not cookie or not device_id.strip():
         return {"ok": False, "wss_open": False, "note": "请先填写 Cookie 和设备标识"}
     try:
-        tok = authenticate(cookie, device_id.strip())
+        tok = await asyncio.to_thread(authenticate, cookie, device_id.strip())
     except Exception as exc:
         return {"ok": False, "wss_open": False, "note": _auth_note(exc)}
     token = ""

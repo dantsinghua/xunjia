@@ -11,19 +11,21 @@ from server.inbox import Inbox
 from server.receiver_ledger import ReceiverLedger
 from server.repository import Repository
 from server.runtime import Dispatcher
-from server.transports import OSSTransport, TransportRouter
+from server.transports import TransportRouter
+from server.file_gateway_transport import FileGatewayTransport
+from tests.cutover.file_gateway_fakes import Gateway
 from test_chat_runner_safety import SignedAgent
-from test_dual_transport import NOW, ObjectStore, Mailbox, binding, command, mail, native_event
+from test_dual_transport import NOW, Mailbox, binding, command, mail, native_event
 
 
 def stack(binding, tmp_path):
-    objects, mailbox = ObjectStore(), Mailbox()
+    objects, mailbox = Gateway(), Mailbox()
     source_path = tmp_path / "source.db"
-    oss = OSSTransport(binding, objects, source_path, clock=lambda: NOW)
+    oss = FileGatewayTransport(binding, objects.client('down'), objects.client('up'), source_path, role='collector', clock=lambda: NOW)
     smtp = mail(binding, source_path, mailbox)
     receiver = ReceiverLedger(tmp_path / "receiver.db", binding, clock=lambda: NOW)
     bridge = CollectorBridge(ledger=receiver, adapters={"oss": oss, "mail": smtp}, native_send=lambda _: None, native_reconcile=lambda _: None)
-    subscriber = OSSTransport(binding, objects, tmp_path / "subscriber.db", clock=lambda: NOW)
+    subscriber = FileGatewayTransport(binding, objects.client('up'), objects.client('down'), tmp_path / 'subscriber.db', role='service', clock=lambda: NOW)
     imap = mail(binding, tmp_path / "subscriber.db", mailbox)
     return bridge, receiver, subscriber, imap, mailbox
 
@@ -55,7 +57,7 @@ def test_manual_fence_is_identical_on_both_signed_routes_and_replay_never_change
     deliver_mail(mailbox)
     # Already-ACKed subscribers must not replay business consumption. Inspect
     # the real newly signed publication bytes to prove the immutable envelope.
-    oss_bytes = bridge.adapters["oss"].client.objects[f"wb/{binding.workbench_id}/out/xunjia/{binding.account_uid}/{1:020d}.bin"]
+    oss_bytes = bridge.adapters["oss"].outbound.opener.queues["up.invalid"][-1][1]
     mail_bytes = list(mailbox.sent[-1].iter_attachments())[0].get_payload(decode=True)
     for blob in (oss_bytes, mail_bytes):
         replay = bridge.codec.unpack(blob)

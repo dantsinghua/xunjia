@@ -6,7 +6,7 @@ composing the new business service (tests or approved cutover).
 """
 TABLES = ("xj2_owner", "xj2_group", "xj2_thread", "xj2_peer", "xj2_message",
           "xj2_scope", "xj2_quote", "xj2_analysis", "xj2_command", "xj2_decision",
-          "xj2_binding", "xj2_batch", "xj2_audit", "xj2_command_member", "xj2_reply_job")
+          "xj2_binding", "xj2_batch", "xj2_audit", "xj2_command_member", "xj2_reply_job", "xj2_session_reset")
 
 
 def statements(mysql: bool = False) -> list[str]:
@@ -29,12 +29,12 @@ def statements(mysql: bool = False) -> list[str]:
         created_at DOUBLE NOT NULL DEFAULT 0)""",
         """CREATE TABLE IF NOT EXISTS xj2_thread (
         thread_id VARCHAR(64) PRIMARY KEY, owner_id VARCHAR(160) NOT NULL,
-        account_uid VARCHAR(80) NOT NULL, peer_uid VARCHAR(160) NOT NULL,
+        workbench_id VARCHAR(160), account_uid VARCHAR(80) NOT NULL, peer_uid VARCHAR(160) NOT NULL,
         ingest_revision BIGINT NOT NULL, analyzed_revision BIGINT NOT NULL,
         pending_since DOUBLE, last_ingest_at DOUBLE,
         source_watermark BIGINT NOT NULL DEFAULT 0, dispatch_version BIGINT NOT NULL DEFAULT 0,
         receiver_fence_id VARCHAR(160), receiver_fence_version BIGINT NOT NULL DEFAULT 0,
-        UNIQUE(owner_id,account_uid,peer_uid))""",
+        UNIQUE(owner_id,workbench_id,account_uid,peer_uid))""",
         f"""CREATE TABLE IF NOT EXISTS xj2_peer (
         member_id VARCHAR(64) PRIMARY KEY, group_id VARCHAR(64) NOT NULL,
         thread_id VARCHAR(64) NOT NULL, version BIGINT NOT NULL,
@@ -77,6 +77,7 @@ def statements(mysql: bool = False) -> list[str]:
         basis_json {text} NOT NULL, result_json {text} NOT NULL,
         cancel_requested INTEGER NOT NULL, sent_at DOUBLE, native_id VARCHAR(160),
         created_at DOUBLE NOT NULL, expires_at DOUBLE NOT NULL,
+        account_epoch BIGINT NOT NULL DEFAULT 0,
         UNIQUE(member_id,request_id))""",
         f"""CREATE TABLE IF NOT EXISTS xj2_decision (
         decision_id VARCHAR(64) PRIMARY KEY, member_id VARCHAR(64) NOT NULL,
@@ -107,8 +108,19 @@ def statements(mysql: bool = False) -> list[str]:
         lease_until DOUBLE NOT NULL, attempts BIGINT NOT NULL,
         result_json {text} NOT NULL, created_at DOUBLE NOT NULL,
         UNIQUE(member_id,request_id))""",
+        f"""CREATE TABLE IF NOT EXISTS xj2_session_reset (
+        reset_id VARCHAR(64) PRIMARY KEY, owner_id VARCHAR(160) NOT NULL,
+        workbench_id VARCHAR(160) NOT NULL, account_uid VARCHAR(80) NOT NULL,
+        binding_version BIGINT NOT NULL, request_id VARCHAR(160) NOT NULL,
+        request_hash VARCHAR(64) NOT NULL, account_epoch BIGINT NOT NULL,
+        state VARCHAR(24) NOT NULL, code VARCHAR(160) NOT NULL,
+        request_json {text} NOT NULL, snapshot_hash VARCHAR(64) NOT NULL,
+        snapshot_json {text} NOT NULL, local_cut_json {text} NOT NULL,
+        created_at DOUBLE NOT NULL, updated_at DOUBLE NOT NULL,
+        UNIQUE(owner_id,request_id), UNIQUE(owner_id,workbench_id,account_uid,account_epoch))""",
     ]
     indexes = [
+        ("xj2_session_reset", "idx_xj2_reset_scope", "owner_id,account_uid,state"),
         ("xj2_group", "idx_xj2_owner", "owner_id,bond_code"),
         ("xj2_peer", "idx_xj2_peer_thread", "thread_id,group_id"),
         ("xj2_message", "idx_xj2_message_order", "thread_id,source_seq,message_id"),

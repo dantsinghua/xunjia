@@ -30,11 +30,11 @@ class QBMarket:
     Reuses the verified incremental QB reader. It never launches a collector or
     authenticates a market account on application import.
     """
-    def __init__(self,cache_path):
+    def __init__(self,cache_path,*,connection_options=None):
         from server import market_cache as db
         from server.qb_source import QBSource
         db.init_db(None,path=cache_path)
-        self.db=db;self.source=QBSource();self.groups={}
+        self.db=db;self.source=QBSource(connection_options);self.groups={}
 
     MAX_BROKER_BOOK = 20000
 
@@ -84,27 +84,49 @@ class QBMarket:
         from .negotiation.prices import Valuation, iso_day, number, InvalidFact
         import hashlib
         from datetime import date
+        candidates=[]
+        def consider(row):
+            day=row.get('cnbd_date');value=row.get('cnbd_yield_mat')
+            if value is None:return
+            try:
+                day=iso_day(day.isoformat() if isinstance(day,date) else str(day))
+            except (ValueError,TypeError):day=None
+            try:
+                value=format(number(str(value)),'f')
+                stamp=row.get('update_time')
+                stamp=stamp.timestamp() if hasattr(stamp,'timestamp') else 0
+                sequence=int(row.get('seq_ns') or row.get('id') or 0)
+            except (ValueError,TypeError,OverflowError):return
+            candidates.append((stamp,sequence,value,day))
         with self.source._lock:
             uni=self.source.code2uni.get(code)
             rows=list(self.source.book.get(uni,{}).values()) if uni is not None else []
-            candidates=[]
-            for row in rows:
-                day=row.get('cnbd_date');value=row.get('cnbd_yield_mat')
-                if day is None or value is None:continue
-                try:
-                    day=iso_day(day.isoformat() if isinstance(day,date) else str(day))
-                    value=format(number(str(value)),'f')
-                    stamp=row.get('update_time')
-                    stamp=stamp.timestamp() if hasattr(stamp,'timestamp') else 0
-                    sequence=int(row.get('seq_ns') or row.get('id') or 0)
-                except (ValueError,TypeError,OverflowError):continue
-                candidates.append((day,stamp,sequence,value))
+            for row in rows:consider(row)
+            if not candidates and uni is not None:
+                # Daily bid/ofr book expiry does not expire ChinaBond estimates.
+                # Read the original labelled fields; do not infer from generic
+                # static caches, broker prices or a quote/publication timestamp.
+                columns=('cnbd_yield_mat','cnbd_date','update_time','seq_ns','id')
+                with self.source._c().cursor() as cursor:
+                    cursor.execute('SELECT '+','.join(columns)+' FROM qb_live_best_quote '
+                        'WHERE bond_uni_code=%s AND cnbd_yield_mat IS NOT NULL '
+                        'ORDER BY update_time DESC,seq_ns DESC,id DESC LIMIT 1',(uni,))
+                    row=cursor.fetchone()
+                    if row is not None:
+                        # An insertion id is not authority to choose between
+                        # conflicting values at the same source revision.
+                        cursor.execute('SELECT '+','.join(columns)+' FROM qb_live_best_quote '
+                            'WHERE bond_uni_code=%s AND update_time <=> %s AND seq_ns=%s '
+                            'AND cnbd_yield_mat IS NOT NULL',(uni,row[2],row[3]))
+                        for tied in cursor.fetchall():consider(dict(zip(columns,tied)))
         if not candidates:return None
-        newest=max((day,stamp,seq) for day,stamp,seq,_value in candidates)
-        values={number(value) for day,stamp,seq,value in candidates if (day,stamp,seq)==newest}
+        newest=max((stamp,seq) for stamp,seq,_value,_day in candidates)
+        latest=[(value,day) for stamp,seq,value,day in candidates if (stamp,seq)==newest]
+        values={number(value) for value,_day in latest}
         if len(values)!=1:
-            raise InvalidFact('INNO_CHINABOND_REVISION_CONFLICT:'+str(code)+':'+newest[0])
-        day,_stamp,_seq=newest
+            raise InvalidFact('INNO_CHINABOND_REVISION_CONFLICT:'+str(code))
+        dates={day for _value,day in latest}
+        day=next(iter(dates)) if len(dates)==1 else None
         value=format(next(iter(values)),'f')
         digest=hashlib.sha256(json.dumps([code,day,value],separators=(',',':')).encode()).hexdigest()
         return Valuation(code,day,value,'innodealing-cnbd:'+digest)

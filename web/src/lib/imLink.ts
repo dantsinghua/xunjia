@@ -51,9 +51,17 @@ export interface ImLink {
   form: Record<string, Record<string, unknown>>
 }
 
+/** 服务端旧档案可能没有展示名；只补通道标签，不改变连接状态。 */
+export function imModeLabel(link: ImLink): string {
+  const labels: Record<ImLink['mode'], string> = { local: '本机通道', lan: '局域网通道', public: '公网上报', oss: '文件中转', mail: '邮件通道' }
+  return link.mode_label?.trim() || labels[link.mode] || link.name || '采集通道'
+}
+
 export const imLinks = ref<ImLink[]>([])
 export const imHints = ref<Record<string, string>>({})
 export const imContacts = ref<ImPerson[]>([])
+export interface OrgStatus { org_state?: 'ready' | 'empty' | 'unreported' | 'error'; org_updated_at?: number | null; org_error?: string }
+export const imOrgStatus = ref<OrgStatus>({org_state:'unreported'})
 export const imOrg = ref<ImOrg>({ departments: [], members: [] })
 export const imTarget = ref<ImPerson | null>(null)
 
@@ -179,6 +187,7 @@ function applyLinkBook(cur: ImLink | null | undefined) {
   imContacts.value = cur?.contacts || []
   imContactSource.value = cur?.contacts_source || ''
   imOrg.value = { departments: [], members: [] }
+  imOrgStatus.value = { org_state: 'unreported' }
   imTarget.value = null
 }
 
@@ -217,11 +226,19 @@ export function imIdentityText(link: ImLink | null | undefined): string {
   return [nick, uid].filter(Boolean).join(' · ')
 }
 
-export function orgEmptyLabel(org: ImOrg | null | undefined): string {
-  return !org?.departments?.length && !org?.members?.length ? '这个账号还没有组织架构' : ''
+export function orgEmptyLabel(org: ImOrg | null | undefined, status?: OrgStatus): string {
+  if (org?.departments?.length || org?.members?.length) return ''
+  if (status?.org_state === 'error') return '组织架构读取失败，请检查采集端组织读取配置'
+  if (status?.org_state === 'empty' || status?.org_state === 'ready') return '采集端已读取，组织架构为空'
+  return '采集端尚未上报组织架构'
 }
-export function orgReadNotice(org: ImOrg | null | undefined): string {
-  return orgEmptyLabel(org) || (org?.departments?.length ? `已读取组织架构，${org.departments.length} 个部门` : '已读取组织架构')
+export function orgReadNotice(org: ImOrg | null | undefined, status?: OrgStatus): string {
+  if ((status?.org_state === 'error' || status?.org_state === 'unreported') && (org?.departments?.length || org?.members?.length)) {
+    const stamp = status.org_updated_at
+    return (status.org_state === 'error' ? '组织架构本次读取失败' : '采集端本次未上报组织架构') +
+      '，显示上次成功缓存' + (stamp ? ' · ' + new Date(stamp * 1000).toLocaleString() : '')
+  }
+  return orgEmptyLabel(org, status) || (org?.departments?.length ? `已读取组织架构，${org.departments.length} 个部门` : '已读取组织架构')
 }
 
 let linkGeneration = 0
@@ -248,12 +265,36 @@ export async function activateIm(id: string) {
   applyLinkBook(imLinks.value.find(x => x.active && x.tested))
 }
 
+function bindingIdentity(): string {
+  const selected = imBoundAccount.value
+  return JSON.stringify([selected?.workbench_id, selected?.account_uid, selected?.version])
+}
+
+/** Apply the server-confirmed pair before any channel/contact reload can return. */
+export function applyCollectorSelection(binding: BoundAccount, contacts: { contacts: ImPerson[]; source: string; org: ImOrg } & OrgStatus): void {
+  linkGeneration++
+  imLinks.value = []
+  setImBinding(binding, binding.account_uid)
+  imContacts.value = contacts.contacts || []
+  imContactSource.value = contacts.source || ''
+  imOrg.value = asOrg(contacts.org)
+  imOrgStatus.value = { org_state: contacts.org_state, org_updated_at: contacts.org_updated_at, org_error: contacts.org_error }
+  imTarget.value = null
+  imFeedError.value = ''
+}
+
 export async function refreshImContacts(refresh = false) {
+  const selected = bindingIdentity()
   const r = await authFetch('/api/im/contacts' + (refresh ? '?refresh=1' : ''))
   const data = await r.json()
   if (!r.ok || data.ok === false) throw new Error(data.hint || '读通讯录失败')
+  if (selected !== bindingIdentity()) throw new Error('当前采集账号已变化，已忽略旧通讯录响应')
+  const pair = imBoundAccount.value
+  if ((data.data.workbench_id && data.data.workbench_id !== pair?.workbench_id)
+      || (data.data.account_uid && data.data.account_uid !== pair?.account_uid)) throw new Error('通讯录不属于当前工作台与企点账号')
   imContacts.value = data.data.contacts || []
   imContactSource.value = data.data.source || ''
   imOrg.value = asOrg(data.data.org)
-  return data.data as { source: string; contacts: ImPerson[]; org: ImOrg; name: string; account_id: string }
+  imOrgStatus.value = { org_state: data.data.org_state, org_updated_at: data.data.org_updated_at, org_error: data.data.org_error }
+  return data.data as { source: string; contacts: ImPerson[]; org: ImOrg; name: string; account_id: string } & OrgStatus
 }

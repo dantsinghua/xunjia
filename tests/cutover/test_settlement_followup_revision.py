@@ -159,14 +159,15 @@ def test_service_owned_question_metadata_is_hashed_but_never_part_of_transport_p
     assert body['settlement_question'] == {'side': 'ofr', 'quote_revision': before['revision']}
     assert row['content_hash'] == hashlib.sha256(encoded(body).encode()).hexdigest()
     claim = commands.claim(OWNER, command_id)
-    outgoing = Dispatcher(case.service, None, live_enabled=False)._wire(OWNER, claim)
+    outgoing = Dispatcher(case.service, None)._wire(OWNER, claim)
     assert outgoing['text'] == body['text'] and outgoing['content_hash'] == row['content_hash']
     assert 'settlement_question' not in outgoing and 'quote_revision' not in outgoing
     assert 'settlement_question' not in outgoing['text']
     assert set(outgoing) <= {'business_version', 'command_id', 'owner_user_id', 'account_uid',
         'peer_id', 'workbench_id', 'kind', 'op', 'text', 'content_hash', 'control_version',
         'expires_at', 'transport', 'source_watermark', 'dispatch_watermark',
-        'receiver_fence_id', 'receiver_fence_version'}
+        'receiver_fence_id', 'receiver_fence_version', 'account_epoch'}
+    assert outgoing['account_epoch'] == 0
     assert commands.get(OWNER, command_id)['state'] == 'PENDING', 'No native execution occurs in this test'
 
 

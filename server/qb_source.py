@@ -12,7 +12,7 @@
 
 最优口径(收益率报价,与 DM 最优条一致):最优 bid = 各经纪商 bid 收益率最低者(买方出价最高);
 最优 ofr = 各经纪商 ofr 收益率最高者(卖方要价最低)。同价的量相加(DM 的 6K/3K),
-报价方只列报在这个价上且量大于 0 的中介,量 0 或「--」不计入、也不挂到另一侧。
+有正量时报价方列报同价有量中介；同价均未报量时保留价格来源，数量仍未知，不挂到另一侧。
 行身份 bond_uni_code = QB 的 bondUniCode(字符串),windcode 取字典里的代码,
 没有真实代码和简称的券不进入列表。字典后来补上简称后,再作为新行出现。
 """
@@ -42,7 +42,7 @@ MYSQL = dict(
     user=os.environ.get("QB_MYSQL_USER", "bondtrade"),
     password=os.environ.get("QB_MYSQL_PASSWORD", ""),
     database=os.environ.get("QB_MYSQL_DB", "bondtrade_test"),
-    charset="utf8mb4", autocommit=True,
+    charset="utf8mb4", autocommit=True, connect_timeout=5, read_timeout=8, write_timeout=8,
 )
 # 回放:XUNJIA_QB_REPLAY=<倍速>,把今天已录下的真实报价按原时间顺序加速重放(午休/收盘后压测用),
 # 走与实时完全相同的下游链路;写单独的缓存库,不污染实时那份。
@@ -96,7 +96,9 @@ def guess_type(code: str, name: str) -> str:
 
 
 class QBSource:
-    def __init__(self):
+    def __init__(self, connection_options=None):
+        self.connection_options = dict(MYSQL if connection_options is None else connection_options)
+        self.connection_options.update(connect_timeout=5, read_timeout=8, write_timeout=8)
         self._lock = threading.RLock()
         self.book_day: dt.date | None = None
         self._wall_day = dt.date.today()
@@ -116,7 +118,7 @@ class QBSource:
     # ------------------------------------------------------------ MySQL
     def _c(self):
         if self.conn is None:
-            self.conn = pymysql.connect(**MYSQL)
+            self.conn = pymysql.connect(**self.connection_options)
         else:
             self.conn.ping(reconnect=True)
         return self.conn
@@ -212,8 +214,9 @@ class QBSource:
         target = max(p[0] for p in parsed) if pick_max else min(p[0] for p in parsed)
         at = [p for p in parsed if p[0] == target]
         sized = [p for p in at if p[1] > 0]
-        # 这个价上没有大于 0 的量时，保留价格，报价方留空。
-        named = sized
+        # 无量价格仍有真实来源；不补造数量，不改变原代表行的请示/清算含义。
+        fallback_row = at[0][2]
+        named = sized or at
         named.sort(key=lambda p: (
             -p[1],
             -(p[2]["update_time"].timestamp() if p[2].get("update_time") else 0),
@@ -225,7 +228,7 @@ class QBSource:
             if n not in names:
                 names.append(n)
         vol = int(round(sum(p[1] for p in sized))) if sized else None
-        row = named[0][2] if named else at[0][2]
+        row = named[0][2] if sized else fallback_row
         return {"yield": target, "vol": vol, "side": "/".join(names), "row": row}
 
     def _best_of(self, rows: list[dict]) -> dict | None:
@@ -371,6 +374,7 @@ class QBSource:
 
     @_locked
     def poll(self) -> list[tuple[int, dict]]:
+        restoring = not self._restored and not REPLAY
         self._restore_checkpoint()
         # 读者也持同一把锁；失败时恢复缓存，成功后才对其它线程可见。
         saved = dict(self.__dict__)
@@ -383,6 +387,15 @@ class QBSource:
         try:
             # 取源数据不占 SQLite 锁；MySQL 连接由 source 锁串行化。
             self._refresh_dict()
+            if restoring:
+                # Reconcile only changed price attribution from an older checkpoint.
+                # Keep existing flows, prices, timestamps and normal restart deduplication.
+                source_columns = ("best_bid_side", "best_ofr_side")
+                for uni in self.book:
+                    previous = self.last_best.get(uni)
+                    best = self._best(uni)
+                    if previous and best and any(best.get(k) != previous[db.DYN_COLS.index(k)] for k in source_columns):
+                        force.add(uni)
             rows = self._fetch()
             with db.transaction() as c:
                 out = self._poll_rows(rows, force)

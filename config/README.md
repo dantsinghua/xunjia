@@ -7,12 +7,12 @@
 
 本次不需要：
 - XUNJIA_AGENT_TOOL_TOKEN：公开市场数据 Tool 免认证。
-- OSS_TOKEN：OSS 独立使用 STS 下发的阿里云临时 AK/SK/SecurityToken，本项目 Dify 调用不需要 OSS Token。
 - Dify 管理员账号、插件安装权限、创建新的模型 Provider。
 
 可选：
 - V2.2 不读取 XUNJIA_AGENT_SERVICE_TOKEN；解析/回复只使用两份普通 App Key，旧内部回调已退出。
-- XUNJIA_TRANSPORT_CONFIG：真实通道连线验收后填写文件绝对路径；它引用环境中的密钥名称，不在 JSON 写明文。
+- XUNJIA_MQ_CONNECTION_CONFIG：MQ 连接配置文件绝对路径（0600），格式见 `mq-connection.example.json`。用户在采集通道填写一处远端 `base_url` 和认证 YAML 即可；远端地址填写至 `/its-relay/v1`，客户端拼接 `/api/files/pending`、`upload` 和 `download`。认证 YAML 使用 `auth.key`、`auth.sm4_key` 动态生成 `access_token`，仅部署用户可读（0600），凭据不可放入报告或版本库。明文 HTTP 仅在指定环境明确开启 `allow_http` 时使用。
+- XUNJIA_TRANSPORT_CONFIG：应用内部通道档案文件绝对路径（0600），与 XUNJIA_STATE_DIR 配套，格式见 `transport.example.json`。`file_gateway.uplink_url/downlink_url` 是现役协调器的两个独立内部方向地址，由部署接入，两者不能填写相同 URL 混用队列；这不是要求用户再填写两个远端 MQ 地址。MQ 连接配置的本人身份和内部路由须与此档案一致，协议绑定与密钥继续保留。更换远端连接前须停止发送并保留在途状态；保存连接不改变业务外发授权或启用原生发送。验收区分文件传输成功、应用入站和原生发送回执。
 - XUNJIA_QUOTE_SOURCE：可保持空，不从客户其他存款业务数据库猜行情数据源。
 - XUNJIA_ALLOWED_ORIGINS：同源前端正常不需要额外指定，跨域使用时由部署者填写。
 

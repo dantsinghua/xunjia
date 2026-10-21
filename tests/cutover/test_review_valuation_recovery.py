@@ -58,7 +58,14 @@ def source_market(value,day='2026-10-17'):
     market=QBMarket.__new__(QBMarket)
     row={'cnbd_date':date.fromisoformat(day),'cnbd_yield_mat':Decimal(value),'seq_ns':12,
          'update_time':datetime.fromisoformat(day+'T10:00:00'),'ofr_yield':'9.99','bid_yield':'8.88'}
-    market.source=SimpleNamespace(_lock=threading.RLock(),code2uni={'SYN-A':1},book={1:{1:row}},last_id=12)
+    class EmptyHistoryCursor:
+        def __enter__(self):return self
+        def __exit__(self,*args):return False
+        def execute(self,*args):pass
+        def fetchone(self):return None
+        def fetchall(self):return []
+    empty_history=SimpleNamespace(cursor=lambda:EmptyHistoryCursor())
+    market.source=SimpleNamespace(_lock=threading.RLock(),code2uni={'SYN-A':1},book={1:{1:row}},last_id=12,_c=lambda:empty_history)
     return market
 def test_new_inno_chinabond_value_recovers_when_reference_table_stays_down(tmp_path):
     app,ref,now,g,m,t=setup(tmp_path)
@@ -116,15 +123,20 @@ def test_older_refresh_cannot_overwrite_newer_policy(tmp_path):
     assert not store.refresh_valuation(OWNER,g,valuation=Valuation('SYN-A',ref.day,'2.60','late-old'),
         expected_valuation_date=ref.day,expected_policy_version=version)
     assert json.loads(group(app,g)['boundary_json'])['value']=='2.95'
-def test_different_same_day_chinabond_values_report_data_conflict_not_guess(tmp_path):
+@pytest.mark.parametrize('inno_value,expected_boundary',[('2.60','2.65'),('2.50','2.55')])
+def test_inno_explicit_value_has_fixed_priority_without_formal_cross_check(tmp_path,inno_value,expected_boundary):
+    # 安琳新契约：明确Inno中债值足够，不再为日期/跨源对账调用正式源。
     app,ref,now,g,m,t=setup(tmp_path)
-    market=source_market('2.60',day=ref.day)
+    market=source_market(inno_value,day=ref.day)
     app.state.inquiry.valuation_source=market.valuation
-    with pytest.raises(InvalidFact,match='CHINABOND_SOURCES_DISAGREE'):app.state.inquiry.valuation('SYN-A')
-    before=group(app,g)
+    before_peer=app.state.repository.quote(OWNER,m,'ofr').dump()
+    value,_=app.state.inquiry.valuation('SYN-A')
+    assert value.yield_pct==inno_value and value.source=='innodealing'
     result=app.state.rollover_once()
-    assert result['pending'] and result['revalued']==0
-    assert group(app,g)==before
+    assert result['pending']==[] and result['revalued']==1
+    assert json.loads(group(app,g)['boundary_json'])=={'kind':'YIELD','value':expected_boundary}
+    assert ref.reads==0, '合法Inno存在时不访问可能不同/不可用的正式源'
+    assert app.state.repository.quote(OWNER,m,'ofr').dump()==before_peer
 
 
 def test_application_market_loop_consumes_new_valuation_without_best_quote_delta(tmp_path,monkeypatch):
@@ -145,7 +157,12 @@ def test_application_market_loop_consumes_new_valuation_without_best_quote_delta
         if len(calls)==1:market.source.last_id+=1
         return []
     market.source.poll=poll
-    monkeypatch.setattr(module,'QBMarket',lambda path:market)
+    def market_factory(path, *, connection_options=None):
+        assert path == str(tmp_path/'unused.sqlite')
+        assert connection_options['host'] == 'synthetic.invalid'
+        assert connection_options['database'] == 'synthetic'
+        return market
+    monkeypatch.setattr(module,'QBMarket',market_factory)
     for key,value in {'XUNJIA_QUOTE_SOURCE':'qb','QB_MYSQL_HOST':'synthetic.invalid',
         'QB_MYSQL_USER':'synthetic','QB_MYSQL_PASSWORD':'synthetic','QB_MYSQL_DB':'synthetic',
         'XUNJIA_QUOTE_CACHE':str(tmp_path/'unused.sqlite')}.items():monkeypatch.setenv(key,value)

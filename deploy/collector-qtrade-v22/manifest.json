@@ -30,9 +30,10 @@
       "role": "new_runtime_module",
       "base_state": "created_in_this_batch",
       "base_sha256": null,
-      "result_sha256": "3099aca903e6d6cf427f12a2b62253fccd423b47307df4d64388f313e14f827f",
-      "size_bytes": 16225,
-      "freeze_evidence": "collector-freeze.json"
+      "result_sha256": "577476edbf02a219c4f18da27429e1790f5fbc446061730e49ccfcf2c0b6f3ac",
+      "size_bytes": 21931,
+      "freeze_evidence": "2026-10-21 independent capability publication before contacts failure; delta acceptance required",
+      "previous_result_sha256": "c099ff80d447504fc84ee2787f6dc268f15c5fdadea0676a1b7ed5de7588412e"
     },
     {
       "target_path": "tests/acceptance/test_xunjia_v22_native_guard.py",
@@ -50,9 +51,10 @@
       "role": "independent_acceptance",
       "base_state": "created_in_this_batch",
       "base_sha256": null,
-      "result_sha256": "122d37326a3d249973699799c3d93d0094be102a0c65093aaa5fe72af8c01310",
-      "size_bytes": 11780,
-      "freeze_evidence": "collector-all-final-before.json"
+      "result_sha256": "54434b6053ca5e0a6ad679f555d6c65ba9fdf55d6f72021f2dc78d40a66fe3ed",
+      "size_bytes": 12030,
+      "freeze_evidence": "2026-10-20 explicit user removal of extra native-send switch; independent acceptance in send-enable run",
+      "previous_result_sha256": "122d37326a3d249973699799c3d93d0094be102a0c65093aaa5fe72af8c01310"
     },
     {
       "target_path": "tests/acceptance/test_xunjia_v22_app_wiring.py",
@@ -73,6 +75,26 @@
       "result_sha256": "4811a9cd805165668bc4f2d95494c24127afbad79917c467442b48146f560774",
       "size_bytes": 1953,
       "freeze_evidence": "collector-all-final-before.json"
+    },
+    {
+      "target_path": "src/qtrade_agent/adapters/qidian/org.py",
+      "delivery_path": "source/src/qtrade_agent/adapters/qidian/org.py",
+      "role": "existing_runtime_module_scoped_update",
+      "base_state": "existing_module_with_exact_preimage",
+      "base_sha256": "ca2e92d792bdfcbe800d6ffafece9cb4f40d314b87d1eaa852b25f7457b37606",
+      "result_sha256": "363be71e4dda590c2dffad84c690eed212f47dc83a51fe3f9b8cb69120dd2197",
+      "size_bytes": 15758,
+      "freeze_evidence": "2026-10-20 scoped organization source; original module retained in protected run preimage"
+    },
+    {
+      "target_path": "docs/integration/xunjia-org-provider.patch",
+      "delivery_path": "source/docs/integration/xunjia-org-provider.patch",
+      "role": "manual_integration_patch",
+      "base_state": "created_in_this_batch",
+      "base_sha256": null,
+      "result_sha256": "8c119c4c10813aee858d060b83ebb1789c290fe1e8e9695af8088008b847de34",
+      "size_bytes": 1059,
+      "freeze_evidence": "Exact AgentApp._xunjia_v22_contacts patch against protected current dirty worktree preimage; never replace whole app.py"
     }
   ],
   "existing_file_integration": [
@@ -91,7 +113,18 @@
       "base_sha256": null,
       "result_sha256": "c0c00d56702198db7f1b0dfafd4f3d069d87fe5dd4939aa26c1225b28d77e9d9",
       "full_file_delivered": false,
-      "freeze_evidence": "collector-freeze.json"
+      "freeze_evidence": "collector-freeze.json",
+      "org_provider_revision": {
+        "base_sha256": "cef9e2f72921dfacb43e60d9682e45ee1d70a51b6c91bae7450e5b2a2897d183",
+        "result_sha256": "4039bb423cd870725c1e9f43bea255986d3fb2bbf6ab925a08845905231b2570",
+        "patch_delivery_path": "source/docs/integration/xunjia-org-provider.patch",
+        "patch_sha256": "8c119c4c10813aee858d060b83ebb1789c290fe1e8e9695af8088008b847de34",
+        "symbols": [
+          "AgentApp._xunjia_v22_contacts"
+        ],
+        "full_file_delivered": false,
+        "automatic_application_supported": false
+      }
     },
     {
       "target_path": "src/qtrade_agent/bus/bus.py",
@@ -157,5 +190,31 @@
     },
     "real_account_or_native_send_verified": false,
     "qtrade_installer_verified": false
+  },
+  "file_gateway_revision": {
+    "protocol_package": "2.2.1",
+    "historical_validation_is_pre_file_gateway": true,
+    "real_mq_verified": false,
+    "real_native_verified": false
+  },
+  "organization_revision": {
+    "contract_fields": [
+      "org",
+      "org_state",
+      "org_updated_at",
+      "org_error"
+    ],
+    "states": [
+      "ready",
+      "empty",
+      "unreported",
+      "error"
+    ],
+    "real_decryption_verified": false,
+    "credential_reference_fields": [
+      "org_password_file",
+      "org_password_format"
+    ],
+    "private_values_included": false
   }
 }

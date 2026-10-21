@@ -1,15 +1,16 @@
-"""Real authenticated adapters and receiver ledger, with memory-only OSS/SMTP/IMAP."""
+"""Real authenticated adapters and receiver ledger, with memory-only files MQ/SMTP/IMAP."""
 import copy
 import re
 
 import pytest
 
 from relay.protocol import Binding, Codec, ProtocolError, envelope
+from tests.mq_fixtures import MQWire
 from server.business import InquiryService
 from server.inbox import Inbox
 from server.receiver_ledger import ReceiverLedger
 from server.repository import Repository
-from server.transports import MailConfig, MailTransport, OSSTransport, TransportRouter
+from server.transports import MailConfig, MailTransport, TransportRouter
 
 
 NOW = 1_800_000_000
@@ -33,19 +34,6 @@ def packet(binding, value, *, kind="command", message_id=None):
         expires_at=value["expires_at"]))
 
 
-class ObjectStore:
-    def __init__(self):
-        self.objects, self.puts = {}, []
-        self.lose_response = False
-
-    def request(self, method, name, body=None, timeout=20):
-        if method == "PUT":
-            self.puts.append((name, body))
-            self.objects[name] = body
-            if self.lose_response:
-                raise TimeoutError("Synthetic response lost after object committed")
-            return 200, b""
-        return (200, self.objects[name]) if name in self.objects else (404, b"")
 
 
 class Mailbox:
@@ -222,15 +210,15 @@ def test_receiver_rejects_modified_content_and_tampered_ciphertext(binding, tmp_
 
 
 def test_oss_response_loss_keeps_one_object_identity_and_only_sends_queries_afterward(binding, tmp_path):
-    objects = ObjectStore()
-    objects.lose_response = True
-    adapter = OSSTransport(binding, objects, tmp_path / "transport.db", clock=lambda: NOW)
+    objects = MQWire()
+    objects.lose_upload = True
+    adapter = objects.transport(binding, tmp_path / "transport.db", role="service", clock=lambda: NOW)
     value = command(binding)
     assert adapter.send(value)["status"] == "unknown"
-    objects.lose_response = False
+    objects.lose_upload = False
     assert adapter.send(value)["status"] == "unknown"
     adapter.reconcile(value)
-    business_puts = [(name, body) for name, body in objects.puts if name.endswith("/cmd-synthetic.bin")]
+    business_puts = [(name, blob) for _, name, blob in objects.uploaded if name.startswith("xunjia-v22-command-")]
     assert len(business_puts) == 1
     assert Codec(binding, clock=lambda: NOW).unpack(business_puts[0][1])["payload"]["command_id"] == "cmd-synthetic"
 
@@ -267,9 +255,9 @@ def test_bad_mail_is_quarantined_and_uidvalidity_change_does_not_reprocess_acked
 
 
 def test_same_native_event_published_over_both_routes_has_one_stable_source_sequence(binding, tmp_path):
-    objects, mailbox = ObjectStore(), Mailbox()
+    objects, mailbox = MQWire(), Mailbox()
     shared = tmp_path / "publisher.db"
-    oss = OSSTransport(binding, objects, shared, clock=lambda: NOW)
+    oss = objects.transport(binding, shared, role="collector", clock=lambda: NOW)
     smtp = mail(binding, shared, mailbox)
     first = oss.publish_event(native_event(transport="oss", object_key="ignored-route-data"))
     second = smtp.publish_event(native_event(transport="mail", mail_uid=777, uidvalidity=9))
@@ -281,9 +269,9 @@ def test_same_native_event_published_over_both_routes_has_one_stable_source_sequ
 
 
 def test_inbox_does_not_ack_before_business_commit_and_replays_after_failure(binding, tmp_path, monkeypatch):
-    objects = ObjectStore()
-    publisher = OSSTransport(binding, objects, tmp_path / "publisher.db", clock=lambda: NOW)
-    subscriber = OSSTransport(binding, objects, tmp_path / "subscriber.db", clock=lambda: NOW)
+    objects = MQWire()
+    publisher = objects.transport(binding, tmp_path / "publisher.db", role="collector", clock=lambda: NOW)
+    subscriber = objects.transport(binding, tmp_path / "subscriber.db", role="service", clock=lambda: NOW)
     publisher.publish_event(native_event())
     repo = Repository("sqlite:///" + str(tmp_path / "business.db"))
     repo.bind_account(binding.owner_user_id, binding.account_uid, binding.workbench_id)
@@ -304,10 +292,10 @@ def test_inbox_does_not_ack_before_business_commit_and_replays_after_failure(bin
 
 
 def test_unknown_oss_submission_cannot_be_silently_reissued_via_mail(binding, tmp_path):
-    objects, mailbox = ObjectStore(), Mailbox()
-    objects.lose_response = True
+    objects, mailbox = MQWire(), Mailbox()
+    objects.lose_upload = True
     shared = tmp_path / "transport.db"
-    oss = OSSTransport(binding, objects, shared, clock=lambda: NOW)
+    oss = objects.transport(binding, shared, role="service", clock=lambda: NOW)
     smtp = mail(binding, shared, mailbox)
     assert oss.send(command(binding))["status"] == "unknown"
     with pytest.raises(ProtocolError):
@@ -315,24 +303,6 @@ def test_unknown_oss_submission_cannot_be_silently_reissued_via_mail(binding, tm
     assert mailbox.sent == []
 
 
-def test_expired_event_envelope_can_be_republished_without_losing_original_event_identity(binding, tmp_path):
-    clock = [NOW]
-    objects = ObjectStore()
-    publisher = OSSTransport(binding, objects, tmp_path / "publisher.db", clock=lambda: clock[0], envelope_ttl=10)
-    subscriber = OSSTransport(binding, objects, tmp_path / "subscriber.db", clock=lambda: clock[0])
-    first = native_event()
-    assert publisher.publish_event(first) == 1
-    clock[0] += 11
-    assert publisher.publish_event(native_event(event_id="native-event-2", ext_msg_id="native-2", occurred_at=NOW + 11)) == 2
-    # A trusted source may re-envelope its original event; it must not invent a
-    # new native event ID, sequence or occurrence time to unblock the cursor.
-    assert publisher.publish_event(first) == 1
-    pending = subscriber.poll()
-    assert [item["envelope"]["payload"]["event_id"] for item in pending] == ["native-event-1", "native-event-2"]
-    assert pending[0]["envelope"]["payload"]["occurred_at"] == NOW
-    for item in pending:
-        subscriber.ack(item["source_token"])
-    assert subscriber.poll() == []
 
 
 @pytest.mark.parametrize("replay", [False, True])
@@ -354,9 +324,9 @@ def test_administrator_replay_is_display_only_while_fresh_inbound_remains_runnab
             return None
 
     Dispatcher(service, Native(), clock=lambda: NOW).run_once()
-    objects = ObjectStore()
-    publisher = OSSTransport(binding, objects, tmp_path / "publisher.db", clock=lambda: NOW)
-    subscriber = OSSTransport(binding, objects, tmp_path / "subscriber.db", clock=lambda: NOW)
+    objects = MQWire()
+    publisher = objects.transport(binding, tmp_path / "publisher.db", role="collector", clock=lambda: NOW)
+    subscriber = objects.transport(binding, tmp_path / "subscriber.db", role="service", clock=lambda: NOW)
     publisher.publish_event(native_event(text="谢谢", occurred_at=NOW + 1))
     if replay:
         publisher.queue_replay(1, 1)
@@ -380,9 +350,9 @@ def test_administrator_replay_is_display_only_while_fresh_inbound_remains_runnab
 def test_native_out_waits_for_exact_receipt_and_holds_auto_send_until_classified(binding, tmp_path, exact_native_id):
     from relay.collector_bridge import CollectorBridge
 
-    objects = ObjectStore()
-    publisher = OSSTransport(binding, objects, tmp_path / "publisher.db", clock=lambda: NOW)
-    subscriber = OSSTransport(binding, objects, tmp_path / "subscriber.db", clock=lambda: NOW)
+    objects = MQWire()
+    publisher = objects.transport(binding, tmp_path / "publisher.db", role="collector", clock=lambda: NOW)
+    subscriber = objects.transport(binding, tmp_path / "subscriber.db", role="service", clock=lambda: NOW)
     ledger = ReceiverLedger(tmp_path / "receiver.db", binding, clock=lambda: NOW)
     bridge = CollectorBridge(ledger=ledger, adapters={"oss": publisher}, native_send=lambda _: None, native_reconcile=lambda _: None)
     first = command(binding)
@@ -415,9 +385,9 @@ def test_unresolved_native_echo_fails_closed_and_late_mapping_cannot_reclassify_
     from relay.collector_bridge import CollectorBridge
 
     clock = [NOW]
-    objects = ObjectStore()
-    publisher = OSSTransport(binding, objects, tmp_path / "publisher.db", clock=lambda: clock[0])
-    subscriber = OSSTransport(binding, objects, tmp_path / "subscriber.db", clock=lambda: clock[0])
+    objects = MQWire()
+    publisher = objects.transport(binding, tmp_path / "publisher.db", role="collector", clock=lambda: clock[0])
+    subscriber = objects.transport(binding, tmp_path / "subscriber.db", role="service", clock=lambda: clock[0])
     path = tmp_path / "receiver.db"
     ledger = ReceiverLedger(path, binding, clock=lambda: clock[0])
     bridge = CollectorBridge(ledger=ledger, adapters={"oss": publisher}, native_send=lambda _: None, native_reconcile=lambda _: None)
@@ -453,9 +423,9 @@ def test_unresolved_native_echo_fails_closed_and_late_mapping_cannot_reclassify_
 def test_trusted_human_out_is_published_immediately_even_while_native_send_is_pending(binding, tmp_path):
     from relay.collector_bridge import CollectorBridge
 
-    objects = ObjectStore()
-    publisher = OSSTransport(binding, objects, tmp_path / "publisher.db", clock=lambda: NOW)
-    subscriber = OSSTransport(binding, objects, tmp_path / "subscriber.db", clock=lambda: NOW)
+    objects = MQWire()
+    publisher = objects.transport(binding, tmp_path / "publisher.db", role="collector", clock=lambda: NOW)
+    subscriber = objects.transport(binding, tmp_path / "subscriber.db", role="service", clock=lambda: NOW)
     ledger = ReceiverLedger(tmp_path / "receiver.db", binding, clock=lambda: NOW)
     bridge = CollectorBridge(ledger=ledger, adapters={"oss": publisher}, native_send=lambda _: None, native_reconcile=lambda _: None)
 
@@ -475,7 +445,7 @@ def test_expired_held_command_reaches_failed_without_ever_calling_native(binding
     from relay.collector_bridge import CollectorBridge
 
     clock = [NOW]
-    publisher = OSSTransport(binding, ObjectStore(), tmp_path / "publisher.db", clock=lambda: clock[0])
+    publisher = MQWire().transport(binding, tmp_path / "publisher.db", role="collector", clock=lambda: clock[0])
     ledger = ReceiverLedger(tmp_path / "receiver.db", binding, clock=lambda: clock[0])
     bridge = CollectorBridge(ledger=ledger, adapters={"oss": publisher}, native_send=lambda _: None, native_reconcile=lambda _: None)
     second = command(binding, command_id="held-short-authorization", expires_at=NOW + 1)

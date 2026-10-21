@@ -29,7 +29,7 @@ def isolated_configuration(monkeypatch):
 def cli(database, *args):
     return subprocess.run([sys.executable, '-B', '-m', 'server.manage', *args], cwd=ROOT,
         env={**os.environ, 'XUNJIA_DATABASE_URL': 'sqlite:///'+str(database),
-             'XUNJIA_RUN_BACKGROUND': '0', 'XUNJIA_ENABLE_LIVE_TRANSPORT': '0'},
+             'XUNJIA_RUN_BACKGROUND': '0'},
         capture_output=True, text=True, timeout=20)
 
 
@@ -65,7 +65,7 @@ def test_cli_binding_is_read_by_real_me_api_and_repeat_preserves_control_and_pre
     native = FakeNative()
     app = create_app(database_url='sqlite:///'+str(database),
         auth_config=AuthConfig(sso_secret='synthetic-only', session_secret='synthetic-session-at-least-32-chars'),
-        enable_background=False, enable_live_transport=False, chatflows=FakeFlows(), transport=native)
+        enable_background=False,  chatflows=FakeFlows(), transport=native)
     with TestClient(app) as client:
         client.headers['Authorization'] = 'Bearer '+app.state.auth.issue_token(User())
         response = client.get('/api/auth/me')

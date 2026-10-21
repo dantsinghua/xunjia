@@ -159,7 +159,7 @@ class Manager:
         # Interpreter and import smoke, without constructing app or touching a DB.
         env = {k:v for k,v in os.environ.items() if not k.startswith(('XUNJIA_','QB_'))}
         env.update(PYTHONPATH=str(release/'app'), PYTHONDONTWRITEBYTECODE='1', PYTHONNOUSERSITE='1')
-        run([str(py),'-c','import server.app, imlink.sts_credentials; print("ok")'],env=env)
+        run([str(py),'-c','import server.app, relay.file_gateway; print("ok")'],env=env)
         run([str(py),'-m','pip','check'], env=env)
         return meta
     def config_sources(self):
@@ -315,7 +315,7 @@ class Manager:
              '--find-links='+str(self.bundle/'wheels/common'),'-r',str(self.bundle/'requirements.lock')],env=env)
         run([str(py),'-m','pip','check'],env=env)
         env['PYTHONPATH']=str(app)
-        run([str(py),'-c','import server.app, imlink.sts_credentials, relay.protocol; print("ok")'],env=env)
+        run([str(py),'-c','import server.app, relay.file_gateway, relay.protocol; print("ok")'],env=env)
         self.phase(txn,'STAGED')
         return release
     def set_current(self, target: Path | None):

@@ -11,6 +11,7 @@ from datetime import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -27,30 +28,10 @@ def collector_version(env=None):
     return value
 
 
-class _ObjectStore:
-    def __init__(self, box):
-        self.box = box
-
-    def list(self, prefix):
-        return self.box.list_prefix(prefix)
-
-    def get(self, name):
-        return self.box.get(name)
-
-    def request(self, method, name, body=None):
-        if method == 'GET':
-            value = self.box.get(name)
-            return (404, b'') if value is None else (200, value)
-        if method == 'PUT':
-            self.box.put(name, body)
-            return 200, b''
-        raise ValueError('unsupported_collector_oss_operation')
-
-
 class XunjiaV22Host:
     def __init__(self, *, store, bus, loop, binding, bridge, port, state_path,
-                 legacy_inbox_disabled, allow_native_send=False, contacts_provider=None):
-        if type(allow_native_send) is not bool or not callable(legacy_inbox_disabled):
+                 legacy_inbox_disabled, contacts_provider=None):
+        if not callable(legacy_inbox_disabled):
             raise ValueError('invalid_collector_execution_policy')
         if not legacy_inbox_disabled():
             raise RuntimeError('legacy_xunjia_inbox_must_be_disabled')
@@ -62,7 +43,6 @@ class XunjiaV22Host:
         self.binding, self.bridge, self.port = binding, bridge, port
         self.ledger = bridge.ledger
         self.legacy_inbox_disabled = legacy_inbox_disabled
-        self.allow_native_send = allow_native_send
         self.contacts_provider = contacts_provider
         self.state_path = Path(state_path)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,8 +53,9 @@ class XunjiaV22Host:
         self._wake = asyncio.Event()
         self._tick_lock = asyncio.Lock()
         self._last_catalog = 0.0
-        self.port.allow_native_send = False
         self.port.execution_permission = self.permission
+        quiescent = getattr(self.port, 'quiescent', None)
+        self.bridge.native_quiescent = quiescent if callable(quiescent) else None
         self.bridge.native_send = self._send
         self.bridge.native_reconcile = self.port.native_reconcile
         identity = json.dumps([binding.owner_user_id, binding.account_uid, binding.workbench_id])
@@ -112,20 +93,15 @@ class XunjiaV22Host:
         if not legacy_inbox_disabled():
             raise RuntimeError('legacy_xunjia_inbox_must_be_disabled')
         config_path = os.environ.get('XUNJIA_COLLECTOR_CONFIG_FILE', '')
-        if not config_path or box is None:
-            raise ValueError('NOT_CONFIGURED: XUNJIA_COLLECTOR_CONFIG_FILE or OSS')
-        # Production QTrade boxes must use STS. Synthetic boxes are explicit test injection.
-        if hasattr(box, '_credentials_provider') and box._credentials_provider is None:
-            raise ValueError('NOT_CONFIGURED: collector_requires_OSS_STS')
+        if not config_path:
+            raise ValueError('NOT_CONFIGURED: XUNJIA_COLLECTOR_CONFIG_FILE')
         try:
             path = Path(config_path)
             if path.stat().st_size > 16384:
                 raise ValueError
             config = json.loads(path.read_text(encoding='utf-8'))
-            required = {'owner_user_id', 'account_uid', 'workbench_id', 'seal_key_file', 'sign_key_file'}
-            if not isinstance(config, dict) or not required <= config.keys() or set(config) - required - {'allow_native_send'}:
-                raise ValueError
-            if type(config.get('allow_native_send', False)) is not bool:
+            required = {'owner_user_id', 'account_uid', 'workbench_id', 'seal_key_file', 'sign_key_file', 'file_gateway'}
+            if not isinstance(config, dict) or not required <= config.keys() or set(config) - required - {'org_password_file', 'org_password_format'}:
                 raise ValueError
             def key(name):
                 target = Path(config[name])
@@ -142,35 +118,67 @@ class XunjiaV22Host:
             from relay.collector_bridge import CollectorBridge
             from relay.qtrade_native_port import QTradeNativePort
             from server.receiver_ledger import ReceiverLedger
-            from server.transports import OSSTransport
+            from server.file_gateway_transport import FileGatewayTransport
         except ImportError:
             raise RuntimeError('NOT_CONFIGURED: xunjia_v22_protocol_package_not_installed') from None
         binding = Binding(config['owner_user_id'], config['account_uid'], config['workbench_id'], seal, sign)
-        workbench = os.environ.get('OSS_WORKBENCH_ID')
-        if workbench and workbench != binding.workbench_id:
-            raise ValueError('collector_workbench_binding_mismatch')
         root = Path(data_dir) / 'xunjia-v22'
         ledger = ReceiverLedger(root / 'receiver.sqlite3', binding)
-        objects = _ObjectStore(box)
-        transport = OSSTransport(binding, objects, root / 'publication.sqlite3')
+        transport = FileGatewayTransport.from_config(binding, config['file_gateway'], root / 'publication.sqlite3', role='collector', config_dir=path.parent)
         port = QTradeNativePort(binding=binding, store=store, bus=bus, loop=loop,
             legacy_inbox_disabled=legacy_inbox_disabled, execution_permission=ledger.permission)
-        bridge = CollectorBridge(ledger=ledger, adapters={'oss': transport}, object_store=objects,
+        bridge = CollectorBridge(ledger=ledger, adapters={'oss': transport},
             native_send=port.native_send, native_reconcile=port.native_reconcile)
         return cls(store=store, bus=bus, loop=loop, binding=binding, bridge=bridge, port=port,
             state_path=root / 'host.sqlite3', legacy_inbox_disabled=legacy_inbox_disabled,
-            allow_native_send=config.get('allow_native_send', False), contacts_provider=contacts_provider)
+            contacts_provider=contacts_provider)
 
     def permission(self, command):
-        return bool(self._active and self._intake_ok and self.allow_native_send
-                    and self.legacy_inbox_disabled() and self.ledger.permission(command) is True)
+        return bool(self._active and self._intake_ok
+                    and self.legacy_inbox_disabled() and self.ledger.permission(command) is True
+                    and all(getattr(adapter, 'receive_ready', lambda: True)() for adapter in getattr(self.bridge, 'adapters', {}).values()))
 
     def _send(self, command):
         if command.get('business_version') != '2.2':
             return {'status': 'failed', 'evidence': 'collector-requires-business-version-2.2'}
-        if not self._active or not self.allow_native_send or not self._intake_ok or not self.legacy_inbox_disabled():
+        if not self._active or not self._intake_ok or not self.legacy_inbox_disabled():
             return {'status': 'failed', 'evidence': 'qtrade-v2-native-disabled'}
         return self.port.native_send(command)
+
+    def get_session_reset_status(self, account_id):
+        """Read the shared ledger only for this port's unique bound account."""
+        account = self.port._account()
+        if (not account or account.get('id') != account_id
+                or account.get('channel') != 'qidian'
+                or str(account.get('self_uid')) != self.binding.account_uid):
+            return None
+        current = self.ledger.reset_status()
+        epoch = self.ledger.account_epoch()
+        if type(epoch) is not int or epoch < 0:
+            raise ValueError('session_reset_status_unavailable')
+        reset = None
+        if current is None:
+            if epoch != 0:
+                raise ValueError('session_reset_status_unavailable')
+        else:
+            phases = {'waiting_native', 'barrier_ready', 'complete', 'blocked'}
+            if (not isinstance(current, dict) or current.get('phase') not in phases
+                    or type(current.get('account_epoch')) is not int
+                    or current['account_epoch'] != epoch):
+                raise ValueError('session_reset_status_unavailable')
+            if current['phase'] == 'complete':
+                fingerprint = current.get('snapshot_hash')
+                if (not isinstance(current.get('reset_id'), str) or not current['reset_id']
+                        or not isinstance(fingerprint, str) or len(fingerprint) != 64
+                        or set(fingerprint) - set('0123456789abcdef')
+                        or not isinstance(current.get('snapshot'), dict)
+                        or current['snapshot'].get('account_epoch') != epoch):
+                    raise ValueError('session_reset_status_unavailable')
+            reset = {key: current.get(key) for key in
+                     ('reset_id', 'phase', 'account_epoch', 'snapshot_hash', 'snapshot', 'code')}
+        return {'available': True, 'account_id': account_id,
+                'workbench_id': self.binding.workbench_id, 'account_uid': self.binding.account_uid,
+                'account_epoch': epoch, 'reset': reset}
 
     def observe(self, *, event, payload, account_id=None, event_id='', channel=None,
                 trace_id=None, now_ms=None, historical=False, source_seq=0):
@@ -245,32 +253,105 @@ class XunjiaV22Host:
             with self._db() as db:
                 db.execute('UPDATE host_event SET published=1 WHERE event_id=?', (row['event_id'],))
 
+    def _previous_org(self):
+        with self._db() as db:
+            row = db.execute("SELECT value FROM host_meta WHERE key='org_publication_id'").fetchone()
+        if row:
+            for adapter in self.bridge.adapters.values():
+                if not hasattr(adapter, 'store'):
+                    continue
+                with adapter.store.db() as db:
+                    saved = db.execute('SELECT data FROM tx_publication WHERE scope=? AND id=? AND route=? AND uploaded=1',
+                        (adapter.store.scope, row['value'], adapter.route)).fetchone()
+                if saved:
+                    book = json.loads(saved['data'])['payload']
+                    if (book.get('account_uid') == self.binding.account_uid
+                            and book.get('org_state') in ('ready', 'empty') and isinstance(book.get('org'), dict)):
+                        return {key: book.get(key) for key in ('org', 'org_updated_at')}
+        return {'org': {}, 'org_updated_at': None}
+
+    def _previous_contacts(self):
+        with self._db() as db:
+            pointer = db.execute("SELECT value FROM host_meta WHERE key='contacts_publication_id'").fetchone()
+        for adapter in self.bridge.adapters.values():
+            if not hasattr(adapter, 'store'):
+                continue
+            with adapter.store.db() as db:
+                if pointer:
+                    row = db.execute('SELECT data FROM tx_publication WHERE scope=? AND id=? AND route=? AND uploaded=1',
+                        (adapter.store.scope, pointer['value'], adapter.route)).fetchone()
+                else:
+                    row = db.execute("SELECT data FROM tx_publication WHERE scope=? AND route=? AND uploaded=1 "
+                        "AND json_extract(data,'$.kind')='contacts' ORDER BY rowid DESC LIMIT 1",
+                        (adapter.store.scope, adapter.route)).fetchone()
+            if row:
+                book = json.loads(row['data'])['payload']
+                if book.get('account_uid') == self.binding.account_uid and isinstance(book.get('contacts'), list):
+                    return book['contacts']
+        return []
+
+    def _remember_org(self, payload):
+        from relay.protocol import digest
+        identity = 'contacts-' + digest(payload)[:32]
+        with self._db() as db:
+            db.execute("INSERT INTO host_meta(key,value) VALUES('contacts_publication_id',?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (identity,))
+            if payload.get('org_state') in ('ready', 'empty'):
+                db.execute("INSERT INTO host_meta(key,value) VALUES('org_publication_id',?) "
+                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (identity,))
+
     def _publish_directory(self):
         account = self.port._account()
         if account is None:
             return
+        self.bridge.publish_capabilities()
+        previous = self._previous_org()
         payload = {'account_uid': self.binding.account_uid, 'contacts': account.get('contacts', []),
-                   'org': account.get('org', {}), 'updated_at': self.ledger.clock()}
+                   **previous, 'org_state': 'unreported', 'org_error': None, 'updated_at': self.ledger.clock()}
         if self.contacts_provider is not None:
             try:
                 book = self.contacts_provider(account)
                 if not isinstance(book, dict) or not isinstance(book.get('contacts'), list):
                     raise ValueError('collector_contacts_unavailable')
-                payload.update(contacts=book['contacts'], org=book.get('org', {}))
+                payload['contacts'] = book['contacts']
+                state = book.get('org_state', 'ready' if isinstance(book.get('org'), dict) and
+                                 isinstance(book['org'].get('departments'), list) and
+                                 isinstance(book['org'].get('members'), list) else 'unreported')
+                if state in ('ready', 'empty') and 'org_updated_at' not in book:
+                    book = {**book, 'org_updated_at': self.ledger.clock()}
+                if state in ('ready', 'empty'):
+                    org = book.get('org')
+                    if (not isinstance(org, dict) or not isinstance(org.get('departments'), list)
+                            or not isinstance(org.get('members'), list)
+                            or type(book.get('org_updated_at')) not in (int, float)
+                            or not math.isfinite(book['org_updated_at'])
+                            or book['org_updated_at'] > self.ledger.clock() + 60
+                            or state != ('ready' if org['departments'] or org['members'] else 'empty')):
+                        raise ValueError('collector_org_schema_invalid')
+                    payload.update(org=org, org_state=state, org_updated_at=book['org_updated_at'])
+                else:
+                    payload.update(org_state=state if state in ('error', 'unreported') else 'error',
+                                   org_error=book.get('org_error') or 'ORG_NOT_REPORTED')
             except Exception:
-                log.warning('V2.2 contacts unavailable; preserving previous published directory')
-        if payload['contacts'] or payload['org']:
+                payload.update(contacts=self._previous_contacts(), org_state='error', org_error='ORG_PROVIDER_UNAVAILABLE')
+                log.warning('V2.2 contacts unavailable; preserving previous published organization')
+        from relay.protocol import canonical
+        limit = min(getattr(getattr(adapter, 'codec', None), 'max_bytes', 4 * 1024 * 1024)
+                    for adapter in self.bridge.adapters.values()) - 4096
+        if len(canonical(payload)) > limit:
+            payload.update(previous, org_state='error', org_error='ORG_DOCUMENT_TOO_LARGE')
+        if payload['contacts'] or payload['org'] or payload['org_state'] in ('empty', 'error'):
             for adapter in self.bridge.adapters.values():
                 adapter.publish_contacts(payload)
-        self.bridge.publish_capabilities()
+                self._remember_org(payload)
 
     async def run_once(self):
         async with self._tick_lock:
             await asyncio.to_thread(self._flush_native)
             result = await asyncio.to_thread(self.bridge.run_once)
             if self._active and self._intake_ok and self.legacy_inbox_disabled() and time.monotonic() - self._last_catalog >= 60:
-                await asyncio.to_thread(self._publish_directory)
                 self._last_catalog = time.monotonic()
+                await asyncio.to_thread(self._publish_directory)
             return result
 
     async def _run(self):
@@ -293,12 +374,10 @@ class XunjiaV22Host:
         if not self.legacy_inbox_disabled():
             raise RuntimeError('legacy_xunjia_inbox_must_be_disabled')
         self._active = True
-        self.port.allow_native_send = self.allow_native_send
         self._worker = asyncio.create_task(self._run(), name='xunjia-v22-collector')
 
     async def stop(self):
         self._active = False
-        self.port.allow_native_send = False
         self._wake.set()
         if self._worker is not None:
             # Do not cancel a to_thread native invocation and pretend it never ran.

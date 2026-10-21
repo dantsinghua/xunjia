@@ -1,8 +1,18 @@
 import { defineConfig } from 'vite'
+import { randomUUID } from 'node:crypto'
 import vue from '@vitejs/plugin-vue'
 
-export default defineConfig({
-  plugins: [vue()],
+const buildVersion = randomUUID()
+
+export default defineConfig(({ command }) => ({
+  define: { __XUNJIA_BUILD_VERSION__: JSON.stringify(command === 'build' ? buildVersion : 'development') },
+  plugins: [vue(), {
+    name: 'xunjia-build-version',
+    apply: 'build',
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'assets/build-version.json', source: JSON.stringify({ version: buildVersion }) })
+    },
+  }],
   server: {
     port: 5190,
     // 默认只绑 [::1],127.0.0.1 会 ERR_CONNECTION_REFUSED;绑 0.0.0.0 两个栈都通
@@ -16,4 +26,4 @@ export default defineConfig({
     },
   },
   build: { outDir: 'dist', chunkSizeWarningLimit: 2000 },
-})
+}))
