@@ -17,7 +17,7 @@ def test_rejected_price_can_prompt_clarification_instead_of_stalling_forever(tmp
             return {'schema_version':'2.2','action':'SEND','proposal':{
                 'kind':'CLARIFY','text':'请再确认这只券的可做价格和数量。'}}
     flows=Flows()
-    app=create_app(database_url='sqlite:///'+str(tmp_path/'recovery.db'),enable_background=False,
+    app=create_app(submission_guard=lambda _owner: None, database_url='sqlite:///'+str(tmp_path/'recovery.db'),enable_background=False,
         chatflows=flows,aggregation=Aggregation(0,0,1000,'synthetic-fixture'),auth_config=AuthConfig(clock=lambda:1792202400))
     service=app.state.inquiry;store=app.state.repository;owner='synthetic-owner'
     store.bind_account(owner,'synthetic-account','synthetic-wb')

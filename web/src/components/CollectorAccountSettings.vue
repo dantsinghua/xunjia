@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, type CollectorCatalog, type CollectorContacts, type CollectorSelection } from '../api'
-import { applyCollectorSelection, buildOrgTree, imBoundAccount, imTarget, orgReadNotice, selectImTarget } from '../lib/imLink'
+import { applyCollectorSelection, clearImAccount, buildOrgTree, imBoundAccount, imTarget, orgReadNotice, selectImTarget } from '../lib/imLink'
 import OrgTree from './OrgTree.vue'
 
 const props = withDefaults(defineProps<{ autoLoad?: boolean }>(), { autoLoad: true })
@@ -55,7 +55,7 @@ async function load(refresh = false, silent = false) {
       const item = entry?.accounts.find(a => a.account_uid === saved.value?.account_uid)
       if (item) savedNickname.value = item.account_nick || ''
       else if (!samePair(previous, saved.value)) savedNickname.value = ''
-      if (!samePair(saved.value, imBoundAccount.value)) {
+      if (!samePair(saved.value, imBoundAccount.value) || (saved.value.context_id != null && saved.value.context_id !== imBoundAccount.value?.context_id)) {
         applyCollectorSelection(saved.value, { contacts: [], source: '', org: { departments: [], members: [] } })
       }
       if (!silent || !samePair(previous, saved.value)) {
@@ -63,7 +63,7 @@ async function load(refresh = false, silent = false) {
         accountUid.value = item ? saved.value.account_uid : ''
       }
     } else {
-      workbenchId.value = ''; accountUid.value = ''; savedNickname.value = ''
+      workbenchId.value = ''; accountUid.value = ''; savedNickname.value = ''; clearImAccount()
     }
     if (!silent || !samePair(previous, saved.value)) preview.value = null
     if (response.data.refresh_error) error.value = response.data.refresh_error
@@ -89,7 +89,7 @@ async function connect() {
     saved.value = response.data.binding; savedNickname.value = nickname
     preview.value = response.data.contacts
     applyCollectorSelection(response.data.binding, response.data.contacts)
-    notice.value = response.data.connected === false
+    notice.value = response.data.reset ? '已切换并清空旧业务状态，通讯录和历史仅属于当前账号；不会重发旧消息。' : response.data.connected === false
       ? '已保存工作台和企点号，已读取缓存通讯录；目录过期，尚未确认实时连接。'
       : '已保存选择并读取对应通讯录，发送仍须单独授权。'
     emit('saved')
@@ -97,7 +97,7 @@ async function connect() {
   finally { if (request === actionRequest) busy.value = false }
 }
 async function readSaved() {
-  if (busy.value || loading.value || !saved.value || (institutional.value && (!savedAvailable.value || savedStale.value))) return
+  if (busy.value || loading.value || !saved.value) return
   const pair = { ...saved.value }, request = ++actionRequest
   busy.value = true; error.value = ''; notice.value = ''; preview.value = null
   try {
@@ -131,7 +131,7 @@ async function refreshContacts() {
 async function pollSync() {
   if (syncReading || disposed || !syncPending.value || !saved.value) return
   if (Date.now() >= syncDeadline || savedStale.value) {
-    syncPending.value = false; notice.value = savedStale.value ? '账号已离线，同步尚未完成。' : '尚未收到完整的新版本，请检查采集端状态；上次成功数据保留。'; return
+    syncPending.value = false; notice.value = savedStale.value ? '采集通道状态未确认，同步尚未完成。' : '尚未收到完整的新版本，请检查采集端状态；上次成功数据保留。'; return
   }
   const pair = { ...saved.value }, generation = actionRequest
   syncReading = true
@@ -169,7 +169,7 @@ onBeforeUnmount(() => { disposed = true; catalogRequest++; actionRequest++; sync
       <span>当前已选工作台：<b>{{ saved.workbench_id }}</b></span>
       <span>企点账号：<b>{{ savedNickname ? savedNickname + ' · ' : '' }}{{ saved.account_uid }}</b></span>
       <span v-if="!savedAvailable" class="warning">已保存，目录暂不可用</span>
-      <span v-else-if="savedStale" class="warning" data-testid="collector-offline">{{ institutional ? '已离线，请在采集端恢复登录' : '已保存，目录已过期' }}</span>
+      <span v-else-if="savedStale" class="warning" data-testid="collector-offline">{{ institutional ? '采集通道心跳过期或未就绪，请检查文件中转连接' : '已保存，目录已过期' }}</span>
       <span v-else>目录有效 · {{ when(directorySaved.account?.updated_at || directorySaved.wb?.updated_at) }}</span>
     </div>
     <p v-else>尚未选择采集账号。选择目录中的工作台与企点号后连接。</p>
@@ -177,6 +177,7 @@ onBeforeUnmount(() => { disposed = true; catalogRequest++; actionRequest++; sync
     <p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="catalog?.note">{{ catalog.note }}</p>
     <p v-if="catalog && !catalog.workbenches.length" class="warning">采集端尚未上报可用工作台目录，请确认采集端连接并刷新目录。已保存选择不会因此被清除。</p>
+    <p>更换工作台或企点号会清空旧询价、待发送、暂停及结果未知记录，不迁移、不补发；原样保存和读取通讯录不会清空。</p>
     <form @submit.prevent="connect">
       <fieldset :disabled="loading || busy">
         <label>工作台<select v-model="workbenchId" name="collector-workbench" data-testid="collector-workbench" @change="changedWorkbench">
@@ -189,11 +190,11 @@ onBeforeUnmount(() => { disposed = true; catalogRequest++; actionRequest++; sync
         </select></label>
       </fieldset>
       <p v-if="workbench && !workbench.accounts.length" class="warning">此工作台尚未上报企点账号，请刷新采集端目录。</p>
-      <p v-if="draftStale" class="warning">{{ institutional ? '账号已离线；需先在采集端恢复，不能保存为可用收发账号。' : '目录已过期，可保存选择并读取缓存；尚未确认采集端当前在线，不会因此启用发送。' }}</p>
+      <p v-if="draftStale" class="warning">{{ institutional ? '采集端当前收发状态未确认；请检查文件中转和原生登录状态，暂不能启用发送。' : '目录已过期，可保存选择并读取缓存；尚未确认采集端当前在线，不会因此启用发送。' }}</p>
       <div class="controls">
         <button class="btn-primary" type="submit" data-testid="collector-connect" :disabled="loading || busy || !account || (institutional && draftStale)">保存选择并读取对应通讯录</button>
         <button class="btn-ghost" type="button" data-testid="collector-refresh" :disabled="loading || busy" @click="load(true)">刷新采集端目录</button>
-        <button v-if="saved" class="btn-ghost" type="button" data-testid="collector-read-saved" :disabled="loading || busy || (institutional && (!savedAvailable || savedStale))" @click="readSaved">读取当前已选通讯录</button>
+        <button v-if="saved" class="btn-ghost" type="button" data-testid="collector-read-saved" :disabled="loading || busy" @click="readSaved">读取当前已选通讯录</button>
         <button v-if="institutional && saved" class="btn-ghost" type="button" data-testid="collector-sync-contacts" :disabled="busy || syncPending || savedStale || !savedAvailable" @click="refreshContacts">{{ syncPending ? '正在等待最新通讯录…' : '同步最新通讯录' }}</button>
       </div>
     </form>

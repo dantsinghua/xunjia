@@ -103,7 +103,7 @@ async function save() {
 .strategy-mdl { max-width: 560px; }
 .head { display: flex; align-items: center; justify-content: space-between; }
 .head h2 { margin: 0; font-weight: 900; font-size: 20px; color: #B01C24; }
-.ver { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #1F6B3E; background: rgba(46,125,79,.1); padding: 1px 7px; border-radius: 6px; vertical-align: middle; }
+.ver { font-family: var(--font-ui); font-size: 12px; color: #1F6B3E; background: rgba(46,125,79,.1); padding: 1px 7px; border-radius: 6px; vertical-align: middle; }
 .x { cursor: pointer; width: 30px; height: 30px; border-radius: 50%; border: 1px solid rgba(176, 28, 36,.25); background: rgba(255,255,255,.7); color: #B01C24; display: grid; place-items: center; }
 .x:hover { background: rgba(176, 28, 36,.1); }
 .sub { margin: 6px 0 0; font-size: 12px; color: #A89C90; line-height: 1.6; }

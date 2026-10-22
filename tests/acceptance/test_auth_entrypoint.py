@@ -22,7 +22,7 @@ def sso_body(user="trader-a", *, timestamp=NOW):
 
 @pytest.fixture
 def application(tmp_path):
-    from server.legacy_app import create_app
+    from server.app import create_app
     from server.auth import AuthConfig
 
     return create_app(
@@ -98,7 +98,7 @@ def test_token_tampering_cannot_impersonate_another_trader(application):
 
 
 def test_unconfigured_auth_has_no_default_login_secret(tmp_path):
-    from server.legacy_app import create_app
+    from server.app import create_app
 
     app = create_app(database_url="sqlite:///" + str(tmp_path / "unconfigured.db"))
     with TestClient(app) as client:
@@ -118,7 +118,7 @@ def test_anonymous_health_does_not_expose_credentials(application):
 
 
 def test_session_expires_at_the_exact_deadline(tmp_path):
-    from server.legacy_app import create_app
+    from server.app import create_app
     from server.auth import AuthConfig
 
     clock = [NOW]

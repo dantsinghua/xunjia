@@ -6,6 +6,7 @@ import Monitor from '../../src/pages/Monitor.vue'
 import Rfq from '../../src/components/RfqAssignModal.vue'
 import { imLinks } from '../../src/lib/imLink'
 import { buildBonds } from './fixtures'
+import { monitorTradeDay } from '../../src/lib/monitorBonds'
 
 const response=(data:unknown)=>new Response(JSON.stringify(data))
 const scopes:ReturnType<typeof effectScope>[]=[]
@@ -175,7 +176,7 @@ test('更早批次回执不能覆盖新批次且错误cmd_id不改变状态',asy
 })
 
 test('首批券卡与默认展开状态同时出现，之后刷新不反转用户折叠选择',async()=>{
-  globalThis.fetch=async(url)=>response({ok:true,data:String(url).includes('/counterparties')?[{id:'peer',name:'对手',bonds:[{code:'A.IB',session_id:'ma'}]}]:{stats:[],messages:[]}})
+  globalThis.fetch=async(url)=>response({ok:true,data:String(url).includes('/counterparties')?[{id:'peer',name:'对手',bonds:[{code:'A.IB',session_id:'ma',stage:'询价中',trade_day:monitorTradeDay()}]}]:{stats:[],messages:[]}})
   const {vm,scope}=setup(Monitor);await vm.reloadDesk()
   assert.equal(vm.activeBond.value,'A.IB');assert.equal(vm.openBonds['A.IB'],true)
   vm.toggleBond('A.IB');await vm.reloadDesk();assert.notEqual(vm.openBonds['A.IB'],true);scope.stop()

@@ -226,7 +226,7 @@ def test_legacy_partial_move_is_restored(setup,monkeypatch):
     assert not m.unfinished()
 def test_public_tool_template_requires_no_token():
     import yaml
-    path=ROOT/'dify/chatflow_1171/public-tools.openapi.yml'
+    path=ROOT/'dify/negotiation_v22/public-tools.openapi.yml'
     spec=yaml.safe_load(path.read_text(encoding='utf8'))
     assert len(spec['paths'])==4 and not spec.get('security')
 def test_other_services_and_unsafe_prefix_rejected(tmp_path):

@@ -222,7 +222,11 @@ def test_t07_real_diagnostic_failure_cannot_skip_primary_cleanup(tmp_path, failu
             script = 'import os,runpy;os.environ.update('+repr(setup)+');runpy.run_path('+repr(str(FIXTURE))+',run_name="__main__")'
         else:
             script = 'import sys;sys.stderr.write("SYNTHETIC_DIAGNOSTIC_ERROR\\n");sys.exit(19)'
-        result = run(case, diagnostic_command=[sys.executable, '-c', script], diagnostic_timeout=0.15)
+        # The timeout case must actually start its diagnostic child before it
+        # proves cleanup. 150ms can expire during Python/runpy startup on the
+        # loaded CI host, before the ownership registry exists. Keep a bounded
+        # 750ms diagnostic budget and all original cleanup/<3s assertions.
+        result = run(case, diagnostic_command=[sys.executable, '-c', script], diagnostic_timeout=0.75)
         assert result['timed_out'] and result['exit_code'] == 124 and not result['passed']
         assert result['elapsed_seconds'] < 3 and result['errors']
         assert 'diagnos' in json.dumps(result).lower()

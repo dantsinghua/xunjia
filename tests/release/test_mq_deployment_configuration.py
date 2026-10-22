@@ -18,7 +18,9 @@ def changed_template(tmp_path,key,value):
 
 def test_mq_quote_and_login_template_defaults_remain_secret_free_and_closed():
     values=template_is_clean(ROOT/'config/xunjia.env.example')
-    assert values['XUNJIA_MQ_CONNECTION_CONFIG']==''
+    assert values['XUNJIA_INSTITUTION_CONFIG']==''
+    assert 'XUNJIA_MQ_CONNECTION_CONFIG' not in values
+    assert 'XUNJIA_TRANSPORT_CONFIG' not in values
     assert values['QB_MYSQL_PASSWORD']==''
     assert values['XUNJIA_RUN_BACKGROUND']=='1'
     assert 'XUNJIA_ENABLE_LIVE_TRANSPORT' not in values
@@ -45,9 +47,11 @@ def test_unregistered_template_fields_still_fail_closed(tmp_path):
 
 
 def test_files_mq_configuration_example_is_an_offline_package_input():
-    relative='config/mq-connection.example.json'
+    relative='config/institution-connection.example.json'
     files=input_files(ROOT)
     assert files[relative]==ROOT/relative and files[relative].is_file()
+    assert 'config/mq-connection.example.json' not in files
+    assert 'app/server/transport_config.py' not in files
 
 
 def test_template_default_dispatch_cannot_be_silently_disabled(tmp_path):
@@ -58,5 +62,22 @@ def test_template_default_dispatch_cannot_be_silently_disabled(tmp_path):
 def test_obsolete_extra_dispatch_switch_cannot_enter_shipping_template(tmp_path):
     path=tmp_path/'xunjia.env.example'
     path.write_text((ROOT/'config/xunjia.env.example').read_text()+"\nXUNJIA_ENABLE_LIVE_TRANSPORT='0'\n")
+    with pytest.raises(DeployError,match='UNKNOWN_TEMPLATE_FIELD'):
+        template_is_clean(path)
+
+
+def test_removed_manager_allowlist_is_not_shipped_or_accepted(tmp_path):
+    values=template_is_clean(ROOT/'config/xunjia.env.example')
+    assert 'XUNJIA_QUOTE_MANAGERS' not in values
+    path=tmp_path/'xunjia.env.example'
+    path.write_text((ROOT/'config/xunjia.env.example').read_text()+'\nXUNJIA_QUOTE_MANAGERS=synthetic-user\n')
+    with pytest.raises(DeployError,match='UNKNOWN_TEMPLATE_FIELD'):
+        template_is_clean(path)
+
+
+@pytest.mark.parametrize('key',['XUNJIA_MQ_CONNECTION_CONFIG','XUNJIA_TRANSPORT_CONFIG'])
+def test_retired_connection_template_fields_cannot_be_shipped(tmp_path,key):
+    path=tmp_path/'xunjia.env.example'
+    path.write_text((ROOT/'config/xunjia.env.example').read_text()+'\n'+key+'=old.json\n')
     with pytest.raises(DeployError,match='UNKNOWN_TEMPLATE_FIELD'):
         template_is_clean(path)

@@ -1,6 +1,7 @@
 /** 当前采集端。意向询价和机器人监控读同一份：测试通过的那一条。 */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { authFetch } from './http'
+import { setChannelContext } from './channelContext'
 
 export interface ImAccount {
   id: string
@@ -27,6 +28,7 @@ export interface OrgTreeNode {
   members: OrgMember[]
 }
 export interface ImLink {
+  context_id?: string
   id: string
   name: string
   mode: 'local' | 'lan' | 'public' | 'oss' | 'mail'
@@ -200,15 +202,16 @@ export const imHealthError = ref('')
 export function clearImState() {
   linkGeneration++; imBinding.value = null; imLinks.value = []; imHints.value = {}; applyLinkBook(null); imFeedError.value = ''; imHealthError.value = ''
 }
-export interface BoundAccount { account_uid: string; workbench_id: string; id?: string; version?: number; account_nick?: string }
+export interface BoundAccount { context_id?: string; account_uid: string; workbench_id: string; id?: string; version?: number; account_nick?: string }
 export const imBinding = ref<BoundAccount | null>(null)
 export const imBoundAccount = computed<BoundAccount | null>(() => {
   const link = imLinks.value.find(x => x.active && (x.account_uid || x.account?.self_uid))
-  return link ? { id:link.id, account_uid:link.account_uid || link.account?.self_uid || '', workbench_id:link.workbench_id || '', account_nick:link.account_nick, version:(link as ImLink & {version?:number}).version } : imBinding.value
+  return link ? { context_id:link.context_id, id:link.id, account_uid:link.account_uid || link.account?.self_uid || '', workbench_id:link.workbench_id || '', account_nick:link.account_nick, version:(link as ImLink & {version?:number}).version } : imBinding.value
 })
+watch(imBoundAccount, value => setChannelContext(value?.context_id || ''), { immediate: true, flush: 'sync' })
 export function setImBinding(raw: unknown, accountUid: string | null): void {
   const b = raw && typeof raw === 'object' ? raw as Record<string,unknown> : {}
-  imBinding.value = accountUid ? { account_uid:accountUid, workbench_id:String(b.workbench_id || ''), version:typeof b.version === 'number' ? b.version : undefined } : null
+  imBinding.value = accountUid ? { context_id:String(b.context_id || ''), account_uid:accountUid, workbench_id:String(b.workbench_id || ''), version:typeof b.version === 'number' ? b.version : undefined } : null
 }
 export const imCurrent = computed(() => imLinks.value.find(x => x.active && x.tested) || null)
 export const imReady = computed(() => imLinks.value.filter(x => x.tested))
@@ -250,6 +253,7 @@ export async function loadImLinks() {
   if (!r.ok || data.ok === false) throw new Error(data.hint || '读通道失败')
   if (request !== linkGeneration) return
   imLinks.value = data.data.links || []
+  if (!imLinks.value.some(link => link.active)) clearImAccount()
   imHealthError.value = ''
   imHints.value = data.hints || {}
   if (previous !== `${imCurrent.value?.id}:${imIdentity(imCurrent.value).uid}:${imCurrent.value?.workbench_id}`) applyLinkBook(imCurrent.value)
@@ -267,7 +271,15 @@ export async function activateIm(id: string) {
 
 function bindingIdentity(): string {
   const selected = imBoundAccount.value
-  return JSON.stringify([selected?.workbench_id, selected?.account_uid, selected?.version])
+  return JSON.stringify([selected?.workbench_id, selected?.account_uid, selected?.version, selected?.context_id])
+}
+
+export function clearImAccount(): void {
+  linkGeneration++
+  imLinks.value = []; imBinding.value = null
+  imContacts.value = []; imOrg.value = { departments: [], members: [] }
+  imOrgStatus.value = {}; imContactSource.value = ''; imTarget.value = null
+  imFeedError.value = ''; setChannelContext('')
 }
 
 /** Apply the server-confirmed pair before any channel/contact reload can return. */

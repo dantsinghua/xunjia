@@ -104,7 +104,7 @@ def select_system_prompt(context, stage):
                        and direct_price_question(m.get('text',''),codes)]
             if questions:
                 return ('本轮这些当前消息是完整的“能/可以/能否＋价量”询问：'+json.dumps(questions,ensure_ascii=False)+
-                        '。其meaning.intent必须QUESTION，不能把问价提交为QUOTE/FINAL；保价量及原文证据。其他消息仍独立联合核对。\n'+_SYSTEMS[stage]['ordinary'])
+                        '。其meaning.intent必须QUESTION，不能把问价提交为QUOTE/FINAL；保价量及原文证据。完整价量问句不是只补结算日的补充回答：每条meaning必须恰好包含intent、validity、negotiation_space、reason四个字段；不得只给intent和reason。validity只选ACTIVE/WITHDRAWN/UNCONFIRMED；negotiation_space只选UNKNOWN/NEGOTIABLE/FINAL，依据原文而非猜测。其他消息仍独立联合核对。\n'+_SYSTEMS[stage]['ordinary'])
             explicit=bool(codes) and all(any(code in m.get('text','') for code in codes) for m in context.get('messages',[]))
             if explicit:
                 return '本轮消息已明确出现已知成员券码，不请求工具、不查询资料。只提交当前事实/待确认缺口；资料问答由B接续。\n'+_SYSTEMS[stage]['ordinary']

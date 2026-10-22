@@ -14,7 +14,7 @@ import pytest
 
 from collector import qb_gateway
 from collector.store import Q_COLS, T_COLS
-from imlink.quote_source import save_quote, snapshot
+from server.quote_credentials import save_quote, snapshot
 from server import market_cache, qb_source
 from server.app import create_app
 from server.auth import AuthConfig, AuthUser
@@ -53,7 +53,7 @@ def test_authentication_envelope_and_network_failures_are_distinct(
         async def session(values, update):
             await managed_session.collect(values, update, {})
 
-        control = QuoteControl(directory=tmp_path, reader=object(), managers=['manager'],
+        control = QuoteControl(directory=tmp_path, reader=object(),
                                session=session, db_check=lambda: {'ok': True})
         try:
             await control.start('manager')
@@ -157,7 +157,7 @@ def recovery(tmp_path, monkeypatch):
               'QB_MYSQL_USER': 'synthetic-user', 'QB_MYSQL_PASSWORD': 'synthetic-password',
               'QB_MYSQL_DB': 'synthetic-existing-db', 'XUNJIA_QUOTE_SOURCE': 'qb',
               'XUNJIA_QUOTE_CACHE': str(tmp_path / 'market.db'),
-              'XUNJIA_QUOTE_MANAGERS': 'manager', 'XUNJIA_QUOTE_AUTOSTART': '1'}
+              'XUNJIA_QUOTE_AUTOSTART': '1'}
     for key, value in values.items(): monkeypatch.setenv(key, value)
     database = ExistingQuoteDatabase()
     monkeypatch.setattr(pymysql, 'connect', database.connect)

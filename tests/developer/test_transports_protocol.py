@@ -1,7 +1,7 @@
 """开发者协议红绿测试；所有密钥/身份均为合成值。"""
 import json
 import pytest
-from imlink.crypto import open_sealed, seal
+from tests.protocol_crypto import open_sealed, seal
 from relay.protocol import Binding, Codec, ProtocolError, envelope
 
 B = Binding('owner-a', 'account-a', 'workbench-a', b's'*32, b'h'*32)

@@ -271,7 +271,7 @@ def test_model_snapshot_does_not_swallow_message_arriving_during_analysis(desk):
 
 def test_default_dispatches_confirmed_command_with_a_capable_transport(tmp_path):
     clock, flows, transport = Clock(), FakeFlows(), FakeNative()
-    app = create_app(database_url="sqlite:///" + str(tmp_path / "default-off.db"),
+    app = create_app(submission_guard=lambda _owner:None, database_url="sqlite:///" + str(tmp_path / "default-off.db"),
         auth_config=AuthConfig(sso_secret="synthetic-sso", session_secret="synthetic-session-at-least-32-characters", clock=clock),
         enable_background=False, chatflows=flows, transport=transport,
         aggregation=Aggregation(0, 0, 1000, "synthetic-fixture-only"))

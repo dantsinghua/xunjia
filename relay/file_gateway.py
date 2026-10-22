@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -117,16 +118,16 @@ def filename(header):
         raise FileGatewayError("FILE_DOWNLOAD_NAME_INVALID", ambiguous=True) from None
 
 class FileGatewayClient:
-    def __init__(self, base_url, auth, *, allow_http=False, timeout=15, max_bytes=4*1024*1024, opener=None, clock=time.time, path=None):
-        if type(allow_http) is not bool or not isinstance(base_url, str):
+    def __init__(self, base_url, auth, *, timeout=15, max_bytes=4*1024*1024, opener=None, clock=time.time, path=None, ssl_context=None):
+        if not isinstance(base_url, str):
             raise FileGatewayError("FILE_GATEWAY_CONFIG_INVALID")
         try:
             url = urllib.parse.urlsplit(base_url); port = url.port
-            if url.scheme not in (("https", "http") if allow_http else ("https",)) or not url.hostname or url.username or url.password or url.query or url.fragment:
+            if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
                 raise ValueError()
             if any(c.isspace() for c in base_url) or ".." in url.path.split("/") or "%" in url.path:
                 raise ValueError()
-            if url.path.rstrip("/").endswith("/api/files"):
+            if url.path not in ("", "/"):
                 raise ValueError()
         except ValueError:
             raise FileGatewayError("FILE_GATEWAY_URL_INVALID") from None
@@ -136,16 +137,23 @@ class FileGatewayClient:
             raise FileGatewayError("FILE_GATEWAY_SIZE_INVALID")
         if path is not None and (not isinstance(path, str) or re.fullmatch(r'[A-Za-z0-9_-]{1,20}', path) is None):
             raise FileGatewayError('FILE_GATEWAY_PATH_INVALID')
+        if ssl_context is not None and (not isinstance(ssl_context, ssl.SSLContext)
+                or not ssl_context.check_hostname or ssl_context.verify_mode != ssl.CERT_REQUIRED):
+            raise FileGatewayError("FILE_TLS_VERIFICATION_REQUIRED")
+        if ssl_context is not None and url.scheme != "https":
+            raise FileGatewayError("FILE_TLS_HTTPS_REQUIRED")
+        if opener is None and ssl_context is None:
+            raise FileGatewayError("FILE_TLS_CLIENT_CERT_REQUIRED")
         self.path = path
         self.base_url, self.auth, self.timeout, self.max_bytes, self.clock = base_url.rstrip("/"), auth, timeout, max_bytes, clock
         self.queue_identity = (url.scheme.lower(), url.hostname.lower(), port or (443 if url.scheme == "https" else 80), url.path.rstrip("/"))
         if path is not None:
             self.queue_identity += (path, hashlib.sha256(auth.key.encode("utf8")).hexdigest())
-        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), urllib.request.HTTPSHandler(context=ssl_context))
 
     def _request(self, operation, body=None, content_type=None):
         mutation = operation != "pending"
-        headers = {"access_token": self.auth.token(now=self.clock()), "Cache-Control": "no-store"}
+        headers = {"accesstoken": self.auth.token(now=self.clock()), "Cache-Control": "no-store"}
         if content_type:
             headers["Content-Type"] = content_type
         suffix = '?' + urllib.parse.urlencode({'path': self.path}) if self.path is not None else ''
@@ -175,7 +183,17 @@ class FileGatewayClient:
                 return status, dict(response.headers), data
         except FileGatewayError:
             raise
-        except (OSError, urllib.error.URLError, http.client.HTTPException):
+        except ssl.SSLCertVerificationError:
+            raise FileGatewayError("FILE_TLS_SERVER_CERT_INVALID") from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, ssl.SSLCertVerificationError):
+                raise FileGatewayError("FILE_TLS_SERVER_CERT_INVALID") from None
+            if isinstance(exc.reason, ssl.SSLError):
+                raise FileGatewayError("FILE_TLS_HANDSHAKE_FAILED", ambiguous=mutation) from None
+            raise FileGatewayError("FILE_GATEWAY_OUTCOME_UNKNOWN" if mutation else "FILE_GATEWAY_UNAVAILABLE", ambiguous=mutation) from None
+        except ssl.SSLError:
+            raise FileGatewayError("FILE_TLS_HANDSHAKE_FAILED", ambiguous=mutation) from None
+        except (OSError, http.client.HTTPException):
             raise FileGatewayError("FILE_GATEWAY_OUTCOME_UNKNOWN" if mutation else "FILE_GATEWAY_UNAVAILABLE", ambiguous=mutation) from None
 
     def pending(self):

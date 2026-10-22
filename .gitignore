@@ -34,3 +34,6 @@ config/xunjia.env
 /web/tests/out/
 /docs/implementation/test-logs/
 *.incomplete
+# Deployment-owned mTLS credentials; never ship real certificates or keys.
+/ny_its_relay.key
+/ny_its_relay.crt

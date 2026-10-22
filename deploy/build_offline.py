@@ -29,12 +29,12 @@ def template_is_clean(path):
     if any(values.get(key) for key in secrets): raise DeployError('TEMPLATE_CONTAINS_SECRET')
     known={'XUNJIA_DATABASE_URL','XUNJIA_HOST','XUNJIA_PORT','XUNJIA_WEB_DIST','XUNJIA_STATE_DIR',
            'XUNJIA_RUN_BACKGROUND','XUNJIA_QUOTE_SOURCE',
-           'XUNJIA_TRANSPORT_CONFIG','XUNJIA_MQ_CONNECTION_CONFIG','XUNJIA_MQ_ALLOW_HTTP','XUNJIA_DIFY_URL','XUNJIA_ALLOWED_ORIGINS',
+           'XUNJIA_INSTITUTION_CONFIG','XUNJIA_MQ_ALLOW_HTTP','XUNJIA_DIFY_URL','XUNJIA_ALLOWED_ORIGINS',
            'XUNJIA_AGGREGATION_PROFILE','XUNJIA_REFERENCE_CONFIG',
            'XUNJIA_BOND_CONTEXT_MESSAGES','XUNJIA_DIFY_STAGE_BUDGET_SECONDS','XUNJIA_DIFY_TIMEOUT_SECONDS',
            'XUNJIA_VALUATION_REFRESH_SECONDS','XUNJIA_AUTH_DEV_LOGIN','XUNJIA_DEV_USER_NAME','XUNJIA_DEV_NICK_NAME',
            'QB_CONFIG_DIR','QB_MYSQL_HOST','QB_MYSQL_PORT','QB_MYSQL_USER','QB_MYSQL_DB',
-           'XUNJIA_QUOTE_CACHE','XUNJIA_QUOTE_MANAGERS','XUNJIA_QUOTE_AUTOSTART',*secrets}
+           'XUNJIA_QUOTE_CACHE','XUNJIA_QUOTE_AUTOSTART',*secrets}
     if set(values)-known:raise DeployError('UNKNOWN_TEMPLATE_FIELD')
     if values.get('XUNJIA_RUN_BACKGROUND')!='1':
         raise DeployError('TEMPLATE_BACKGROUND_DISABLED')
@@ -43,7 +43,7 @@ def template_is_clean(path):
     return values
 def input_files(root):
     files={}
-    for module in ('server','imlink','relay','collector'):
+    for module in ('server','relay','collector'):
         for source in sorted((root/module).rglob('*')):
             if source.suffix=='.py' or module=='collector' and source.suffix=='.sql':
                 if source.is_file() and '__pycache__' not in source.parts:
@@ -54,13 +54,12 @@ def input_files(root):
             if source.is_file() and source.suffix in exts and '__pycache__' not in source.parts:
                 # Preserve the concurrent, unreviewed local candidate on disk;
                 # the measured production A/B package is negotiation_v22.
-                if folder=='dify' and source.relative_to(root/folder).parts[0]=='chatflow_v22':continue
                 files[source.relative_to(root).as_posix()]=source
     collector_source_manifest=root/'deploy/collector-qtrade-v22/manifest.json'
     if collector_source_manifest.is_file():
         files['deploy/collector-qtrade-v22/manifest.json']=collector_source_manifest
     for name in ('requirements.lock','requirements-dev.lock','config/xunjia.env.example',
-                 'config/README.md','config/transport.example.json','config/mq-connection.example.json'):
+                 'config/README.md','config/institution-connection.example.json'):
         files[name]=root/name
     measured=root/'config/aggregation-profile.measured.json'
     provenance=root/'config/aggregation-measurement.json'
@@ -85,7 +84,7 @@ def input_files(root):
     for folder in ('cutover','negotiation','benchmarks'):
         for source in sorted((root/'tests'/folder).glob('*.py')):
             files['tests/'+folder+'/'+source.name]=source
-    for name in ('test_dify0153_canvas_20261015.py','test_oceanbase_schema_sql_20261015.py',
+    for name in ('test_oceanbase_schema_sql_20261015.py',
                  'test_public_market_tools_20261016.py','test_sts_bucket_decoupling_20261015.py'):
         files['tests/acceptance/'+name]=root/'tests/acceptance'/name
     return files

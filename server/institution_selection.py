@@ -1,15 +1,25 @@
-﻿"""Institution-visible discovery with one account per authenticated workspace."""
+"""Institution-visible discovery with one account per authenticated workspace."""
 from __future__ import annotations
 import json
 import uuid
 from relay.gateway_paths import CONTRACT
 from relay.protocol import token
-from .collector_selection import CollectorSelection
 
-class InstitutionSelection(CollectorSelection):
+class InstitutionSelection:
     def __init__(self, repository, transport, runtime):
         self.repository,self.transport,self.institution=repository,transport,runtime
-        self.runtime=None;self._lock=runtime._lock
+        self._lock=runtime._lock
+
+    def _record_check(self, tx, owner, binding, book, route='oss'):
+        row=tx.execute('SELECT config_json FROM xj2_binding WHERE owner_id=?',(owner,)).fetchone()
+        preferences=json.loads(row['config_json'])
+        checks=preferences.setdefault('collector_directory_checks',{})
+        checks[route]={'workbench_id':binding['workbench_id'],'account_uid':binding['account_uid'],
+                       'version':binding['version'],'stale':bool(book.get('stale',True)),
+                       'updated_at':book.get('updated_at'),'checked_at':self.repository.clock(),
+                       'publication_id':book.get('publication_id'),'publication_hash':book.get('publication_hash')}
+        tx.execute('UPDATE xj2_binding SET config_json=? WHERE owner_id=?',
+                   (json.dumps(preferences,ensure_ascii=False,separators=(',',':')),owner))
 
     @property
     def configured(self):return True
@@ -24,24 +34,30 @@ class InstitutionSelection(CollectorSelection):
         if refresh:self.institution.tick()
         result=self.institution.directory.catalog()
         failures=sorted(set(str(value)[:120] for value in self.institution.errors.values()))
-        return {**result,"selected":selected,"refresh_error":("文件中转接收未完成："+", ".join(failures)) if failures else "","note":"目录按10秒心跳更新，超过60秒标记已离线"}
+        return {**result,"selected":selected,"refresh_error":("文件中转接收未完成："+", ".join(failures)) if failures else "","note":"目录按10秒心跳更新，超过60秒标记心跳过期；企点登录状态以采集端原生界面核验为准"}
 
     def require_online(self, owner):
         self._ready();b=self.repository.binding_for(owner)
         if not b:raise ValueError("请先选择当前工作台使用的企点号")
-        if not self.institution.online(b["workbench_id"],b["account_uid"]):raise PermissionError("所选企点号已离线；请在采集端恢复登录后继续操作")
+        channel=self.institution.availability(b["workbench_id"],b["account_uid"])
+        if not channel["ready"]:raise ValueError(channel["hint"])
         return b
 
     def contacts(self, owner, *, refresh=False):
-        b=self.require_online(owner)
+        self._ready();b=self.repository.binding_for(owner)
+        if not b:raise ValueError("请先选择当前工作台使用的企点号")
         if refresh:
-            adapter=self.institution.install(owner,b["workbench_id"],b["account_uid"])
+            self.require_online(owner)
+            adapter=self.institution.current_adapter(owner)
+            if adapter is None:raise ValueError("当前账号尚未完成接入，请保存选择；未提交同步请求")
             adapter.publish_manifest({"contract":CONTRACT,"op":"sync_contacts","organization":True,"request_id":uuid.uuid4().hex})
         book=self.institution.directory.contacts(b["workbench_id"],b["account_uid"],owner)
         with self.repository.write(owner) as tx:
             current=self.repository.require_binding(tx,owner)
-            if all(current[k]==b[k] for k in ("account_uid","workbench_id","version")):self._record_check(tx,owner,current,book)
-        if refresh:book["refresh_requested"]=True;book["note"]="同步请求已提交；当前返回的是最近成功缓存，等待采集端回传新版本"
+            if any(current[k]!=b[k] for k in ("account_uid","workbench_id","version")):
+                raise ValueError("当前账号已变化，请重新读取通讯录")
+            self._record_check(tx,owner,current,book)
+        if refresh:book["refresh_requested"]=True;book["note"]="同步请求已提交，等待采集端回传；旧业务不会迁入"
         return book
 
     def freshness(self, owner):
@@ -61,50 +77,55 @@ class InstitutionSelection(CollectorSelection):
         current=self.repository.binding_for(owner)
         if (current["version"] if current else 0)!=version:raise ValueError("当前选择已变化，请刷新后重试")
         row=self.institution.directory.account(wb,uid)
-        if not row or not row["available"]:raise ValueError("该企点号不在线或存在重复登录状态，请在采集端恢复后重试")
+        channel=self.institution.availability(wb,uid)
+        if not channel["ready"]:raise ValueError(channel["hint"])
         if "negotiation-v22-watermark" not in row.get("capabilities",[]):raise ValueError("采集端尚未就绪，不能创建发送通道")
         return wb,uid,version,current
 
-    def _switch_allowed(self, tx, owner, old):
-        if old is None:return
-        reset=self.repository._account_reset(tx,owner,old["account_uid"])
-        if reset and reset["state"]!="complete":raise ValueError("当前账号的会话同步尚未完成")
-        control=tx.execute("SELECT send_allowed FROM xj2_owner WHERE owner_id=?",(owner,)).fetchone()
-        groups=tx.execute("SELECT group_id FROM xj2_group WHERE owner_id=? AND archived=0 AND state=? AND send_allowed=1 LIMIT 1",(owner,"OPEN")).fetchone()
-        peers=tx.execute("SELECT p.member_id FROM xj2_peer p JOIN xj2_group g ON g.group_id=p.group_id WHERE g.owner_id=? AND g.archived=0 AND g.state=? AND p.send_allowed=1 LIMIT 1",(owner,"OPEN")).fetchone()
-        pending=tx.execute("SELECT c.command_id FROM xj2_command c JOIN xj2_thread t ON t.thread_id=c.thread_id WHERE t.owner_id=? AND c.state IN (?,?,?) LIMIT 1",(owner,"QUEUED","PENDING","UNKNOWN")).fetchone()
-        if control["send_allowed"] or groups or peers or pending:raise ValueError("请先停止机器人及券组发送并完成在途命令对账，再切换账号；UNKNOWN不会被清除")
-
     def select(self, owner, body):
+        from .fresh_state import clear_workspace
         with self._lock:
             wb,uid,version,previous=self._candidate(owner,body)
             book=self.institution.directory.contacts(wb,uid,owner)
-            # Construct only; no remote consume/send or runtime replacement until commit.
-            staged=self.institution.adapter(owner,wb,uid)
+            old_adapter=self.institution.current_adapter(owner)
+            old_prefs=self.repository.preferences(owner) if previous else {}
+            same=bool(previous and (previous["workbench_id"],previous["account_uid"])==(wb,uid))
+            reset=bool(previous and (not same or old_prefs.get("relay_contract")!=CONTRACT
+                or old_prefs.get("relay_institution_id")!=self.institution.keys.institution_id
+                or not old_prefs.get("context_id")))
+            fresh=not previous or reset
+            preferences=dict(old_prefs) if not fresh else {}
+            if fresh:
+                preferences.update(context_id=uuid.uuid4().hex,context_version=max(int(self.repository.clock()*1000000),int(old_prefs.get("context_version",0))+1),
+                    context_started_at=self.repository.clock(),context_ready=False)
+            preferences.update(relay_contract=CONTRACT,relay_institution_id=self.institution.keys.institution_id,
+                collector_account_id=self.institution.directory.account(wb,uid)["account_id"])
+            staged=self.institution.adapter(owner,wb,uid,preferences=preferences)
             with self.repository.write(owner) as tx:
                 old=tx.execute("SELECT * FROM xj2_binding WHERE owner_id=?",(owner,)).fetchone()
-                if (int(old["version"]) if old else 0)!=version:raise ValueError("账号选择版本已变化")
+                if (int(old["version"]) if old else 0)!=version:raise ValueError("账号选择已变化，请刷新后重试")
                 occupied=tx.execute("SELECT owner_id FROM xj2_binding WHERE account_uid=?",(uid,)).fetchone()
-                if occupied and occupied["owner_id"]!=owner:raise ValueError("该企点号正在另一已登录工作台使用，请先在原工作台停止并切换")
-                same=bool(old and (old["workbench_id"],old["account_uid"])==(wb,uid))
-                preferences=json.loads(old["config_json"]) if old else {}
-                if not same or preferences.get("relay_contract")!=CONTRACT:self._switch_allowed(tx,owner,old)
+                if occupied and occupied["owner_id"]!=owner:raise ValueError("该企点号正在另一个工作台使用")
                 if not self.institution.online(wb,uid):raise ValueError("采集端状态已变化，请刷新后重试")
-                preferences["relay_contract"]=CONTRACT
-                preferences["relay_institution_id"]=self.institution.keys.institution_id
+                removed=clear_workspace(tx,owner) if reset else {}
                 if old:
-                    tx.execute("UPDATE xj2_binding SET account_uid=?,workbench_id=?,transport=?,version=version+?,config_json=? WHERE owner_id=?",(uid,wb,"oss",0 if same else 1,json.dumps(preferences,ensure_ascii=False),owner))
+                    tx.execute("UPDATE xj2_binding SET account_uid=?,workbench_id=?,transport=?,version=version+?,config_json=? WHERE owner_id=?",
+                        (uid,wb,"oss",1 if reset else 0,json.dumps(preferences,ensure_ascii=False),owner))
                 else:
-                    tx.execute("INSERT INTO xj2_binding(owner_id,account_uid,workbench_id,transport,version,config_json) VALUES(?,?,?,?,1,?)",(owner,uid,wb,"oss",json.dumps(preferences,ensure_ascii=False)))
-                if not same:
-                    tx.execute("UPDATE xj2_owner SET send_allowed=0,control_version=control_version+1 WHERE owner_id=?",(owner,))
-                    tx.execute("UPDATE xj2_group SET send_allowed=0,control_version=control_version+1 WHERE owner_id=?",(owner,))
-                    tx.execute("UPDATE xj2_peer SET send_allowed=0,control_version=control_version+1 WHERE group_id IN (SELECT group_id FROM xj2_group WHERE owner_id=?)",(owner,))
+                    tx.execute("INSERT INTO xj2_binding(owner_id,account_uid,workbench_id,transport,version,config_json) VALUES(?,?,?,?,1,?)",
+                        (owner,uid,wb,"oss",json.dumps(preferences,ensure_ascii=False)))
+                    tx.execute("UPDATE xj2_owner SET send_allowed=0 WHERE owner_id=?",(owner,))
                 current=self.repository.require_binding(tx,owner);self._record_check(tx,owner,current,book)
-                self.repository.audit(tx,owner,"institution_account_selected",uid,{"workbench_id":wb,"contract":CONTRACT})
+                self.repository.audit(tx,owner,"workspace_reset" if reset else "institution_account_selected",uid,
+                    {"workbench_id":wb,"contract":CONTRACT,"removed_counts":removed})
             self.transport.adapters={k:v for k,v in self.transport.adapters.items() if k[0]!=owner or k[2]!="oss"} | {(owner,uid,"oss"):staged}
+            if reset and old_adapter is not None:self.institution.retire_context(old_adapter,notify=not same)
+            if fresh:self.institution.request_context(staged)
             binding=self.repository.binding_for(owner)
-            return {"binding":binding,"selected":{k:binding[k] for k in ("workbench_id","account_uid","version")},"contacts":book,"connected":True,"note":"账号已选择；使用机构内置独立收发路径，发送仍遵循原有授权规则"}
+            binding={**binding,"context_id":preferences["context_id"]}
+            return {"binding":binding,"selected":{k:binding[k] for k in ("workbench_id","account_uid","version")},
+                "contacts":book,"connected":True,"reset":reset,"removed_counts":removed,
+                "send_ready":bool(staged.context_ready),"note":"已清空旧业务并切换账号；原生历史按当前号读取" if reset else "已保存选择并读取通讯录"}
 
     def files(self, owner, *, before=None, limit=50):
         import hashlib
@@ -113,7 +134,8 @@ class InstitutionSelection(CollectorSelection):
         b=self.require_online(owner)
         if type(limit) is not int or not 1<=limit<=100:raise ValueError("文件分页大小无效")
         if before is not None and (type(before) is not int or not 1<=before<=9223372036854775807):raise ValueError("文件分页游标无效")
-        adapter=self.institution.install(owner,b["workbench_id"],b["account_uid"])
+        adapter=self.institution.current_adapter(owner)
+        if adapter is None:raise ValueError("当前账号尚未完成接入，请保存选择")
         cursor=before if before is not None else 9223372036854775807
         items=[]; scanned=0; exhausted=False
         # Both lanes are local retained journals. Reading never consumes a queue.
@@ -130,6 +152,7 @@ class InstitutionSelection(CollectorSelection):
                     try:
                         blob=bytes(row["blob"]);env=adapter.codec._authenticated(blob)
                         adapter.codec._validate(env,allow_expired=True)
+                        if env["kind"]=="manifest" and env["payload"].get("op") in ("activate_context","context_ready","data_ack"):continue
                     except (ProtocolError,ValueError,TypeError):continue
                     if row["outgoing"]:
                         identity=hashlib.sha256(blob).hexdigest()

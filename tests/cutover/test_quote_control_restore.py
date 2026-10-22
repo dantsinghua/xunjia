@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
-from imlink.quote_source import save_quote,snapshot
+from server.quote_credentials import save_quote,snapshot
 from server.auth import AuthConfig,AuthUser
 from server.app import create_app
 from server.quote_control import QuoteControl,check_database
@@ -20,7 +20,7 @@ def setup(tmp_path):
         update(state='streaming',quotes_received=2,quotes_written=2)
         try:await asyncio.Event().wait()
         finally:seen['closed']+=1
-    control=QuoteControl(directory=tmp_path/'creds',reader=object(),managers=['manager'],probe=probe,session=session,db_check=lambda:{'ok':True,'note':'synthetic-db'})
+    control=QuoteControl(directory=tmp_path/'creds',reader=object(),probe=probe,session=session,db_check=lambda:{'ok':True,'note':'synthetic-db'})
     app=create_app(database_url='sqlite:///'+str(tmp_path/'state.db'),auth_config=AuthConfig(sso_secret='synthetic',session_secret='k'*40),enable_background=False,quote_control=control)
     headers={name:{'Authorization':'Bearer '+app.state.auth.issue_token(AuthUser(name,name))} for name in ('manager','viewer')}
     with TestClient(app) as client:yield client,control,headers,seen
@@ -29,15 +29,17 @@ def test_auth_required(setup,method,path,body):
     c,_,_,_=setup
     assert c.request(method,path,json=body).status_code==401
 @pytest.mark.parametrize('method,path',[('PUT','/api/im/quote'),('POST','/api/im/quote/test'),('POST','/api/im/quote/start'),('POST','/api/im/quote/stop')])
-def test_viewer_cannot_change_shared_source(setup,method,path):
-    c,_,headers,_=setup
-    assert c.request(method,path,json=CREDS if method=='PUT' else {},headers=headers['viewer']).status_code==403
+def test_any_signed_in_user_can_change_shared_source(setup,method,path):
+    c,control,headers,_=setup
+    save_quote(CREDS,control.directory)
+    result=c.request(method,path,json=CREDS if method=='PUT' else {},headers=headers['viewer'])
+    assert result.status_code==200, result.text
 def test_save_public_flags_blank_retains_no_autostart(setup):
     c,control,headers,seen=setup
     result=c.put('/api/im/quote',json=CREDS,headers=headers['manager'])
     assert result.status_code==200
     for key in ('cookie','sid','device_id'):assert CREDS[key] not in result.text
-    data=result.json()['data'];assert data['configured'] and data['can_manage']
+    data=result.json()['data'];assert data['configured'] and 'can_manage' not in data
     assert data['collector_state']=='stopped' and seen['session']==0
     assert c.put('/api/im/quote',json={'account':'renamed','cookie':'','sid':'','device_id':''},headers=headers['manager']).status_code==200
     saved=snapshot(control.directory)
@@ -78,14 +80,15 @@ def test_schema_failure_is_not_started(setup):
     control._db_check=lambda:{'ok':False,'note':'synthetic missing cnbd_date','code':'QUOTE_SCHEMA_MIGRATION_REQUIRED'}
     r=c.post('/api/im/quote/start',headers=headers['manager'])
     assert r.status_code==400 and 'cnbd_date' in r.text and seen['session']==0
-def test_viewer_status_has_no_account_or_secrets(setup):
+def test_every_user_sees_account_but_not_secrets(setup):
     c,control,headers,_=setup;save_quote(CREDS,control.directory)
     r=c.get('/api/im/quote',headers=headers['viewer'])
-    assert r.status_code==200 and not r.json()['data']['can_manage']
-    for value in CREDS.values():assert value not in r.text
+    assert r.status_code==200 and r.json()['data']['account']==CREDS['account']
+    assert 'can_manage' not in r.json()['data']
+    for key in ('cookie','sid','device_id'):assert CREDS[key] not in r.text
 def test_configured_credentials_survive_new_controller(tmp_path):
     save_quote(CREDS,tmp_path)
-    c=QuoteControl(directory=tmp_path,managers=['manager'])
+    c=QuoteControl(directory=tmp_path)
     assert c.status('manager')['configured'] and not c.status('manager')['collector_active']
 def test_configuration_error_is_explicit(monkeypatch):
     for key in ('HOST','USER','PASSWORD','DB'):monkeypatch.delenv('QB_MYSQL_'+key,raising=False)
@@ -93,7 +96,7 @@ def test_configuration_error_is_explicit(monkeypatch):
 def test_cross_controller_lease(tmp_path):
     async def run():
         async def session(values,update):await asyncio.Event().wait()
-        values=dict(directory=tmp_path,reader=object(),managers=['manager'],session=session,db_check=lambda:{'ok':True})
+        values=dict(directory=tmp_path,reader=object(),session=session,db_check=lambda:{'ok':True})
         a,b=QuoteControl(**values),QuoteControl(**values);save_quote(CREDS,tmp_path)
         try:
             await a.start('manager')

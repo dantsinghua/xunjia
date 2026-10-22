@@ -71,7 +71,7 @@ async function collectorSaved() {
     <h2>本人账号与收发通道</h2>
     <p v-if="imBoundAccount">企点账号 <b>{{ imBoundAccount.account_uid }}</b> · 工作台 {{ imBoundAccount.workbench_id }}</p>
     <p v-else>尚未选择采集账号，请先配置文件中转，再选择工作台和台内企点号。</p>
-    <p>按当前选择的工作台与企点账号读取通讯录。文件中转与邮件同时接收并去重，发送只使用选定通道；切换前须停止机器人并完成在途命令对账。</p>
+    <p>按当前选择的工作台与企点账号读取通讯录。文件中转负责当前账号收发；更换账号或连接配置会清空旧业务、暂停及结果未知状态，重新加载当前账号通讯录和原生历史；不会迁移或重发旧任务。</p>
     <MqSettings @status="connectionStatus" />
     <CollectorAccountSettings v-if="connectionReady" ref="collectors" :auto-load="false" @saved="collectorSaved" @institution="institutionMode = $event" @availability="selectedOnline = $event" />
     <p v-else role="status">先保存文件中转 base_url 和 config.yaml，并确认配置已加载，再读取采集端目录、选择账号与通讯录。</p>

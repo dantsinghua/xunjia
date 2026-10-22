@@ -18,7 +18,7 @@ DAY = '2026-10-17'
 def desk(tmp_path):
     clock = [1792202400.0]
     flows = SimpleNamespace(analyze=lambda context: None, decide=lambda context: None)
-    app = create_app(database_url='sqlite:///' + str(tmp_path / 'repair.db'),
+    app = create_app(submission_guard=lambda _owner: None, database_url='sqlite:///' + str(tmp_path / 'repair.db'),
         enable_background=False, auth_config=AuthConfig(clock=lambda: clock[0]), chatflows=flows)
     store = app.state.repository
     members = {}

@@ -14,34 +14,33 @@
 
 ## 依赖与配置
 
-先在用于集成的独立 QTrade 副本中核对既有接口，再装配本目录。协议实现由主交付包 `collector-runtime/xunjia_collector_runtime-2.2.1-py3-none-any.whl` 提供；使用 QTrade 专用 Python 环境离线安装并执行 `pip check`，不能覆盖其他服务共享环境中的 `server`、`relay` 包。运行时需要以下接口：
+先在用于集成的独立 QTrade 副本中核对既有接口，再装配本目录。协议实现由主交付包 `collector-runtime/xunjia_collector_runtime-2.2.3-py3-none-any.whl` 提供；使用 QTrade 专用 Python 环境离线安装并执行 `pip check`，不能覆盖其他服务共享环境中的 `server`、`relay` 包。运行时需要以下接口：
 
 - `relay.protocol.Binding`；`CollectorBridge.publish_native/run_once/publish_capabilities`。
 - `ReceiverLedger.begin_inbound/stage_out/permission`；`QTradeNativePort` 的 `execution_permission` 和只读 `native_reconcile`。
 - `FileGatewayTransport` 通过 its-relay 三个文件接口收发协议包，不使用对象路径或共享 contacts.json。
 - QTrade 当前 `Events.on_emit`、持久 `events_outbox` 和 `Store.outbox_seq_bounds`；文件网关使用 config.yaml 中的 key/sm4_key 动态生成 access_token。
 
-`XUNJIA_COLLECTOR_VERSION=2.2` 显式选择 V2；不设置保持 v1，未知值停用询价消费者。`XUNJIA_COLLECTOR_CONFIG_FILE` 指向私有 JSON：
+`XUNJIA_COLLECTOR_VERSION=2.2` 选择当前协议。此目录仅是低层单账号宿主接线参考，不是完整采集端安装器；正式多账号采集使用 `InstitutionCollectorHost` 统一发布工作台、好友、组织和历史目录。低层宿主读取当前机构路径合同，不恢复旧协调器或旧传输账本。
+
+`XUNJIA_COLLECTOR_CONFIG_FILE` 的当前格式为：
 
 ```json
 {
-  "owner_user_id": "REPLACE_OWNER",
+  "contract": "its-relay-path-v1",
   "account_uid": "REPLACE_ACCOUNT",
   "workbench_id": "REPLACE_WORKBENCH",
-  "seal_key_file": "/private/path/seal-key.hex",
-  "sign_key_file": "/private/path/sign-key.hex",
   "file_gateway": {
-    "uplink_url": "https://REPLACE_LOCAL_COORDINATOR/up",
-    "downlink_url": "https://REPLACE_LOCAL_COORDINATOR/down",
+    "base_url": "https://REPLACE_GATEWAY/its-relay/v1",
     "auth_file": "config.yaml",
     "allow_http": false
   }
 }
 ```
 
-密钥文件内容为十六进制，路径相对私有配置文件解析。配置、账本与已有 its-relay 工作台身份必须一致；V2 配置缺失或失败不能回落 v1。有效授权指令默认交给绑定账号发送，不另设真实发送开关；安装和以下合成测试不需要启动账号或启用真实发送。
+凭据仅在部署机受保护的 `config.yaml` 中保存；相对路径以配置文件所在目录为准。机构身份和信封密钥由该凭据派生，上下行路径按工作台及账号确定。旧 `owner_user_id`、独立 seal/sign 密钥、`uplink_url`、`downlink_url` 字段一律拒绝。需要读取组织库时，另填既有的 `org_password_file`、`org_password_format` 引用，不回显密码。
 
-用户在工作台只填写一个远端 `base_url` 和 `config.yaml` 内容；上述两方向地址是现有协调器的内部路由，由部署接入，不能填成同一消费队列。没有独立 STS 认证或直连 OSS/Bucket 配置。
+新状态目录为 `institution-path-v1/<机构>/<工作台>/accounts/<账号SHA256>/`。构造无效配置不得触碰旧 `xunjia-v22` 账本；旧 UNKNOWN 不自动清理、迁移或重发。此工厂仅构造宿主，不启动消费者、不发送消息；工作台和组织目录发布由正式 `InstitutionCollectorHost` 装配，不能将构造成功当作完整收发验收。
 
 ## 既有文件接线
 

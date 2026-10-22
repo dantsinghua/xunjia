@@ -145,7 +145,7 @@ def test_late_preview_for_prior_binding_version_cannot_enable_confirmation(multi
     assert ui[4]['/api/im/rfq/send'] == 0
 
 
-def test_quote_keeps_compact_account_bar_and_monitor_retains_explicit_book(multibond):
+def test_quote_compact_and_monitor_retains_book_actions_without_detail_list(multibond):
     ui, _ = multibond;page, base, *_ = ui
     page.goto(base + '/#/quote')
     expect(page.locator('.im-bar')).to_be_visible()
@@ -154,12 +154,14 @@ def test_quote_keeps_compact_account_bar_and_monitor_retains_explicit_book(multi
     page.goto(base + '/#/monitor')
     bar = page.locator('.im-bar');expect(bar).to_be_visible()
     bar.get_by_role('button',name='读取通讯录',exact=True).click()
-    expect(bar.locator('.im-book')).to_be_visible()
-    expect(bar).to_contain_text('910100')
+    expect(page.get_by_text('已读取 1 人（通讯录）', exact=True)).to_be_visible()
+    expect(bar.locator('.im-book, .im-person')).to_have_count(0)
+    expect(bar.get_by_role('button',name='刷新通讯录',exact=True)).to_be_enabled()
+    expect(bar).not_to_contain_text('910100')
 
 
 from tests.cutover.test_im_catalog_selection import selection
-from tests.cutover.test_file_gateway_pair_isolation import directory_http, OWNER
+from tests.institution_test_support import OWNER
 
 
 def test_real_saved_floor_decimal_http_projection_reaches_two_bond_vue_and_trusted_bp_preview(selection,browser,frontend_url):

@@ -50,8 +50,9 @@ def test_invalid_private_config_is_precise_without_echoing_content(tmp_path,text
 def test_unsafe_or_wrong_base_url_rejected(url):
     with pytest.raises(FileGatewayError):FileGatewayClient(url,AUTH)
 
-def test_http_is_an_explicit_configuration_opt_in():
-    assert FileGatewayClient("http://127.0.0.1:8888",AUTH,allow_http=True).base_url.endswith(":8888")
+def test_plaintext_http_is_always_rejected():
+    with pytest.raises(FileGatewayError):FileGatewayClient("http://127.0.0.1:8888",AUTH)
+    with pytest.raises(TypeError):FileGatewayClient("https://relay.invalid",AUTH,allow_http=True)
 
 @pytest.mark.parametrize("status,code",[(401,"FILE_AUTH_REJECTED"),(403,"FILE_ACCESS_DENIED"),(413,"FILE_TOO_LARGE"),(429,"FILE_RATE_LIMITED"),(502,"FILE_GATEWAY_HTTP_ERROR")])
 def test_statuses_are_classified_without_response_echo(status,code):

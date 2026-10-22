@@ -138,7 +138,7 @@ def test_binding_switch_discards_old_response_and_invalidates_confirmation(reset
     assert len(posts(c))==(1 if late_method=='POST' else 0)
 
 
-from tests.cutover.test_im_catalog_selection import selection, directory_http, OWNER
+from tests.cutover.test_im_catalog_selection import selection, OWNER
 
 
 def test_real_browser_api_and_signed_local_gateway_handshake_reach_same_complete_epoch(selection,browser,frontend_url):
@@ -149,11 +149,12 @@ def test_real_browser_api_and_signed_local_gateway_handshake_reach_same_complete
     from urllib.parse import urlsplit
     from relay.collector_bridge import CollectorBridge
     from server.receiver_ledger import ReceiverLedger
-    from server.file_gateway_transport import FileGatewayTransport
+    from tests.institution_test_support import collector as make_collector
     s=selection;app=s['app'];binding=app.state.transport.adapters[(OWNER,'account-a','oss')].binding
-    receiver=ReceiverLedger(s['tmp']/'ui-native-receiver.sqlite3',binding)
-    collector=FileGatewayTransport(binding,s['client']('wb-a','account-a',lane='down'),
-        s['client']('wb-a','account-a',lane='up'),s['tmp']/'ui-native-transport.sqlite3',role='collector')
+    s['runtime'].background_enabled=True
+    s['runtime'].start()
+    collector=make_collector(s,filename='ui-native-transport.sqlite3')
+    receiver=ReceiverLedger(s['tmp']/'ui-native-receiver.sqlite3',collector.binding,clock=lambda:s['clock'][0])
     bridge=CollectorBridge(ledger=receiver,adapters={'oss':collector},
         native_send=lambda _:pytest.fail('No native text may be sent by a session reset'),
         native_reconcile=lambda _:None,native_quiescent=lambda:True)
@@ -200,6 +201,7 @@ def test_real_browser_api_and_signed_local_gateway_handshake_reach_same_complete
             app.state.session_reset.run_once();bridge.run_once();app.state.inbox.poll_once()
             current=s['api'].get('/api/im/session-reset').json()['data']
             if current['state']=='complete':break
+            s['advance'](6)
             time.sleep(.2)
         assert current['state']=='complete' and receiver.account_epoch()==1
         assert receiver.reset_status()['state']=='complete'

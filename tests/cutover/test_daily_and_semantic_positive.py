@@ -25,7 +25,7 @@ def test_rollover_asks_every_counterparty_and_updates_only_bp_boundary(tmp_path,
                 bonds=[{"code": "SYN-A", "bond_id": "SYN-A", "valuation_yield_pct": self.value,
                         "valuation_date": self.day, "aliases": []}])
     reference, clock, flows, transport = Reference(), Clock(), FakeFlows(), FakeNative()
-    app = create_app(database_url="sqlite:///" + str(tmp_path / "daily.db"),
+    app = create_app(submission_guard=lambda _owner: None, database_url="sqlite:///" + str(tmp_path / "daily.db"),
         auth_config=AuthConfig(sso_secret="synthetic-sso", session_secret="synthetic-session-at-least-32-characters", clock=clock),
         enable_background=False, chatflows=flows, transport=transport,
         aggregation=Aggregation(0, 0, 1000, "synthetic-fixture-only"),

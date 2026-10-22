@@ -30,8 +30,8 @@
       "role": "new_runtime_module",
       "base_state": "created_in_this_batch",
       "base_sha256": null,
-      "result_sha256": "577476edbf02a219c4f18da27429e1790f5fbc446061730e49ccfcf2c0b6f3ac",
-      "size_bytes": 21931,
+      "result_sha256": "c4a63a5b2f28456cf45b58cdc4fd300f5967ce4997f2eab55ea6a9bb3acf2783",
+      "size_bytes": 22837,
       "freeze_evidence": "2026-10-21 independent capability publication before contacts failure; delta acceptance required",
       "previous_result_sha256": "c099ff80d447504fc84ee2787f6dc268f15c5fdadea0676a1b7ed5de7588412e"
     },
@@ -216,5 +216,7 @@
       "org_password_format"
     ],
     "private_values_included": false
-  }
+  },
+  "current_contract": "its-relay-path-v1",
+  "current_loader_note": "2026-10-22: institutional account loader; rejects retired owner/key/lane configuration and isolates old journals."
 }

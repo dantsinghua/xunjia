@@ -85,7 +85,7 @@ def boot(tmp_path,monkeypatch,request):
         class ReadOnlyAddressBook:
             def contacts(self):return {'account_uid':'synthetic-account','contacts':[{'uin':'synthetic-peer','name':'隔离预览对手'}],'org':{}}
         transport=TransportRouter({(OWNER,'synthetic-account','oss'):ReadOnlyAddressBook()})
-    app=create_app(transport=transport,database_url='sqlite:///'+str(tmp_path/'business.db'),enable_background=False,
+    app=create_app(submission_guard=lambda _owner: None, transport=transport,database_url='sqlite:///'+str(tmp_path/'business.db'),enable_background=False,
         auth_config=AuthConfig(sso_secret='synthetic-advisory',session_secret='s'*40,clock=lambda:now[0]))
     app.state.repository.bind_account(OWNER,'synthetic-account','synthetic-workbench')
     app.state.repository.save_preferences(OWNER,{'floors':{code:{'kind':'bp','value':'5'} for uni,code,name in database.meta}})

@@ -51,7 +51,7 @@ class FakeNative:
 @pytest.fixture
 def desk(tmp_path):
     clock=Clock();flows=FakeFlows();transport=FakeNative()
-    app=create_app(database_url='sqlite:///'+str(tmp_path/'current.db'),auth_config=AuthConfig(sso_secret='synthetic-sso',session_secret='synthetic-session-at-least-32-characters',clock=clock),
+    app=create_app(submission_guard=lambda _owner: None, database_url='sqlite:///'+str(tmp_path/'current.db'),auth_config=AuthConfig(sso_secret='synthetic-sso',session_secret='synthetic-session-at-least-32-characters',clock=clock),
                    enable_background=False,chatflows=flows,transport=transport,
                    # This is a TEST policy, not a measured production profile.
                    aggregation=Aggregation(0,0,1000,'synthetic-fixture-only'))
@@ -173,7 +173,7 @@ def test_parallel_confirm_is_one_batch_with_no_duplicate_groups_or_commands(desk
     assert len({v['group_ids'][0] for v in values})==1
     assert len(app.state.inquiry.commands(OWNER))==1
 def test_no_measured_profile_disables_auto_analysis_without_fake_window(tmp_path):
-    app=create_app(database_url='sqlite:///'+str(tmp_path/'p.db'),enable_background=False,chatflows=FakeFlows())
+    app=create_app(submission_guard=lambda _owner: None, database_url='sqlite:///'+str(tmp_path/'p.db'),enable_background=False,chatflows=FakeFlows())
     with TestClient(app) as c:
         data=c.get('/api/health').json()['data']
         assert data['engine']=='v22' and not data['analysis_ready']

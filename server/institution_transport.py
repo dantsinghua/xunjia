@@ -1,4 +1,4 @@
-﻿"""Account-isolated path transport; V2.2 execution and UNKNOWN semantics retained."""
+"""Account-isolated path transport; V2.2 execution and UNKNOWN semantics retained."""
 from __future__ import annotations
 import hashlib
 import json
@@ -6,7 +6,7 @@ import time
 import uuid
 from pathlib import Path
 from relay.file_gateway import FileGatewayClient, FileGatewayError, GatewayAuth
-from relay.file_gateway_connection import connection_client
+from relay.file_gateway_connection import connection_client, resolve_tls_files, TLS_FIELDS
 from relay.gateway_paths import CONTRACT, InstitutionKeys, account_paths, HISTORY_SECONDS
 from relay.institution_codec import InstitutionCodec, retarget
 from relay.protocol import Codec, ProtocolError, canonical, digest, envelope, result, token
@@ -23,6 +23,10 @@ class InstitutionTransport(FileGatewayTransport):
         self.background_errors = {}
         self.online_guard = None
         self.manifest_handler = None
+        self.active_guard = None
+        self.context_id = None
+        self.context_version = 0
+        self.context_ready = False
         self.catalog_provider = None
         self.contacts_provider = None
         with self.store.db() as db:
@@ -30,7 +34,7 @@ class InstitutionTransport(FileGatewayTransport):
 
     @classmethod
     def from_institution_config(cls, binding, config, path, *, role, config_dir):
-        allowed = {"contract","base_url","auth_file","allow_http","timeout_seconds","max_bytes","hostname","addresses"}
+        allowed = {"contract","base_url","auth_file","hostname","addresses",*TLS_FIELDS}
         if set(config) - allowed or config.get("contract") != CONTRACT:
             raise FileGatewayError("FILE_GATEWAY_CONFIG_INVALID")
         auth_path = Path(config["auth_file"])
@@ -39,9 +43,10 @@ class InstitutionTransport(FileGatewayTransport):
         keys = InstitutionKeys.from_auth(auth)
         if binding.seal_key != keys.seal_key or binding.sign_key != keys.sign_key:
             raise FileGatewayError("FILE_GATEWAY_INSTITUTION_KEYS_MISMATCH")
+        config = resolve_tls_files(config, config_dir)
         paths = account_paths(binding.workbench_id, binding.account_uid)
-        up = connection_client(config, auth, allow_http=config.get("allow_http",False), path=paths["uplink_path"])
-        down = connection_client(config, auth, allow_http=config.get("allow_http",False), path=paths["downlink_path"])
+        up = connection_client(config, auth, path=paths["uplink_path"])
+        down = connection_client(config, auth, path=paths["downlink_path"])
         return cls(binding, up if role == "service" else down, down if role == "service" else up, path, role=role, institution_owner=keys.owner_id)
 
     def _fingerprint(self, data):
@@ -96,6 +101,8 @@ class InstitutionTransport(FileGatewayTransport):
 
     def publish_manifest(self, payload, *, message_id=None):
         if not isinstance(payload,dict) or payload.get("contract") != CONTRACT: raise ProtocolError("PATH_MANIFEST_CONTRACT_REQUIRED")
+        if message_id is None and payload.get("op") in ("activate_context","context_ready"):
+            message_id = "ip-context-" + digest(payload)
         now = self.clock()
         data = envelope(self.binding,"manifest",payload,message_id=message_id or "ip-"+uuid.uuid4().hex,created_at=now,expires_at=now+HISTORY_SECONDS)
         blob = self.store.packet(data["message_id"],data,self.codec)
@@ -123,6 +130,9 @@ class InstitutionTransport(FileGatewayTransport):
     def retry_data(self, limit=4):
         with self.store.db() as db:
             rows = db.execute("SELECT * FROM ip_delivery WHERE scope=? AND acked=0 AND first_at>? AND last_at<? ORDER BY last_at LIMIT ?",(self.store.scope,self.clock()-HISTORY_SECONDS,self.clock()-30,limit)).fetchall()
+        # A paused consumer must not receive an unbounded stream of duplicate
+        # files. Retry immutable data only after the existing FIFO has drained.
+        if not rows or self.outbound.pending() > 0:return
         for row in rows:
             blob = bytes(row["blob"])
             try:
@@ -156,6 +166,8 @@ class InstitutionTransport(FileGatewayTransport):
         return {**super().delivery_diagnostics(),"background_errors":dict(self.background_errors)}
 
     def send(self, command):
+        if self.role=="service" and self.active_guard is not None and not self.active_guard(command):
+            return result(command,"failed","account-context-changed-before-submission")
         if self.role=="service" and (self.online_guard is None or not self.online_guard()):
             return result(command,"failed","collector-offline-before-submission")
         if str(command.get("peer_id","")).startswith("g_"):

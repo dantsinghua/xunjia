@@ -1,7 +1,6 @@
 """Injectable collector loop; does not start accounts, pollers or network clients.
 
-Disable the legacy xunjia poller before installing this bridge. Both routes must
-share the receiver ledger and source publication
+Disable the legacy xunjia poller before installing this bridge. The file carrier shares the receiver ledger and source publication
 state. Run run_once() in the collector's existing scheduler, not a second agent.
 """
 from __future__ import annotations
@@ -23,7 +22,7 @@ class CollectorBridge:
         if not (0 < echo_wait_seconds <= 5 and echo_wait_seconds <= native_verification_budget):
             raise ValueError('echo等待须为正数且不超过5秒及native验证预算')
         self.echo_wait_seconds=echo_wait_seconds
-        if primary_transport is not None and (primary_transport not in adapters or primary_transport not in ('oss','mail')):
+        if primary_transport is not None and (primary_transport not in adapters or primary_transport not in ('oss',)):
             raise TransportUnavailable('NOT_CONFIGURED: COLLECTOR_PRIMARY_TRANSPORT')
         self.ledger, self.binding, self.adapters = ledger, ledger.binding, adapters
         self.native_send, self.native_reconcile = native_send, native_reconcile
@@ -33,12 +32,12 @@ class CollectorBridge:
         self.last_publication_errors = []
         self.codec = Codec(self.binding, clock=ledger.clock)
         for route,adapter in adapters.items():
-            if route not in ('oss','mail') or adapter.binding != self.binding:
+            if route not in ('oss',) or adapter.binding != self.binding:
                 raise ProtocolError('采集桥通道与固定绑定不匹配')
             if route == 'oss' and not getattr(adapter,'polls_downlink',False):
                 raise TransportUnavailable('DIRECT_OSS_RETIRED_USE_FILE_GATEWAY')
         paths={adapter.store.path.resolve() for adapter in adapters.values()}
-        if not adapters or len(paths)!=1:raise ProtocolError('两路采集上行必须共享同一持久事件账本')
+        if not adapters or len(paths)!=1:raise ProtocolError('采集上行必须使用同一持久事件账本')
 
     def _oss_inputs(self, limit, errors):
         if 'oss' not in self.adapters:return []
@@ -54,14 +53,6 @@ class CollectorBridge:
             return [(row['envelope'],'file-gateway:'+row['source_token'],digest(row['envelope']),adapter,row['source_token']) for row in rows]
         raise TransportUnavailable('DIRECT_OSS_RETIRED_USE_FILE_GATEWAY')
 
-    def _mail_inputs(self, limit, errors):
-        adapter=self.adapters.get('mail')
-        if adapter is None:return []
-        try:rows=adapter.poll(limit=limit)
-        except Exception:
-            errors.append('MAIL_INBOX_UNAVAILABLE');return []
-        return [(row['envelope'],'mail:'+row['source_token'],digest(row['envelope']),adapter,row['source_token']) for row in rows]
-
     def run_once(self, limit=50):
         if not 1<=limit<=200:raise ValueError('采集批量须为1至200')
         processed=0;errors=[]
@@ -69,14 +60,14 @@ class CollectorBridge:
         except Exception:errors.append('DEFERRED_EVENT_PUBLICATION_PENDING')
         try:self.progress_session_resets()
         except Exception:errors.append('SESSION_RESET_PROGRESS_PENDING')
-        inputs=self._oss_inputs(limit,errors)+self._mail_inputs(limit,errors)
+        inputs=self._oss_inputs(limit,errors)
         order={'session_reset':-1,'cancel':0,'query':1,'command':2}
         for env,source,fingerprint,adapter,source_token in sorted(inputs,key=lambda item:order.get(item[0].get('kind'),3)):
             try:
                 if self.ledger.source_done(source,fingerprint):
                     if adapter:adapter.ack(source_token)
                     continue
-                # Mail poll has authenticated the envelope; revalidate current
+                # File intake authenticated the envelope; revalidate current
                 # identity/expiry immediately before entering the execution ledger.
                 self.codec._validate(env)
                 kind=env['kind'];command=env['payload']
@@ -94,7 +85,12 @@ class CollectorBridge:
                     if adapter:adapter.ack(source_token)
                     processed+=1
                     continue
-                if kind=='cancel':outcome=self.ledger.cancel(command)
+                if kind=='cancel':
+                    outcome=self.ledger.cancel(command)
+                    if outcome.get('status')=='unknown':
+                        # Expiry cannot undo a native send. Read exact late
+                        # execution evidence; never re-execute the command.
+                        outcome=self.ledger.reconcile(command,self.native_reconcile)
                 elif kind=='query':outcome=self.ledger.reconcile(command,self.native_reconcile)
                 else:outcome=self.ledger.execute(command,self.native_send)
                 self.flush_deferred()

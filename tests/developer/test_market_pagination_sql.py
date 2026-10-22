@@ -5,7 +5,7 @@ import pytest
 from server import market_cache as db
 from server.market import MarketService, parse_filter
 from server.quote_runtime import QBMarket
-from server.repository import Repository
+from server.negotiation.application_store import ApplicationStore
 
 
 @pytest.fixture
@@ -21,7 +21,7 @@ def market_sql(tmp_path, monkeypatch):
                           status='已成交', ib=99) for i in range(1, 2052)])
     source = QBMarket.__new__(QBMarket)
     source.db = db
-    repo = Repository('sqlite:///' + str(tmp_path / 'business.db'))
+    repo = ApplicationStore('sqlite:///' + str(tmp_path / 'business.db'), initialize=True)
     repo.bind_account('a', 'a1', 'wb')
     service = MarketService(repo, rows_provider=source.rows)
     statements = []
@@ -125,13 +125,8 @@ def test_full_filters_match_injected_reference_including_missing_and_unicode(mar
 def test_sql_status_only_comes_from_current_owner_and_floor_is_not_cached(market_sql, monkeypatch):
     service, _, _, statements = market_sql
     service.repo.bind_account('b', 'b1', 'wb')
-    from server.business import InquiryService
-    session = dict(session_id='s1', batch_id='b1', bond_code='000001.IB', pending_command_id='cmd',
-                   state='NEGOTIATING', conversation_id='c1', revision=1)
-    monkeypatch.setattr(InquiryService, 'sessions', lambda self, who: [session] if who == 'a' else [])
-    monkeypatch.setattr(InquiryService, 'status_commands', lambda self, who: [dict(command_id='cmd', status='unknown',
-                            conversation_id='c1', session_ids=['s1'])] if who == 'a' else [])
-    monkeypatch.setattr(service.repo, 'preferences', lambda who: {'floors': {'000001.IB': {'kind': 'yield', 'value': 2.5}}} if who == 'a' else {})
+    monkeypatch.setattr(service.repo, 'market_overlays', lambda who: (
+        {'000001.IB':'待核对'}, {'000001.IB':{'kind':'yield','value':2.5}}) if who=='a' else ({},{}))
     private = service.page('a', filter_spec={'chips': {'当前状态': 14}})
     assert private['total'] == 1 and private['data'][0]['status'] == '待核对'
     assert private['data'][0]['floor']['value'] == 2.5

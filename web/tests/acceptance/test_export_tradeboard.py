@@ -1,4 +1,6 @@
 from io import BytesIO
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import json
 from urllib.parse import parse_qs, urlsplit
 
@@ -47,14 +49,15 @@ def test_export_json_error_never_downloads_a_fake_xlsx(ui):
 def test_trade_board_displays_explicit_backend_facts_and_zero_gap(ui):
     page, url, state, _, _ = ui
     values = {"own_side": "SELL", "peer_quote": "2.10", "own_limit": "2.10", "gap_bp": "0",
-              "market_bid": "2.45", "market_ofr": "2.49", "quote_at": "2026-10-13T10:00:00+08:00",
-              "freshness": "source-fresh", "phase": "HANDOFF"}
+              "peer_volume_wan": "1250.5", "quote_at": "2026-10-13T10:00:00+08:00",
+              "freshness": "source-fresh", "phase": "询价中"}
     state["counterparties_data"] = [{"id": "qa-peer", "name": "合成对手甲", "bonds": [
-        {"code": "000100.IB", "name": "合成债券", "stage": "转人工", **values},
+        {"code": "000100.IB", "name": "合成债券", "stage": "询价中", "trade_day": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(), **values},
     ]}]
     page.goto(url + "/#/monitor")
     board = page.get_by_test_id("trade-board")
     expect(board).to_be_visible()
+    expect(board.locator('[data-field="market_bid"], [data-field="market_ofr"]')).to_have_count(0)
     expect(board.locator('[data-field="own_side"]')).to_have_text("卖出 SELL")
     for name, value in values.items():
         if name != "own_side":
@@ -66,5 +69,5 @@ def test_trade_board_missing_fields_are_explicitly_unavailable(ui):
     page.goto(url + "/#/monitor")
     board = page.get_by_test_id("trade-board")
     expect(board).to_be_visible()
-    for field in ["own_side", "peer_quote", "own_limit", "gap_bp", "market_bid", "market_ofr", "quote_at", "freshness", "phase"]:
+    for field in ["own_side", "peer_quote", "own_limit", "gap_bp", "peer_volume_wan", "quote_at", "freshness", "phase"]:
         expect(board.locator(f'[data-field="{field}"]')).to_have_text("—")

@@ -1,4 +1,4 @@
-"""The user retired NYOSS/nytoken; only files MQ and mail remain configurable."""
+"""The user retired NYOSS/nytoken; only the current institutional files path remains configurable."""
 from pathlib import Path
 import json
 
@@ -18,15 +18,18 @@ def test_retired_direct_oss_sts_modules_and_probe_are_absent():
 
 def test_runtime_sources_and_live_examples_have_no_old_service_defaults():
     paths=[p for directory in ('server','relay','imlink') for p in (ROOT/directory).rglob('*.py')]
-    paths.extend([ROOT/'config/xunjia.env.example',ROOT/'config/transport.example.json',ROOT/'config/README.md'])
+    paths.extend([ROOT/'config/xunjia.env.example',ROOT/'config/institution-connection.example.json',ROOT/'config/README.md'])
     old=('nytoken.yingmi.com','qtrade-nyoss','oss-cn-hangzhou.aliyuncs.com','its-accesspoint/v1/api/sts')
     for path in paths:
         text=path.read_text()
         assert not any(value in text for value in old),str(path.relative_to(ROOT))
 
 
-def test_transport_template_has_files_gateway_and_mail_without_old_oss_profile():
-    value=json.loads((ROOT/'config/transport.example.json').read_text())
-    assert isinstance(value,list) and value
-    assert any('file_gateway' in profile for profile in value)
-    assert all('oss' not in profile for profile in value)
+def test_only_current_institution_template_and_file_transport_are_shipped():
+    value=json.loads((ROOT/'config/institution-connection.example.json').read_text())
+    assert value['contract']=='its-relay-path-v1'
+    assert {'base_url','auth_file'} <= value.keys()
+    assert not (ROOT/'config/transport.example.json').exists()
+    assert not (ROOT/'config/mq-connection.example.json').exists()
+    assert not hasattr(transports,'MailTransport')
+    assert not hasattr(transports,'MailConfig')

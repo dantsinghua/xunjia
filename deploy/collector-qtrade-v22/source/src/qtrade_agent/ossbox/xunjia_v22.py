@@ -88,6 +88,7 @@ class XunjiaV22Host:
 
     @classmethod
     def from_env(cls, *, store, bus, loop, box, data_dir, legacy_inbox_disabled, contacts_provider=None):
+        """Load the current institution/path contract, never an old queue or journal."""
         if collector_version() != '2.2':
             return None
         if not legacy_inbox_disabled():
@@ -96,35 +97,45 @@ class XunjiaV22Host:
         if not config_path:
             raise ValueError('NOT_CONFIGURED: XUNJIA_COLLECTOR_CONFIG_FILE')
         try:
-            path = Path(config_path)
-            if path.stat().st_size > 16384:
-                raise ValueError
-            config = json.loads(path.read_text(encoding='utf-8'))
-            required = {'owner_user_id', 'account_uid', 'workbench_id', 'seal_key_file', 'sign_key_file', 'file_gateway'}
-            if not isinstance(config, dict) or not required <= config.keys() or set(config) - required - {'org_password_file', 'org_password_format'}:
-                raise ValueError
-            def key(name):
-                target = Path(config[name])
-                if not target.is_absolute():
-                    target = path.parent / target
-                if target.stat().st_size > 4096:
-                    raise ValueError
-                return bytes.fromhex(target.read_text(encoding='ascii').strip())
-            seal, sign = key('seal_key_file'), key('sign_key_file')
-        except Exception:
-            raise ValueError('NOT_CONFIGURED: invalid_private_collector_configuration') from None
-        try:
-            from relay.protocol import Binding
+            from relay.gateway_paths import CONTRACT, InstitutionKeys
+            from relay.file_gateway import GatewayAuth
+            from relay.file_gateway_connection import protected_auth_path
             from relay.collector_bridge import CollectorBridge
             from relay.qtrade_native_port import QTradeNativePort
             from server.receiver_ledger import ReceiverLedger
-            from server.file_gateway_transport import FileGatewayTransport
+            from server.institution_transport import InstitutionTransport
         except ImportError:
             raise RuntimeError('NOT_CONFIGURED: xunjia_v22_protocol_package_not_installed') from None
-        binding = Binding(config['owner_user_id'], config['account_uid'], config['workbench_id'], seal, sign)
-        root = Path(data_dir) / 'xunjia-v22'
+        try:
+            path = Path(config_path)
+            if path.stat().st_size > 16384:
+                raise ValueError()
+            config = json.loads(path.read_text(encoding='utf-8'))
+            required = {'contract', 'account_uid', 'workbench_id', 'file_gateway'}
+            if (not isinstance(config, dict) or not required <= config.keys()
+                    or set(config) - required - {'org_password_file', 'org_password_format'}
+                    or config['contract'] != CONTRACT):
+                raise ValueError()
+            network = config['file_gateway']
+            if (not isinstance(network, dict) or not {'base_url','auth_file'} <= network.keys()
+                    or set(network) - {'base_url','auth_file','allow_http','hostname','addresses'}):
+                raise ValueError()
+            auth = GatewayAuth.from_file(protected_auth_path(path, network['auth_file']))
+            keys = InstitutionKeys.from_auth(auth)
+            binding = keys.binding(config['workbench_id'], config['account_uid'])
+            # Validate both path clients before creating any persistent ledger.
+            from relay.gateway_paths import account_paths
+            from relay.file_gateway_connection import connection_client
+            paths = account_paths(binding.workbench_id, binding.account_uid)
+            for name in ('uplink_path','downlink_path'):
+                connection_client(network, auth, allow_http=network.get('allow_http',False), path=paths[name])
+        except Exception:
+            raise ValueError('NOT_CONFIGURED: invalid_institution_collector_configuration') from None
+        root = (Path(data_dir) / 'institution-path-v1' / keys.institution_id / binding.workbench_id
+                / 'accounts' / hashlib.sha256(binding.account_uid.encode()).hexdigest())
         ledger = ReceiverLedger(root / 'receiver.sqlite3', binding)
-        transport = FileGatewayTransport.from_config(binding, config['file_gateway'], root / 'publication.sqlite3', role='collector', config_dir=path.parent)
+        transport = InstitutionTransport.from_institution_config(binding, {**network,'contract':CONTRACT},
+            root / 'publication.sqlite3', role='collector', config_dir=path.parent)
         port = QTradeNativePort(binding=binding, store=store, bus=bus, loop=loop,
             legacy_inbox_disabled=legacy_inbox_disabled, execution_permission=ledger.permission)
         bridge = CollectorBridge(ledger=ledger, adapters={'oss': transport},

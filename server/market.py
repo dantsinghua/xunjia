@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections import Counter
 from copy import deepcopy
 
 from .domain import decimal
@@ -23,36 +22,6 @@ CHIPS = {
     '期限':['不限','<1Y','1–3Y','3–5Y','5–7Y','7–10Y','10Y+'],
 }
 PRICES = ('Bid','Ofr','Bid-中债','中债-Ofr','买量','卖量')
-STATES = {'WAITING_SEND':'待回执','NEGOTIATING':'询价中','HANDOFF':'转人工','STOPPED':'已暂停','CLOSED':'已放弃'}
-PRIORITY = ['待核对','停止中','待回执','转人工','发送失败','询价中','已暂停','已放弃']
-
-
-def aggregate_sessions(sessions, commands):
-    by_id = {c['command_id']: c for c in commands}
-    groups = {}
-    unknown_by_conversation={c.get('conversation_id'):c for c in commands if c['status']=='unknown' and c.get('conversation_id')}
-    unknown_by_session={sid:c for c in commands if c['status']=='unknown' for sid in c.get('session_ids',[])}
-    detail=[]
-    for session in sessions:
-        pending=by_id.get(session['pending_command_id'],{})
-        unresolved=unknown_by_session.get(session['session_id']) or unknown_by_conversation.get(session['conversation_id'])
-        if unresolved:pending=unresolved
-        label=STATES.get(session['state'], '待核对')
-        if pending.get('status')=='failed':label='发送失败'
-        if pending.get('status')=='unknown':label='待核对'
-        row={ 'session_id':session['session_id'], 'batch_id':session['batch_id'], 'code':session['bond_code'],
-              'state':session['state'], 'status':label,'command_id':session['pending_command_id'],
-              'command_status':pending.get('status'),'revision':session['revision'] }
-        detail.append(row)
-        groups.setdefault(session['bond_code'],[]).append(row)
-    items=[]
-    for code,values in groups.items():
-        counts=dict(Counter(r['status'] for r in values))
-        label=next((s for s in PRIORITY if s in counts),'待询价')
-        items.append({'code':code,'status':label,'session_count':len(values),'status_counts':counts})
-    return items,detail
-
-
 def parse_filter(value):
     if value is None or value=='':value={}
     if isinstance(value,str):
@@ -142,17 +111,7 @@ class MarketService:
     MAX_SELECTION = 100000
 
     def _overlays(self,owner):
-        if callable(getattr(self.repo,"market_overlays",None)):
-            return self.repo.market_overlays(owner)
-        # Explicit legacy Repository is used only by the retired regression suite.
-        from .business import InquiryService
-        business=InquiryService(self.repo)
-        items,_=aggregate_sessions(business.sessions(owner),business.status_commands(owner))
-        status={v['code']:v['status'] for v in items}
-        try:prefs=self.repo.preferences(owner)
-        except PermissionError:prefs={}
-        floors=prefs.get('floors',{})
-        return status,floors
+        return self.repo.market_overlays(owner)
 
     @staticmethod
     def _project(sources,status,floors):

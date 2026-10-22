@@ -10,6 +10,7 @@ import {
   type VisibleOrgNode,
 } from '../lib/imLink'
 import { renderQuote, yieldAfterBp, type RfqFields } from '../lib/rfqAssign'
+import { isSubmitRejected } from '../lib/http'
 
 const props = defineProps<{ open: boolean; bonds: BondRow[]; pickedCount?: number; floors?: Record<string, string>; savedFloors?: Record<string, {kind:'bp'|'yield';value:number}>; strategy?: Strategy }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'sent', codes: string[]): void; (e: 'pending', codes: string[]): void; (e: 'failed', codes: string[]): void }>()
@@ -54,11 +55,20 @@ const previewNotice = ref('')
 let generation = 0
 let previewAttempt: { fingerprint: string; id: string } | null = null
 let confirmRequestId = ''
-function accountKey() { const b = imBoundAccount.value; return JSON.stringify([b?.workbench_id || '', b?.account_uid || '', b?.version ?? 0]) }
+let directAttempt: { account: string; id: string; items: (RfqPolicy & {peer_ids:string[]})[] } | null = null
+function accountKey() { const b = imBoundAccount.value; return JSON.stringify([b?.workbench_id || '', b?.account_uid || '', b?.version ?? 0, b?.context_id || '']) }
 function invalidatePreview() {
   generation++
   if (preview.value) previewNotice.value = '参数、收件人或账号已变化，请重新生成预览并核对。'
-  preview.value = null; submission.value = null; confirmationStarted.value = false; confirmRequestId = ''; previewAttempt = null
+  preview.value = null; submission.value = null; confirmationStarted.value = false; confirmRequestId = ''; previewAttempt = null; directAttempt = null
+}
+function releaseRejectedSubmission(error: unknown): boolean {
+  if (!isSubmitRejected(error)) return false
+  const hint = error instanceof Error ? error.message : typeof error.hint === 'string' ? error.hint : '本次提交已拒绝，未创建发送指令'
+  invalidatePreview()
+  previewNotice.value = ''
+  formError.value = hint
+  return true
 }
 watch(drafts, () => { invalidatePreview(); formError.value = '' }, {deep:true,flush:'sync'})
 watch(()=>props.strategy?.strict,invalidatePreview,{flush:'sync'})
@@ -173,10 +183,6 @@ function draftIssues(d: Draft): DraftIssue[] {
   for (const [field, name] of [['volume_wan','询价量'],['opening_yield_pct','起始收益率'],['limit_yield_pct','收益率边界'],['step_bp','步幅']] as const) {
     if (!numeric(d[field])) issues.push({field,reason:`${name}须填写有限数字`})
     else if ((field === 'volume_wan' || field === 'step_bp') && Number(d[field]) <= 0) issues.push({field,reason:`${name}必须大于0`})
-  }
-  if (numeric(d.opening_yield_pct) && numeric(d.limit_yield_pct) && d.our_side
-      && (d.our_side === 'BUY' ? Number(d.opening_yield_pct) < Number(d.limit_yield_pct) : Number(d.opening_yield_pct) > Number(d.limit_yield_pct))) {
-    issues.push({field:'opening_yield_pct',reason:'起始收益率不能越过授权边界'})
   }
   if (d.pricing_basis === 'bp') {
     const floor = props.savedFloors?.[d.code]
@@ -364,7 +370,7 @@ function toggleDept(id: string) {
 }
 
 async function requestPreview() {
-  if (previewBusy.value || sending.value || preview.value) return
+  if (previewBusy.value || sending.value || preview.value || confirmationStarted.value) return
   formError.value = validationError()
   if (formError.value) return
   if (!imBoundAccount.value?.account_uid) { formError.value = '本人尚未绑定企点账号，不能预览授权'; return }
@@ -392,6 +398,43 @@ async function requestPreview() {
     if (request === generation) formError.value = e instanceof Error ? e.message : '预览请求失败'
   } finally { previewBusy.value = false }
 }
+async function sendDirect() {
+  if (sending.value || previewBusy.value || preview.value) return
+  if (submission.value) { await pollSubmission(); return }
+  if (!directAttempt) {
+    formError.value = validationError()
+    if (formError.value) return
+  }
+  if (!imBoundAccount.value?.account_uid) { formError.value = '请先绑定企点账号'; return }
+  const account = accountKey(), request = generation
+  if (!directAttempt) directAttempt = { account, id: crypto.randomUUID(), items: policyItems() }
+  if (directAttempt.account !== account) { formError.value = '当前账号已变化，请重新核对收件人'; return }
+  const attempt = directAttempt
+  const codes = [...new Set(attempt.items.map(item => item.code))]
+  confirmationStarted.value = true
+  sending.value = true; formError.value = ''; previewNotice.value = ''
+  try {
+    const response = await api.imRfqSendDirect(attempt.items, attempt.id)
+    if (request !== generation || !props.open || account !== accountKey()) return
+    if (!response.ok) {
+      if (!releaseRejectedSubmission(response)) formError.value = `${response.hint || '发送请求未被接受'}；提交结果未确认，请沿用本次请求重试`
+      return
+    }
+    const data = response.data
+    if (!data?.batch_id || !Array.isArray(data.commands) || !data.commands.length
+        || data.commands.some(command => !command.command_id || !command.peer_id)) {
+      formError.value = '尚未取得本次提交结果，请沿用本次请求重试核对'; return
+    }
+    submission.value = data
+    if (data.commands.every(command => command.status === 'sent')) {
+      message.success('服务端确认本批已发送'); emit('sent', codes)
+    } else if (data.commands.every(command => ['failed','cancelled','expired'].includes(command.status))) emit('failed', codes)
+    else emit('pending', codes)
+  } catch (error) {
+    if (request === generation && props.open && account === accountKey() && !releaseRejectedSubmission(error))
+      formError.value = `${error instanceof Error ? error.message : '发送请求失败'}；提交结果未确认，请沿用本次请求重试，不会重复创建指令`
+  } finally { sending.value = false }
+}
 async function confirm() {
   if (sending.value || !preview.value || !confirmRequestId) return
   const batch = preview.value
@@ -403,7 +446,10 @@ async function confirm() {
   try {
     const r = await api.imRfqSend(batch.batch_id, batch.version, requestId)
     if (request !== generation || !props.open) return
-    if (!r.ok) { formError.value = r.hint || '确认失败，未证明已发送'; return }
+    if (!r.ok) {
+      if (!releaseRejectedSubmission(r)) formError.value = `${r.hint || '确认失败，未证明已发送'}；提交结果未确认，请沿用本次确认重试`
+      return
+    }
     if (r.data?.batch_id !== batch.batch_id || !Array.isArray(r.data.commands) || !r.data.commands.length) {
       formError.value = '未得到本批确认结果，请用同一请求重试核对'; return
     }
@@ -412,7 +458,7 @@ async function confirm() {
     else if (r.data.commands.every(c => c.status === 'failed' || c.status === 'cancelled')) emit('failed',codes)
     else emit('pending',codes)
   } catch (e) {
-    if (request === generation) formError.value = `${e instanceof Error ? e.message : '确认请求失败'}；提交结果未确认，请沿用本次确认重试`
+    if (request === generation && props.open && !releaseRejectedSubmission(e)) formError.value = `${e instanceof Error ? e.message : '确认请求失败'}；提交结果未确认，请沿用本次确认重试`
   } finally { sending.value = false }
 }
 async function pollSubmission(){
@@ -454,7 +500,7 @@ function commandStatus(status: string): string {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
             </button>
           </div>
-          <p class="sub">先明确本方方向、询价量、起始收益率、边界和步幅，再选择收件人生成服务端预览。核对逐收件人最终首句后，第二次确认才授权发送。行情原文仅供复制或人工发送。</p>
+          <p class="sub">明确本方方向、询价量、起始收益率、边界、步幅和收件人后，可直接发送，也可先预览再确认。直接发送即提交本批询价；行情原文仅供复制或人工发送。</p>
           <p class="sub" data-testid="rfq-counterparty-capacity">
             每个企点账号最多50个活跃对手；本批已选{{ outgoingCount }}人。
             <span v-if="capacity">当前活跃{{ capacity.active }}/{{ capacity.limit }}人。</span>
@@ -509,7 +555,7 @@ function commandStatus(status: string): string {
                   <label class="fld">每轮步幅（BP）<input v-model="draft.step_bp" class="ny-input" inputmode="decimal" data-testid="rfq-step" :disabled="editingLocked" /></label>
                   <button class="btn-ghost" type="button" data-testid="rfq-prefill" :disabled="editingLocked || !draft.our_side" @click="prefillFromSaved(draft)">用已保存底价/策略补充空值</button>
                   <p v-if="draft.pricing_basis === 'bp'" class="source-note" data-testid="rfq-valuation">预填参考估值：{{ draft.fields.cnbd || '未提供' }}% · 估值日：{{ draft.valuation_date || '未提供' }}；日期仅作提示，未提供也可按中债估值估算。</p>
-                  <p class="source-note">买入：起始收益率 ≥ 边界；卖出：起始收益率 ≤ 边界。BP 模式使用服务端中债估值估算；没有估值数值时会说明原因，估值日期不作为前置条件。</p>
+                  <p class="source-note">起始收益率按本批输入发送，不再与谈价边界比较。BP 模式使用服务端中债估值估算；没有估值数值时会说明原因，估值日期不作为前置条件。</p>
                   <label class="fld source-note">行情原文（仅复制或人工发送，不进入自动首句）
                     <textarea v-model="draft.text" class="ny-input msg" rows="4" data-testid="rfq-text" :disabled="editingLocked" />
                   </label>
@@ -612,8 +658,10 @@ function commandStatus(status: string): string {
           <span class="muted">已选择 {{ outgoingCount }} 位收件人；同一人的首句由服务端合并</span>
           <span class="acts">
             <button class="btn-ghost cancel" type="button" :disabled="sending" @click="emit('close')">{{ confirmationStarted ? '关闭' : '取消' }}</button>
-            <button class="btn-ghost send" type="button" data-testid="rfq-preview" :disabled="sending || previewBusy || !!preview || !canPreview" @click="requestPreview">{{ previewBusy ? '正在生成预览…' : '生成服务端预览' }}</button>
-            <button class="btn-primary send" type="button" data-testid="rfq-confirm" :disabled="sending || !preview" @click="confirm">{{ sending ? '正在确认…' : submission ? '刷新本批确认结果' : '核对无误，确认授权发送' }}</button>
+            <button class="btn-ghost send" type="button" data-testid="rfq-preview" :disabled="sending || previewBusy || confirmationStarted || !!preview || !canPreview" @click="requestPreview">{{ previewBusy ? '正在生成预览…' : '生成服务端预览' }}</button>
+            <button v-if="!preview" class="btn-primary send" type="button" data-testid="rfq-direct-send"
+              :disabled="sending || previewBusy || (!confirmationStarted && !canPreview)" @click="sendDirect">{{ sending ? '正在提交…' : submission ? '刷新本批发送结果' : confirmationStarted ? '重试核对本次发送' : '直接发送' }}</button>
+            <button v-show="!!preview" class="btn-primary send" type="button" data-testid="rfq-confirm" :disabled="sending || !preview" @click="confirm">{{ sending ? '正在确认…' : submission ? '刷新本批确认结果' : '核对无误，确认授权发送' }}</button>
           </span>
         </div>
       </div>

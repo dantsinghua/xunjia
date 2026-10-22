@@ -45,7 +45,7 @@ class RecordedTransport:
 @pytest.fixture
 def case(tmp_path, request):
     clock = [NOW]
-    app = create_app(database_url='sqlite:///' + str(tmp_path / 'expiry.sqlite'),
+    app = create_app(submission_guard=lambda _owner: None, database_url='sqlite:///' + str(tmp_path / 'expiry.sqlite'),
                      enable_background=getattr(request, 'param', False), 
                      auth_config=AuthConfig(sso_secret='isolated-expiry-sso',
                          session_secret='isolated-expiry-session-at-least-32-characters', clock=lambda: clock[0]))

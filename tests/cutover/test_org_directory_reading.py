@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.cutover.test_im_catalog_selection import selection
-from tests.cutover.test_file_gateway_pair_isolation import directory_http, directory_request
+from tests.institution_test_support import directory_request
 
 ROOT=Path(__file__).resolve().parents[2]
 
@@ -89,23 +89,24 @@ def test_invalid_account_credentials_or_sources_never_turn_into_successful_empty
 
 @pytest.mark.parametrize('state',['ready','empty','unreported','error'])
 def test_real_signed_contacts_keep_org_state_and_full_pair_in_projection(selection,state):
-    s=selection
-    org={'departments':[{'id':'synthetic-d','parent_id':'','name':'Org A','order':1}],
+    s=selection;org={'departments':[{'id':'synthetic-d','parent_id':'','name':'Org A','order':1}],
          'members':[{'uin':'person-a','name':'A','account':'a','department_id':'synthetic-d','order':1}]}
-    extra={'org':org if state=='ready' else {'departments':[],'members':[]},
-           'org_state':state,'org_updated_at':s['now']-20 if state in ['ready','empty'] else None,
-           'org_error':'ORG_SOURCE_DECRYPT_OR_SCHEMA_ERROR' if state=='error' else None}
-    s['publish']('wb-a','account-a','contacts',extra=extra)
-    directory_request(s,refresh=True)
-    calls=list(s['wire'].calls)
-    response=s['api'].get('/api/im/contacts');assert response.status_code==200
-    result=response.json()['data']
-    assert (result['workbench_id'],result['account_uid'])==('wb-a','account-a')
-    assert result['org']==extra['org'] and result['org_state']==state
-    assert result['org_updated_at']==extra['org_updated_at'] and result['org_error']==extra['org_error']
-    other=json.loads(directory_request(s,wid='wb-b',uid='account-a'))
-    assert other['org']=={} and other['org_state']=='unreported'
-    assert s['wire'].calls==calls
+    # Institution organization is shared. Failed/unreported refreshes retain the last good version.
+    s['publish']('wb-a','account-a','contacts',extra={'org':org,'org_state':'ready','org_updated_at':s['now']-20})
+    s['refresh']()
+    extra={'org':org if state=='ready' else {'departments':[],'members':[]},'org_state':state,'org_updated_at':s['now']-10}
+    s['publish']('wb-a','account-a','contacts',extra=extra);s['refresh']();calls=list(s['wire'].calls)
+    response=s['api'].get('/api/im/contacts');assert response.status_code==200,response.text
+    result=response.json()['data'];assert (result['workbench_id'],result['account_uid'])==('wb-a','account-a')
+    if state in ('ready','empty'):
+        assert result['org']==extra['org'] and result['org_state']==state and result['org_updated_at']==s['now']-10
+        assert result['org_error'] is None
+    else:
+        assert result['org']==org and result['org_state']=='error' and result['org_updated_at']==s['now']-20
+        assert result['org_error']=='ORGANIZATION_REFRESH_FAILED'
+    other=s['runtime'].directory.contacts('wb-b','account-c','another-owner')
+    assert other['org']==result['org'] and other['org_updated_at']==result['org_updated_at']
+    assert other['contacts']!=result['contacts'] and s['wire'].calls==calls
 
 
 @pytest.fixture
@@ -162,12 +163,12 @@ def test_unexpected_org_provider_failure_is_published_as_error_with_last_success
 
 def test_native_from_env_accepts_authorized_org_key_references_without_legacy_network_branch(native_host_module,tmp_path,monkeypatch):
     import asyncio
-    from tests.cutover.file_gateway_fakes import AUTH
-    (tmp_path/'seal.hex').write_text((b's'*32).hex());(tmp_path/'sign.hex').write_text((b'h'*32).hex())
-    auth=tmp_path/'auth.yaml';auth.write_text('key: '+AUTH.key+'\nsm4_key: '+AUTH.sm4_key.decode()+'\n');auth.chmod(0o600)
-    cfg={'owner_user_id':'synthetic-org-bootstrap','account_uid':'3000000001','workbench_id':'synthetic-wb',
-         'seal_key_file':'seal.hex','sign_key_file':'sign.hex','org_password_file':'authorized-org.bin','org_password_format':'raw',
-         'file_gateway':{'uplink_url':'https://synthetic-up.invalid','downlink_url':'https://synthetic-down.invalid','auth_file':'auth.yaml'}}
+    from tests.institution_test_support import AUTH, BASE, YAML
+    from relay.gateway_paths import CONTRACT,InstitutionKeys,account_paths
+    auth=tmp_path/'auth.yaml';auth.write_text(YAML);auth.chmod(0o600)
+    cfg={'contract':CONTRACT,'workbench_id':'synthetic-wb','account_uid':'3000000001',
+         'org_password_file':'authorized-org.bin','org_password_format':'raw',
+         'file_gateway':{'base_url':BASE,'auth_file':'auth.yaml'}}
     path=tmp_path/'collector.json';path.write_text(json.dumps(cfg));path.chmod(0o600)
     monkeypatch.setenv('XUNJIA_COLLECTOR_VERSION','2.2');monkeypatch.setenv('XUNJIA_COLLECTOR_CONFIG_FILE',str(path))
     loop=asyncio.new_event_loop()
@@ -176,5 +177,29 @@ def test_native_from_env_accepts_authorized_org_key_references_without_legacy_ne
             bus=SimpleNamespace(supports_xunjia_v22_guard=True),loop=loop,box=None,data_dir=tmp_path/'runtime',
             legacy_inbox_disabled=lambda:True,contacts_provider=lambda a:{'contacts':[]})
         assert host.binding.account_uid==cfg['account_uid'] and not hasattr(host,'allow_native_send')
-        assert set(host.bridge.adapters)=={'oss'} and host.bridge.adapters['oss'].polls_downlink
+        keys=InstitutionKeys.from_auth(AUTH);assert host.binding.owner_user_id==keys.owner_id
+        assert host.bridge.adapters['oss'].outbound.path==account_paths('synthetic-wb','3000000001')['uplink_path']
+    finally:loop.close()
+
+
+@pytest.mark.parametrize('field',['owner_user_id','seal_key_file','uplink_url','downlink_url'])
+def test_bundled_host_rejects_retired_queue_fields_without_opening_old_ledger(native_host_module,tmp_path,monkeypatch,field):
+    import asyncio
+    from relay.gateway_paths import CONTRACT
+    cfg={'contract':CONTRACT,'workbench_id':'synthetic-wb','account_uid':'3000000001',
+         'file_gateway':{'base_url':'https://synthetic.invalid','auth_file':'not-read.yaml'}}
+    if field.endswith('_url'):cfg['file_gateway'][field]='https://retired.invalid/queue'
+    else:cfg[field]='must-not-be-read'
+    path=tmp_path/'collector.json';path.write_text(json.dumps(cfg));path.chmod(0o600)
+    root=tmp_path/'runtime';legacy=root/'xunjia-v22';legacy.mkdir(parents=True)
+    marker=legacy/'unknown.evidence';marker.write_bytes(b'preserve-unknown')
+    monkeypatch.setenv('XUNJIA_COLLECTOR_VERSION','2.2')
+    monkeypatch.setenv('XUNJIA_COLLECTOR_CONFIG_FILE',str(path))
+    loop=asyncio.new_event_loop()
+    try:
+        with pytest.raises(ValueError,match='invalid_institution_collector_configuration'):
+            native_host_module.XunjiaV22Host.from_env(store=SimpleNamespace(),bus=SimpleNamespace(),loop=loop,
+                box=None,data_dir=root,legacy_inbox_disabled=lambda:True)
+        assert marker.read_bytes()==b'preserve-unknown'
+        assert not (root/'institution-path-v1').exists()
     finally:loop.close()

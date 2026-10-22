@@ -7,8 +7,10 @@
   --ink: #2B2320;
   --muted: #6E6258;
   --line: rgba(176, 28, 36, .12);
-  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --serif: 'Noto Serif SC', serif;
+  --font-ui: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Zen Hei", "Segoe UI", system-ui, sans-serif;
+  --font-code: ui-monospace, "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  --mono: var(--font-ui);
+  --serif: var(--font-ui);
 }
 
 * { box-sizing: border-box; }
@@ -16,7 +18,7 @@ html, body, #app { height: 100%; }
 body {
   margin: 0;
   background: var(--paper);
-  font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-family: var(--font-ui);
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
 }
@@ -27,8 +29,10 @@ a:hover { color: #7C231F; }
 ::-webkit-scrollbar-thumb { background: rgba(176, 28, 36, .25); border-radius: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-.mono { font-family: var(--mono); }
-.serif { font-family: var(--serif); }
+.mono { font-family: var(--font-ui); font-variant-numeric: tabular-nums lining-nums; }
+.serif { font-family: var(--font-ui); }
+button, input, select, textarea { font-family: inherit; }
+svg text { font-family: var(--font-ui); font-variant-numeric: tabular-nums; }
 
 /* ---- 背景动画光斑 ---- */
 @keyframes blobA { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(60px, 40px) scale(1.15); } 100% { transform: translate(0, 0) scale(1); } }
@@ -89,7 +93,7 @@ input[type=checkbox].ny:checked::before { transform: scale(1); }
 .md-body table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
 .md-body th, .md-body td { border: 1px solid rgba(176, 28, 36, .16); padding: 5px 10px; text-align: left; }
 .md-body th { background: rgba(176, 28, 36, .06); color: #B01C24; }
-.md-body code { font-family: var(--mono); background: rgba(176, 28, 36, .08); padding: 1px 5px; border-radius: 4px; }
+.md-body code { font-family: var(--font-code); background: rgba(176, 28, 36, .08); padding: 1px 5px; border-radius: 4px; }
 .md-body strong { color: #B01C24; }
 .md-body ul, .md-body ol { margin: 6px 0; padding-left: 20px; }
 

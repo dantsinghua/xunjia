@@ -14,7 +14,7 @@ YAML = 'auth:\n  key: synthetic-browser-mq-key\n  sm4_key: 0123456789abcdef\n'
 def mq(ui):
     page, base, *_ = ui
     state = {'editable': True, 'configured': True, 'backend': 'file_gateway',
-             'base_url': 'https://mq.synthetic.invalid/its-relay/v1', 'credentials_set': True,
+             'base_url': 'https://mq.synthetic.invalid', 'credentials_set': True,
              'account_uid': 'synthetic-account', 'workbench_id': 'synthetic-wb',
              'revision': 'synthetic-revision-one', 'applied': True, 'note': 'synthetic applied'}
     calls = [];behavior = {'passed': True, 'save_error': None, 'applied': True}
@@ -46,8 +46,8 @@ def open_form(mq):
 def writes(mq):return [call for call in mq[3] if call[0]!='GET']
 
 
-def test_exactly_two_fields_no_sts_bucket_or_secret_readback(mq):
-    page=open_form(mq);expect(page.get_by_test_id('mq-config').locator('input,textarea,select')).to_have_count(2)
+def test_connection_and_tls_fields_no_sts_bucket_or_secret_readback(mq):
+    page=open_form(mq);expect(page.get_by_test_id('mq-config').locator('input,textarea,select')).to_have_count(5)
     expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
     for name in ('oss-sts-url','oss-endpoint','oss-bucket','oss-auth-key','oss-sm4-key'):
         assert page.locator('[name='+name+']').count()==0
@@ -55,7 +55,7 @@ def test_exactly_two_fields_no_sts_bucket_or_secret_readback(mq):
 
 def test_save_two_fields_revision_clears_yaml_without_other_operations(mq):
     page=open_form(mq);page.locator('[name=mq-config-yaml]').fill(YAML)
-    page.locator('[name=mq-base-url]').fill('https://new-mq.synthetic.invalid/its-relay/v1')
+    page.locator('[name=mq-base-url]').fill('https://new-mq.synthetic.invalid')
     page.get_by_test_id('mq-save').click();expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
     values=writes(mq);assert len(values)==1 and values[0][:2]==('PUT','/api/im/mq-config')
     assert set(values[0][2])=={'base_url','config_yaml','expected_revision'}
@@ -72,11 +72,11 @@ def test_blank_yaml_retains_and_public_status_survives_refresh(mq):
 
 def test_pending_uses_unsaved_form_without_saving_or_claiming_full_send(mq):
     page=open_form(mq);page.locator('[name=mq-config-yaml]').fill(YAML)
-    page.locator('[name=mq-base-url]').fill('https://unsaved-mq.synthetic.invalid/its-relay/v1')
+    page.locator('[name=mq-base-url]').fill('https://unsaved-mq.synthetic.invalid')
     page.get_by_test_id('mq-test').click();result=page.get_by_test_id('mq-test-result')
     expect(result).to_contain_text('待收文件 7 个');expect(result).to_contain_text('不代表')
     values=writes(mq);assert len(values)==1 and values[0][:2]==('POST','/api/im/mq-config/test')
-    assert values[0][2]['base_url'].startswith('https://unsaved-mq.') and mq[2]['base_url']=='https://mq.synthetic.invalid/its-relay/v1'
+    assert values[0][2]['base_url'].startswith('https://unsaved-mq.') and mq[2]['base_url']=='https://mq.synthetic.invalid'
 
 
 def test_failed_pending_displays_error_without_success_claim(mq):
@@ -95,12 +95,39 @@ def test_conflict_visible_without_auto_resubmit(mq):
     expect(page.get_by_text(mq[4]['save_error'],exact=False)).to_be_visible();assert len(writes(mq))==1
 
 
-def test_unwired_profile_disables_actions(mq):
+def test_unwired_profile_is_not_a_user_permission_denial(mq):
     mq[2].update(editable=False,applied=False,note='现役网关尚未确认此配置');page=open_form(mq)
-    expect(page.get_by_test_id('mq-save')).to_be_disabled();expect(page.get_by_test_id('mq-test')).to_be_disabled();assert writes(mq)==[]
+    expect(page.get_by_test_id('mq-save')).to_be_enabled();expect(page.get_by_test_id('mq-test')).to_be_enabled()
+    expect(page.get_by_test_id('mq-config')).not_to_contain_text('无权')
+    assert writes(mq)==[]
 
 
 def test_im_failure_does_not_hide_mq_configuration(mq):
     page,base,*_=mq
     page.route(base+'/api/im/links',lambda r:r.fulfill(status=503,content_type='application/json',body=json.dumps({'ok':False,'hint':'synthetic IM down'})))
     open_form(mq);expect(page.get_by_test_id('mq-save')).to_be_enabled()
+
+
+@pytest.mark.parametrize("action", ["save", "test"])
+def test_tls_paths_are_submitted_with_current_connection_only(mq, action):
+    page = open_form(mq)
+    page.locator('[name=mq-client-cert]').fill('/synthetic/tls/client.crt')
+    page.locator('[name=mq-client-key]').fill('/synthetic/tls/client.key')
+    page.locator('[name=mq-ca-file]').fill('/synthetic/tls/ca.crt')
+    page.get_by_test_id('mq-' + action).click()
+    expect(page.get_by_test_id('mq-' + action)).to_be_enabled()
+    calls = writes(mq)
+    assert len(calls) == 1
+    payload = calls[0][2]
+    assert payload['client_cert_file'] == '/synthetic/tls/client.crt'
+    assert payload['client_key_file'] == '/synthetic/tls/client.key'
+    assert payload['ca_file'] == '/synthetic/tls/ca.crt'
+    assert 'path' not in payload and 'bucket' not in payload
+
+
+def test_saved_certificate_paths_are_displayed_on_reload(mq):
+    mq[2].update(client_cert_file='/saved/client.crt', client_key_file='/saved/client.key')
+    page = open_form(mq)
+    expect(page.locator('[name=mq-client-cert]')).to_have_value('/saved/client.crt')
+    expect(page.locator('[name=mq-client-key]')).to_have_value('/saved/client.key')
+    assert writes(mq) == []

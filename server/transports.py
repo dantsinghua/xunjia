@@ -1,26 +1,17 @@
-"""Authenticated, durable file-gateway/mail transport core. No implicit failover.
+"""Authenticated, durable file-gateway transport core. No implicit failover.
 
-Network factories are injectable; mail uses TLS SMTP/IMAP and the file gateway
-is implemented by FileGatewayTransport. Only ack() after the caller commits advances
+The file gateway is implemented by FileGatewayTransport. Only ack() after the caller commits advances
 transport cursors. A submission is never evidence that the native IM sent it.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from email import policy
-from email.message import EmailMessage
-from email.parser import BytesParser
-from email.utils import getaddresses
 import hashlib
-import imaplib
 import json
 import os
 from pathlib import Path
 import re
-import smtplib
 import sqlite3
-import ssl
 import time
 
 from .receiver_ledger import account_lock
@@ -447,157 +438,6 @@ class _Transport:
         with self.store.db() as db:
             rows=db.execute("SELECT token,stream,epoch,position,reason FROM tx_source WHERE scope=? AND kind='quarantine' ORDER BY rowid DESC LIMIT ?",(self.store.scope,min(max(int(limit),1),200))).fetchall()
         return [dict(row) for row in rows]
-
-
-@dataclass(frozen=True)
-class MailConfig:
-    smtp_host:str
-    smtp_user:str
-    smtp_password:str=field(repr=False)
-    imap_host:str
-    imap_user:str
-    imap_password:str=field(repr=False)
-    outbound_from:str
-    outbound_to:tuple[str,...]
-    inbound_from:tuple[str,...]
-    inbound_to:tuple[str,...]
-    smtp_port:int=465
-    imap_port:int=993
-    smtp_tls:str='ssl'
-    mailbox:str='INBOX'
-    timeout:float=20
-
-    def __post_init__(self):
-        if not all((self.smtp_host,self.smtp_user,self.smtp_password,self.imap_host,self.imap_user,self.imap_password,self.outbound_from,self.outbound_to,self.inbound_from,self.inbound_to)):
-            raise TransportUnavailable('NOT_CONFIGURED: MAIL')
-        if self.smtp_tls not in ('ssl','starttls') or any(c in self.mailbox for c in '\r\n\x00'):
-            raise TransportUnavailable('MAIL_CONFIGURATION_INVALID')
-        for addr in (self.outbound_from,*self.outbound_to,*self.inbound_from,*self.inbound_to):
-            if not isinstance(addr,str) or not re.fullmatch(r'[^\s<>@,;]+@[^\s<>@,;]+',addr):
-                raise TransportUnavailable('MAIL_ALLOWLIST_INVALID')
-
-    @classmethod
-    def from_env(cls,env=None):
-        e=os.environ if env is None else env
-        try:
-            return cls(smtp_host=e['XUNJIA_SMTP_HOST'],smtp_user=e['XUNJIA_SMTP_USER'],smtp_password=e['XUNJIA_SMTP_PASSWORD'],
-                       imap_host=e['XUNJIA_IMAP_HOST'],imap_user=e['XUNJIA_IMAP_USER'],imap_password=e['XUNJIA_IMAP_PASSWORD'],
-                       outbound_from=e['XUNJIA_MAIL_FROM'],outbound_to=tuple(e['XUNJIA_MAIL_TO'].split(',')),
-                       inbound_from=tuple(e['XUNJIA_MAIL_ALLOWED_FROM'].split(',')),inbound_to=tuple(e['XUNJIA_MAIL_ALLOWED_TO'].split(',')),
-                       smtp_port=int(e.get('XUNJIA_SMTP_PORT','465')),imap_port=int(e.get('XUNJIA_IMAP_PORT','993')),smtp_tls=e.get('XUNJIA_SMTP_TLS','ssl'),mailbox=e.get('XUNJIA_IMAP_MAILBOX','INBOX'))
-        except (KeyError,ValueError):raise TransportUnavailable('NOT_CONFIGURED: MAIL') from None
-
-
-def _smtp(config):
-    context=ssl.create_default_context()
-    if config.smtp_tls=='ssl':return smtplib.SMTP_SSL(config.smtp_host,config.smtp_port,timeout=config.timeout,context=context)
-    connection=smtplib.SMTP(config.smtp_host,config.smtp_port,timeout=config.timeout)
-    try:connection.ehlo();connection.starttls(context=context);connection.ehlo()
-    except BaseException:connection.close();raise
-    return connection
-
-
-def _imap(config):
-    return imaplib.IMAP4_SSL(config.imap_host,config.imap_port,ssl_context=ssl.create_default_context(),timeout=config.timeout)
-
-
-class MailTransport(_Transport):
-    route='mail'
-    MAX_MAIL_BYTES=8*1024*1024
-    def __init__(self,binding:Binding,config:MailConfig,path,*,smtp_factory=None,imap_factory=None,**kwargs):
-        if config is None:raise TransportUnavailable('NOT_CONFIGURED: MAIL')
-        super().__init__(binding,path,**kwargs);self.config=config
-        self.smtp_factory=smtp_factory or _smtp;self.imap_factory=imap_factory or _imap
-        self.stream='imap-'+digest([config.imap_host,config.imap_user,config.mailbox])[:20]
-
-    def _mail(self,data,blob):
-        msg=EmailMessage()
-        msg['From']=self.config.outbound_from;msg['To']=', '.join(self.config.outbound_to)
-        msg['Subject']=('[xunjia-v2] '+data['kind']+' '+token(data['message_id']))[:200]
-        msg['Message-ID']='<xj.'+hashlib.sha256(data['message_id'].encode()).hexdigest()+'@xunjia.invalid>'
-        msg['X-Xunjia-Version']='2'
-        msg.set_content('Authenticated xunjia protocol attachment. No action is authorized by this visible body.')
-        msg.add_attachment(blob,maintype='application',subtype='octet-stream',filename='xunjia-v2.bin')
-        return msg
-    def _publish(self,data,blob):
-        connection=self.smtp_factory(self.config)
-        try:
-            connection.login(self.config.smtp_user,self.config.smtp_password)
-            refused=connection.send_message(self._mail(data,blob),from_addr=self.config.outbound_from,to_addrs=list(self.config.outbound_to))
-            if refused:raise TransportUnavailable('SMTP_RECIPIENT_REJECTED')
-        finally:
-            try:connection.quit()
-            except Exception:pass
-
-    def _parse(self,raw):
-        try:return self._parse_checked(raw)
-        except ProtocolError:raise
-        except Exception:raise ProtocolError('邮件解析失败') from None
-
-    def _parse_checked(self,raw):
-        if not isinstance(raw,bytes) or len(raw)>self.MAX_MAIL_BYTES:raise ProtocolError('邮件大小超限')
-        msg=BytesParser(policy=policy.default).parsebytes(raw)
-        if msg.defects or len(msg.get_all('From',[]))!=1 or len(msg.get_all('To',[]))!=1:raise ProtocolError('邮件头无效')
-        senders=[address.lower() for _,address in getaddresses(msg.get_all('From',[]))]
-        recipients=[address.lower() for _,address in getaddresses(msg.get_all('To',[]))]
-        if len(senders)!=1 or senders[0] not in {x.lower() for x in self.config.inbound_from} or not recipients or not set(recipients)<={x.lower() for x in self.config.inbound_to}:
-            raise ProtocolError('邮件不在固定收发白名单')
-        parts=[]
-        for part in msg.walk():
-            parts.append(part)
-            if len(parts)>12:raise ProtocolError('邮件结构过深或部件过多')
-        if len(parts)>12 or any(p.defects or p.get_content_type() in ('text/html','message/rfc822') for p in parts):raise ProtocolError('邮件结构不受支持')
-        attachments=[p for p in parts if p.get_content_disposition()=='attachment']
-        if len(attachments)!=1 or attachments[0].get_filename()!='xunjia-v2.bin' or attachments[0].get_content_type()!='application/octet-stream':
-            raise ProtocolError('邮件协议附件无效')
-        return self._incoming(attachments[0].get_payload(decode=True))
-
-    def poll(self,limit=50):
-        if not 1<=limit<=200:raise ValueError('读取批量须为1至200')
-        connection=self.imap_factory(self.config)
-        try:
-            connection.login(self.config.imap_user,self.config.imap_password)
-            status,_=connection.select(self.config.mailbox,readonly=True)
-            if status!='OK':raise TransportUnavailable('IMAP_MAILBOX_UNAVAILABLE')
-            _,values=connection.response('UIDVALIDITY')
-            if not values or not re.fullmatch(rb'[0-9]+',values[0]):raise TransportUnavailable('IMAP_UIDVALIDITY_UNAVAILABLE')
-            epoch=values[0].decode('ascii');cursor=self.store.cursor(self.stream,epoch)
-            status,found=connection.uid('search',None,f'UID {cursor+1}:*')
-            if status!='OK':raise TransportUnavailable('IMAP_SEARCH_UNAVAILABLE')
-            ids=sorted({int(x) for x in (found[0] or b'').split() if x.isdigit() and int(x)>cursor})[:limit]
-            for uid in ids:
-                status,metadata=connection.uid('fetch',str(uid),'(RFC822.SIZE)')
-                size=re.search(rb'RFC822.SIZE\s+(\d+)',b' '.join(x for x in metadata if isinstance(x,bytes)))
-                if status!='OK' or not size or int(size[1])>self.MAX_MAIL_BYTES:
-                    self.store.stage(self.stream,epoch,uid,reason='mail-size-unavailable-or-too-large');continue
-                status,body=connection.uid('fetch',str(uid),'(BODY.PEEK[])')
-                raw=next((x[1] for x in body if isinstance(x,tuple) and len(x)==2 and isinstance(x[1],bytes)),None)
-                if status!='OK' or raw is None:raise TransportUnavailable('IMAP_BODY_UNAVAILABLE')
-                try:data=self._parse(raw)
-                except ProtocolError:
-                    self.store.stage(self.stream,epoch,uid,reason='mail-authentication-or-attachment-rejected:'+hashlib.sha256(raw).hexdigest());continue
-                self.store.stage(self.stream,epoch,uid,data)
-        finally:
-            try:connection.logout()
-            except Exception:pass
-        return self._pending(self.stream,limit)
-
-    def reconcile(self,command):
-        self._command(command,'query');self.poll()
-        receipt=self.store.receipt(command)
-        if receipt and receipt['status'] in ('sent','failed','cancelled'):return receipt
-        self._submit(command,'query')
-        return receipt or self._waiting(command)
-    def _publish_event(self,data,blob):self._publish(data,blob)
-    def _latest_book(self,kind):
-        self.poll()
-        with self.store.db() as db:rows=db.execute('SELECT data FROM tx_message WHERE scope=? AND kind=?',(self.store.scope,kind)).fetchall()
-        if not rows:raise TransportUnavailable('NOT_CONFIGURED: DIRECTORY')
-        data=max((json.loads(row['data']) for row in rows),key=lambda item:item['created_at'])
-        self.codec._validate(data)
-        return data['payload']
-    def catalog(self):return self._latest_book('catalog')
-    def contacts(self):return self._latest_book('contacts')
 
 
 class TransportRouter:

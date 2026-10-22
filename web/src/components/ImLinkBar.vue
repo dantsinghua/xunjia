@@ -8,7 +8,7 @@ import {
   imTarget, loadImLinks, orgEmpty, orgTree, imOrg, imOrgStatus, orgEmptyLabel, orgReadNotice, imHealthError, refreshImContacts, selectImTarget, type ImLink,
 } from '../lib/imLink'
 
-const props = withDefaults(defineProps<{ showAddressBook?: boolean }>(), { showAddressBook: true })
+const props = withDefaults(defineProps<{ showAddressBook?: boolean; showAddressBookDetails?: boolean }>(), { showAddressBook: true, showAddressBookDetails: true })
 
 const { message } = App.useApp()
 const busy = ref(false)
@@ -52,7 +52,7 @@ async function readBook(refresh = false) {
   busy.value = true
   try {
     const got = await refreshImContacts(refresh)
-    openBook.value = true
+    openBook.value = props.showAddressBookDetails
     if (got.org_state === 'error') message.warning(orgReadNotice(imOrg.value, got))
     else if (got.source === 'catalog') {
       message[orgEmptyLabel(got.org, got) ? 'warning' : 'success'](orgReadNotice(got.org, got))
@@ -81,7 +81,7 @@ async function readBook(refresh = false) {
         <span class="im-tag">{{ imModeLabel(imCurrent) }}</span>
         <span v-if="imCurrent.mode !== 'oss'" class="mono im-ep">{{ imCurrent.endpoint }}</span>
         <span v-else class="mono im-ep">{{ imCurrent.workbench_id }}</span>
-        <span v-if="imCurrent.catalog_stale" class="im-stale">目录已过期</span>
+        <span v-if="imCurrent.catalog_stale" class="im-stale">目录已过期 / 通道未就绪</span>
         <span v-else class="im-ok">{{ imCurrent.mode === 'oss' ? '目录已校验' : '测试通过' }}</span>
       </template>
       <span v-else class="im-miss">未接入。请到采集通道选择公网上报或邮件中转，选好工作台和企点号，测试通过后在这里切换。</span>
@@ -90,7 +90,7 @@ async function readBook(refresh = false) {
       <button v-if="props.showAddressBook" class="btn-ghost im-btn" type="button" :disabled="busy || !imCurrent" @click="readBook(true)">刷新通讯录</button>
       <router-link class="im-cfg" to="/link">配置通道</router-link>
     </div>
-    <div v-if="props.showAddressBook && openBook && imCurrent" class="im-book" :class="{ tree: showOrg }">
+    <div v-if="props.showAddressBook && props.showAddressBookDetails && openBook && imCurrent" class="im-book" :class="{ tree: showOrg }">
       <template v-if="showOrg">
         <div class="im-head">
           <span class="im-k">组织架构</span>

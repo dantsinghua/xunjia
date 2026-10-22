@@ -1,4 +1,4 @@
-﻿"""Approved institution/path contract; no real credentials, IM or network."""
+"""Approved institution/path contract; no real credentials, IM or network."""
 from collections import defaultdict
 from email import policy
 from email.parser import BytesParser
@@ -18,10 +18,10 @@ class Paths:
     def __init__(self):
         self.queues=defaultdict(list);self.calls=[];self.now=NOW;self.lose_download=False
     def client(self,path):
-        return FileGatewayClient("https://relay.invalid/its-relay/v1",AUTH,path=path,opener=self,clock=lambda:self.now)
+        return FileGatewayClient("https://relay.invalid",AUTH,path=path,opener=self,clock=lambda:self.now)
     def open(self,request,timeout):
         u=urlsplit(request.full_url);p=parse_qs(u.query)["path"][0];op=u.path.rsplit("/",1)[-1]
-        headers={k.lower():v for k,v in request.header_items()};decoded=decode_token(headers["access_token"])
+        headers={k.lower():v for k,v in request.header_items()};decoded=decode_token(headers["accesstoken"])
         assert decoded["key"]==AUTH.key
         self.calls.append((p,op));q=self.queues[p]
         if op=="pending":return Response(200,json.dumps({"pending":len(q)}).encode())
@@ -57,8 +57,8 @@ def test_fixed_path_and_same_host_isolation():
     assert up.download().content==b"one" and up.download() is None
 
 def test_different_key_same_path_has_different_ledger_identity():
-    one=FileGatewayClient("https://relay.invalid",AUTH,path="same")
-    two=FileGatewayClient("https://relay.invalid",GatewayAuth("other",AUTH.sm4_key),path="same")
+    one=FileGatewayClient("https://relay.invalid",AUTH,path="same",opener=Paths())
+    two=FileGatewayClient("https://relay.invalid",GatewayAuth("other",AUTH.sm4_key),path="same",opener=Paths())
     assert one.queue_identity!=two.queue_identity
 
 def test_immutable_event_rebind_and_ack_only_after_commit(tmp_path):

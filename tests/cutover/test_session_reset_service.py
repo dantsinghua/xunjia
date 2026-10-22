@@ -5,31 +5,32 @@ import pytest
 from fastapi.testclient import TestClient
 from server.app import create_app
 from server.auth import AuthConfig, AuthUser
-from server.file_gateway_transport import FileGatewayTransport
+from server.institution_transport import InstitutionTransport
 from server.transports import TransportRouter
 from tests.cutover.file_gateway_fakes import Gateway, NOW
-from tests.cutover.test_session_reset_protocol import B
+from tests.cutover.test_session_reset_protocol import B as ORIGINAL_B
+from tests.institution_test_support import build_harness, AUTH, collector
+from relay.gateway_paths import InstitutionKeys, account_paths
+B=InstitutionKeys.from_auth(AUTH).binding(ORIGINAL_B.workbench_id,ORIGINAL_B.account_uid)
+UP_PATH=account_paths(B.workbench_id,B.account_uid)['uplink_path']
+DOWN_PATH=account_paths(B.workbench_id,B.account_uid)['downlink_path']
 
 
 @pytest.fixture
-def reset_case(tmp_path):
-    gateway = Gateway()
-    now=[NOW]
-    adapter = FileGatewayTransport(B, gateway.client('up'), gateway.client('down'),
-        tmp_path/'service.sqlite3', role='service', clock=lambda: now[0])
-    transport = TransportRouter({(B.owner_user_id,B.account_uid,'oss'): adapter})
-    app = create_app(database_url='sqlite:///' + str(tmp_path/'business.sqlite3'),
-        auth_config=AuthConfig(sso_secret='isolated-reset-sso', session_secret='r'*40, clock=lambda: now[0]),
-        enable_background=False, transport=transport)
-    app.state.repository.bind_account(B.owner_user_id, B.account_uid, B.workbench_id)
-    token = app.state.auth.issue_token(AuthUser(B.owner_user_id, 'isolated reset trader'))
-    with TestClient(app) as client:
-        client.headers['Authorization'] = 'Bearer ' + token
-        case=SimpleNamespace(app=app, client=client, gateway=gateway, adapter=adapter,
-            path=tmp_path, now=now, body={'request_id':'synthetic-reset-request','expected_binding_version':1,'confirmed':True})
-        setup_wire(case)
-        case.initial_calls=list(gateway.calls)
-        yield case
+def reset_case(tmp_path,monkeypatch):
+    s=build_harness(tmp_path,monkeypatch,selected=False)
+    s['seed'](B.workbench_id,B.account_uid);s['refresh']()
+    app=s['app'];client=s['api']
+    token=app.state.auth.issue_token(AuthUser(B.owner_user_id,'isolated reset trader'))
+    client.headers['Authorization']='Bearer '+token
+    response=client.post('/api/im/binding/select',json={'workbench_id':B.workbench_id,'account_uid':B.account_uid,'expected_version':0})
+    assert response.status_code==200,response.text
+    adapter=app.state.transport.adapters[(B.owner_user_id,B.account_uid,'oss')]
+    case=SimpleNamespace(app=app,client=client,gateway=s['wire'],adapter=adapter,path=tmp_path,
+        now=s['clock'],source=s,body={'request_id':'synthetic-reset-request','expected_binding_version':1,'confirmed':True})
+    setup_wire(case);case.initial_calls=list(s['wire'].calls)
+    try:yield case
+    finally:s['stack'].close()
 
 
 def test_actual_current_binding_reset_api_exists_without_starting_background_or_native(reset_case):
@@ -50,7 +51,7 @@ def test_authenticated_confirmed_request_is_durable_not_falsely_complete(reset_c
         rows=tx.execute('SELECT * FROM xj2_session_reset').fetchall()
         assert len(rows)==1
     assert reset_case.receiver.account_epoch()==0
-    assert reset_case.gateway.queues['down.invalid']==[], 'No control or text is sent by the disabled test lifecycle'
+    assert reset_case.gateway.queues[DOWN_PATH]==[], 'No control or text is sent by the disabled test lifecycle'
 
 
 @pytest.mark.parametrize('change', [{'confirmed':False},{'expected_binding_version':99},
@@ -69,12 +70,21 @@ def setup_wire(case):
     from server.receiver_ledger import ReceiverLedger
     from relay.collector_bridge import CollectorBridge
     case.receiver=ReceiverLedger(case.path/'receiver.sqlite3',B,clock=lambda:case.now[0])
-    case.collector=FileGatewayTransport(B,case.gateway.client('down'),case.gateway.client('up'),
-        case.path/'collector.sqlite3',role='collector',clock=lambda:case.now[0])
+    case.collector=collector(case.source,B.workbench_id,B.account_uid,filename='collector.sqlite3')
     case.quiet=[True]
     case.bridge=CollectorBridge(ledger=case.receiver,adapters={'oss':case.collector},
         native_send=lambda _:pytest.fail('Reset handshake cannot execute native text'),
         native_reconcile=lambda _:None,native_quiescent=lambda:case.quiet[0])
+    # Complete the current-account control handshake before testing a distinct reset.
+    from relay.gateway_paths import CONTRACT
+    def contexts(data):
+        p=data['payload']
+        if p.get('op')=='activate_context':
+            state=case.receiver.activate_context(p['context_id'],p['context_version'],published_source_highwater=case.collector.store.source_highwater)
+            case.collector.publish_manifest({'contract':CONTRACT,'op':'context_ready',**state})
+        elif p.get('op')!='sync_contacts':raise AssertionError('unexpected control')
+    case.collector.manifest_handler=contexts
+    case.bridge.run_once();case.app.state.inbox.poll_once();case.collector.poll()
     case.bridge.publish_capabilities()
     return case
 
@@ -208,7 +218,7 @@ def native_event(case,identity,direction='in'):
 
 def wire_event(case,identity):
     from relay.protocol import Codec
-    values=[Codec(B,clock=lambda:case.now[0]).unpack(body) for _,body in case.gateway.queues['up.invalid']]
+    values=[Codec(B,clock=lambda:case.now[0]).unpack(body) for _,body in case.gateway.queues[UP_PATH]]
     return next(x for x in values if x['kind']=='event' and x['payload']['event_id']==identity)
 
 
@@ -224,10 +234,10 @@ def test_frozen_source_cut_keeps_newer_messages_fence_and_rejects_late_old_work(
     delayed=wire_event(c,'before-human')
     # The vendor seam delays this original signed publication; no envelope is
     # fabricated or re-signed. It will arrive after the authenticated cut.
-    for index,(_,blob) in enumerate(c.gateway.queues['up.invalid']):
+    for index,(_,blob) in enumerate(c.gateway.queues[UP_PATH]):
         from relay.protocol import Codec
         if Codec(B,clock=lambda:c.now[0]).unpack(blob)['payload'].get('event_id')=='before-human':
-            held_packet=c.gateway.queues['up.invalid'].pop(index);break
+            held_packet=c.gateway.queues[UP_PATH].pop(index);break
     else:pytest.fail('Expected actual delayed signed packet')
     c.app.state.inbox.poll_once()
     old_analysis=store.claim_analysis(B.owner_user_id,tid,force=True)
@@ -300,14 +310,14 @@ def test_first_reset_requires_real_signed_capability_without_pausing_or_persisti
     result=confirmed(c);cid=result['commands'][0]['command_id'];row=service.commands_core.get(B.owner_user_id,cid)
     before=store.group(B.owner_user_id,row['group_id'])
     if unavailable=='old-catalog':
-        c.bridge.native_quiescent=None;c.now[0]+=1;c.bridge.publish_capabilities()
-    else:c.gateway.forced_status=503
+        c.source['publish'](B.workbench_id,B.account_uid,'catalog',extra={'capabilities':['negotiation-v22-watermark']});c.source['refresh']()
+    else:c.source['advance'](61)
     response=c.client.post('/api/im/session-reset',json=c.body)
-    assert response.status_code in (400,409,503),response.text
+    assert response.status_code in (400,403,409,503),response.text
     assert store.group(B.owner_user_id,row['group_id'])==before
     assert service.commands_core.get(B.owner_user_id,cid)==row
     with store.db.transaction(write=False) as tx:assert tx.execute('SELECT COUNT(*) AS n FROM xj2_session_reset').fetchone()['n']==0
-    assert c.gateway.queues['down.invalid']==[]
+    assert c.gateway.queues[DOWN_PATH]==[]
 
 
 def test_existing_operation_retries_and_complete_reads_do_not_depend_on_catalog_network(reset_case,monkeypatch):
@@ -454,7 +464,7 @@ def test_unattributed_legacy_thread_cannot_claim_or_build_production_wire(reset_
         assert tx.execute('SELECT workbench_id FROM xj2_thread WHERE thread_id=?',(row['thread_id'],)).fetchone()['workbench_id'] is None
 
 
-from tests.cutover.test_im_catalog_selection import selection, directory_http, choose, OWNER as DIRECTORY_OWNER
+from tests.cutover.test_im_catalog_selection import selection, choose, OWNER as DIRECTORY_OWNER
 
 
 def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native_guard(selection):
@@ -464,9 +474,8 @@ def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native
     from relay.protocol import Binding
     s=selection;app=s['app'];store=app.state.repository;service=app.state.inquiry;owner=DIRECTORY_OWNER
     binding_a=app.state.transport.adapters[(owner,'account-a','oss')].binding
-    native_a=FileGatewayTransport(binding_a,s['client']('wb-a','account-a',lane='down'),
-        s['client']('wb-a','account-a',lane='up'),s['tmp']/'cross-native-a.sqlite3',role='collector')
-    rx_a=ReceiverLedger(s['tmp']/'cross-rx-a.sqlite3',binding_a)
+    native_a=collector(s,'wb-a','account-a',filename='cross-native-a.sqlite3')
+    rx_a=ReceiverLedger(s['tmp']/'cross-rx-a.sqlite3',native_a.binding)
     bridge_a=CollectorBridge(ledger=rx_a,adapters={'oss':native_a},native_send=lambda _:pytest.fail('No native send in namespace gate'),
         native_reconcile=lambda _:None,native_quiescent=lambda:True)
     item={'code':'SYN-WORKBENCH-A','peer_ids':['same-peer'],'our_side':'BUY','volume_wan':'1000',
@@ -486,20 +495,17 @@ def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native
         original_group=dict(tx.execute('SELECT * FROM xj2_group WHERE group_id=?',(command_a['group_id'],)).fetchone())
         original_messages=[dict(x) for x in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(thread_a,)).fetchall()]
     assert original_thread['source_watermark']==1
+    s['publish']('wb-a','account-a','catalog',online=False)
+    s['seed']('wb-b','account-a');s['refresh']()
     selected=choose(s,'wb-b','account-a');assert selected.status_code==200,selected.text
-    # Selection legitimately invalidates the old preview control version.  The
-    # reset below must preserve the already-selected-away workspace exactly.
+    # User explicitly selected destructive reset: no old task/history is migrated.
     with store.db.transaction(write=False) as tx:
-        after_selection=dict(tx.execute('SELECT * FROM xj2_group WHERE group_id=?',(command_a['group_id'],)).fetchone())
-    assert {k:v for k,v in after_selection.items() if k!='control_version'}=={k:v for k,v in original_group.items() if k!='control_version'}
-    assert after_selection['control_version']==original_group['control_version']+1
-    original_group=after_selection
+        for table in ('xj2_command','xj2_group','xj2_thread','xj2_message','xj2_peer'):
+            assert tx.execute('SELECT COUNT(*) AS n FROM '+table).fetchone()['n']==0
     binding_b=app.state.transport.adapters[(owner,'account-a','oss')].binding
     from relay.protocol import Codec,envelope
     from server.negotiation.prices import InvalidFact
     import json
-    with store.db.transaction(write=False) as tx:
-        retained_command=dict(tx.execute('SELECT * FROM xj2_command WHERE command_id=?',(command_a['command_id'],)).fetchone())
     for kind in ('receipt','event'):
         payload={'command_id':command_a['command_id'],'content_hash':command_a['content_hash'],
             'peer_id':'same-peer','account_uid':binding_b.account_uid,'status':'sent',
@@ -513,14 +519,14 @@ def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native
             peer_id='same-peer',command_id=command_a['command_id'],control_version=1,
             content_hash=command_a['content_hash'] if kind=='receipt' else '',
             created_at=time.time(),expires_at=time.time()+120)))
-        with pytest.raises((InvalidFact,PermissionError)):app.state.inbox.apply(binding_b,signed)
+        if kind=='receipt':assert app.state.inbox.apply(binding_b,signed) is None
+        else:
+            with pytest.raises((InvalidFact,PermissionError)):app.state.inbox.apply(binding_b,signed)
         with store.db.transaction(write=False) as tx:
-            assert dict(tx.execute('SELECT * FROM xj2_command WHERE command_id=?',(command_a['command_id'],)).fetchone())==retained_command
-            assert dict(tx.execute('SELECT * FROM xj2_thread WHERE thread_id=?',(thread_a,)).fetchone())==original_thread
-            assert [dict(x) for x in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(thread_a,)).fetchall()]==original_messages
-    native_b=FileGatewayTransport(binding_b,s['client']('wb-b','account-a',lane='down'),
-        s['client']('wb-b','account-a',lane='up'),s['tmp']/'cross-native-b.sqlite3',role='collector')
-    rx_b=ReceiverLedger(s['tmp']/'cross-rx-b.sqlite3',binding_b)
+            for table in ('xj2_command','xj2_group','xj2_thread','xj2_message'):
+                assert tx.execute('SELECT COUNT(*) AS n FROM '+table).fetchone()['n']==0
+    native_b=collector(s,'wb-b','account-a',filename='cross-native-b.sqlite3')
+    rx_b=ReceiverLedger(s['tmp']/'cross-rx-b.sqlite3',native_b.binding)
     bridge_b=CollectorBridge(ledger=rx_b,adapters={'oss':native_b},native_send=lambda _:pytest.fail('No native send in reset'),
         native_reconcile=lambda _:None,native_quiescent=lambda:True)
     bridge_b.publish_capabilities()
@@ -532,12 +538,13 @@ def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native
         app.state.session_reset.run_once();bridge_b.run_once();app.state.inbox.poll_once()
         status=s['api'].get('/api/im/session-reset').json()['data']
         if status['state']=='complete':break
+        s['advance'](6)
         time.sleep(.2)
     assert status['state']=='complete' and status['snapshot']['published_source_highwater']==0
     with store.db.transaction(write=False) as tx:
-        assert dict(tx.execute('SELECT * FROM xj2_thread WHERE thread_id=?',(thread_a,)).fetchone())==original_thread
-        assert dict(tx.execute('SELECT * FROM xj2_group WHERE group_id=?',(command_a['group_id'],)).fetchone())==original_group
-        assert [dict(x) for x in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(thread_a,)).fetchall()]==original_messages
+        assert tx.execute('SELECT * FROM xj2_thread WHERE thread_id=?',(thread_a,)).fetchone() is None
+        assert tx.execute('SELECT * FROM xj2_group WHERE group_id=?',(command_a['group_id'],)).fetchone() is None
+        assert tx.execute('SELECT COUNT(*) AS n FROM xj2_message').fetchone()['n']==0
     preview_b=service.preview(owner,'wb-b-preview',[{**item,'code':'SYN-WORKBENCH-B'}])
     round_b=service.confirm(owner,preview_b['batch_id'],1,'wb-b-confirm')
     row_b=service.commands_core.get(owner,round_b['commands'][0]['command_id'])
@@ -547,5 +554,7 @@ def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native
     assert wire['workbench_id']=='wb-b' and wire['source_watermark']==0 and wire['account_epoch']==1
     bridge_b.publish_native({'event_id':'native-b-not-yet-observed','peer_id':'same-peer','direction':'in',
         'text':'isolated newer B fact','ext_msg_id':'native-b-id','occurred_at':time.time()})
-    answer=rx_b.execute(wire,lambda _:pytest.fail('A watermark must never make an unseen B message appear observed'))
+    packet=envelope(binding_b,'command',wire,message_id=wire['command_id'],peer_id=wire['peer_id'],command_id=wire['command_id'],control_version=wire['control_version'],content_hash=wire['content_hash'],created_at=s['clock'][0],expires_at=wire['expires_at'])
+    decoded=Codec(rx_b.binding,clock=lambda:s['clock'][0]).unpack(app.state.transport.adapters[(owner,'account-a','oss')].codec.pack(packet))['payload']
+    answer=rx_b.execute(decoded,lambda _:pytest.fail('A watermark must never make an unseen B message appear observed'))
     assert answer['status']=='cancelled' and 'newer-native-message' in answer['evidence']

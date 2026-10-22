@@ -2,10 +2,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { api } from '../../src/api'
 const response=(data:unknown)=>new Response(JSON.stringify(data))
-test('交易板保留服务端方向、限价、gap和行情，不推算缺值',async()=>{
- globalThis.fetch=async()=>response({ok:true,data:[{id:'p',name:'对手',bonds:[{code:'000001.IB',name:'券',own_side:'SELL',peer_quote:'-0.05',own_limit:'-0.10',gap_bp:'0.00',market_bid:'1.95',market_ofr:null,quote_at:'2026-10-13T10:00:00+08:00',freshness:'已过期',phase:'等待人工'}]}]})
+test('交易板保留服务端对手价量、方向、限价和gap，不用市场行情替代',async()=>{
+ globalThis.fetch=async()=>response({ok:true,data:[{id:'p',name:'对手',bonds:[{code:'000001.IB',name:'券',own_side:'SELL',peer_quote:'-0.05',peer_volume_wan:'0',own_limit:'-0.10',gap_bp:'0.00',market_bid:'1.95',market_ofr:null,quote_at:'2026-10-13T10:00:00+08:00',freshness:'已过期',phase:'等待人工'}]}]})
  const bond=(await api.counterparties()).data[0].bonds[0]
- assert.deepEqual((bond as any).trade,{own_side:'SELL',peer_quote:'-0.05',own_limit:'-0.10',gap_bp:'0.00',market_bid:'1.95',market_ofr:'—',quote_at:'2026-10-13T10:00:00+08:00',freshness:'已过期',phase:'等待人工'})
+ assert.deepEqual((bond as any).trade,{own_side:'SELL',peer_quote:'-0.05',own_limit:'-0.10',gap_bp:'0.00',peer_volume_wan:'0',quote_at:'2026-10-13T10:00:00+08:00',freshness:'已过期',phase:'等待人工'})
 })
 test('XLSX导出发送完整筛选且返回服务端原始文件',async()=>{
  const filter={keyword:'测试',chips:{当前状态:3},prices:{Bid:{lo:'2',hi:'3'}},channel:'broker',broker:'9',groups:['bond-all']}
@@ -28,4 +28,13 @@ test('正式public行情与未配置空态可见，mock仍拒绝',async()=>{
 test('仅有出站方向时显示本方，不猜人工或机器人',async()=>{
  globalThis.fetch=async()=>response({ok:true,data:{messages:[{dir:'out',text:'one'},{dir:'outgoing',text:'two'},{dir:'out',role:'bot',text:'three'}]}})
  const rows=(await api.monitorChat('p')).data;assert.equal(rows[0].role,'self');assert.equal(rows[0].tag,'本方');assert.equal(rows[1].role,'self');assert.equal(rows[2].role,'bot')
+})
+
+test('成员控制使用当前对手本券标识；合成总暂停不能伪造本券已放弃',async()=>{
+ globalThis.fetch=async()=>response({ok:true,data:[{id:'p',bonds:[{session_id:'member-a',code:'SYN-A',member_send_allowed:true,send_allowed:false,group_send_allowed:true,state:'OPEN'}]}]})
+ const b=(await api.counterparties()).data[0].bonds[0]
+ assert.equal(b.memberSendAllowed,true);assert.equal(b.sendAllowed,false);assert.equal(b.groupState,'OPEN')
+ let target='',body='';globalThis.fetch=async(url,init)=>{target=String(url);body=String(init?.body);return response({ok:true,data:{member_id:'member-a'}})}
+ assert.equal((await api.memberSending('member-a',false)).ok,true)
+ assert.equal(target,'/api/negotiation/members/member-a/sending');assert.deepEqual(JSON.parse(body),{allowed:false})
 })

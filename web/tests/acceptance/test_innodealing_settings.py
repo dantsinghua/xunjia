@@ -53,3 +53,10 @@ def test_im_failure_does_not_hide_quote_configuration(inno):
     page,base,_,_=inno
     page.route(base+'/api/im/links',lambda r:r.fulfill(status=503,content_type='application/json',body=json.dumps({'ok':False,'hint':'synthetic IM down'})))
     open_page(inno);expect(page.get_by_test_id('inno-test')).to_be_enabled()
+
+def test_panel_has_no_manager_gate(inno):
+    inno[2].pop('can_manage',None)
+    page=open_page(inno)
+    expect(page.get_by_test_id('inno-test')).to_be_enabled()
+    expect(page.get_by_test_id('inno-start')).to_be_enabled()
+    expect(page.get_by_test_id('inno-config')).not_to_contain_text('权限')

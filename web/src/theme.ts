@@ -1,7 +1,7 @@
 import type { ThemeConfig } from 'ant-design-vue/es/config-provider/context'
 
 /** 南银理财现券询价工作台 · 设计语言(还原设计稿 现券询价机器人.dc.html)
- *  品牌深红 #B01C24,玻璃拟态,背景 #F3F0EA,Noto 字体。 */
+ *  品牌深红 #B01C24,玻璃拟态,背景 #F3F0EA,统一离线系统字体。 */
 export const NY = {
   red: '#B01C24',
   redBright: '#C2333B',
@@ -36,8 +36,7 @@ export const STATUS_COLOR: Record<string, [string, string, string]> = {
   未成交: ['rgba(110,98,88,.12)', '#5C5148', 'rgba(110,98,88,.3)'],
 }
 
-const FONT_SANS =
-  "'Noto Sans SC','PingFang SC','Microsoft YaHei','Hiragino Sans GB',system-ui,sans-serif"
+const FONT_SANS = 'var(--font-ui)'
 
 export const antdTheme: ThemeConfig = {
   token: {

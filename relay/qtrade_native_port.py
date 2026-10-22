@@ -141,6 +141,9 @@ class QTradeNativePort:
                 and isinstance(native_id, str) and native_id
                 and isinstance(confirmation, str) and confirmation):
             return {"status": "sent", "evidence": "qtrade-confirmed-native:" + native_id, "native_id": native_id}
+        if (not ok and code == "SEND_FAILED" and data.get("native_action_attempted") is False
+                and isinstance(data.get("reason"), str) and data["reason"]):
+            return {"status": "failed", "evidence": "qtrade-rejected-before-native:" + data["reason"][:160]}
         if not ok and code in _PRE_EXECUTION:
             return {"status": "failed", "evidence": "qtrade-rejected-before-native:" + code}
         return {"status": "unknown", "evidence": "qtrade-result-needs-native-reconciliation"}
@@ -225,7 +228,23 @@ class QTradeNativePort:
         value.ok = result.get("ok") in (True, 1)
         value.code = result.get("code")
         value.data = result.get("data")
-        return self._result(value)
+        outcome = self._result(value)
+        if outcome["status"] == "unknown":
+            readback = getattr(self.store, "confirmed_outbound_for_trace", None)
+            message = readback(row["trace_id"]) if callable(readback) else None
+            if (isinstance(message, dict) and message.get("trace_id") == row["trace_id"]
+                    and message.get("account_id") == account["id"]
+                    and message.get("session_id") == str(account["id"]) + ":" + command["peer_id"]
+                    and message.get("dir") == "out" and message.get("type") == "text"
+                    and message.get("text") == command["text"] and message.get("state") == "DELIVERED"
+                    and isinstance(message.get("ext_msg_id"), str) and message["ext_msg_id"]
+                    and isinstance(message.get("confirmed_by"), str) and message["confirmed_by"]):
+                outcome = {"status": "sent", "native_id": message["ext_msg_id"],
+                    "evidence": "qtrade-native-readback:" + row["trace_id"]}
+                stamp = message.get("ts_ms")
+                if type(stamp) in (int, float) and math.isfinite(stamp) and stamp > 0:
+                    outcome["executed_at"] = stamp / 1000
+        return outcome
 
     def normalize_native_message(self, row: dict[str, Any], *, live: bool = False):
         """Convert one verified QTrade journal row for Bridge.publish_native.

@@ -79,7 +79,7 @@ export interface CollectorAccount {
 export interface CollectorWorkbench {
   workbench_id: string; name?: string; updated_at?: number | null; stale?: boolean; accounts: CollectorAccount[]
 }
-export interface CollectorSelection { workbench_id: string; account_uid: string; version: number }
+export interface CollectorSelection { context_id?: string; workbench_id: string; account_uid: string; version: number }
 export interface CollectorCatalog {
   workbenches: CollectorWorkbench[]; selected: CollectorSelection | null; note?: string; refresh_error?: string; contract?: string; offline_seconds?: number
 }
@@ -90,7 +90,7 @@ export interface CollectorContacts extends OrgStatus {
 }
 export interface CollectorSelectionResult {
   binding: CollectorSelection & { owner_user_id: string; transport: string }; contacts: CollectorContacts
-  connected: boolean; note?: string
+  connected: boolean; note?: string; reset?: boolean; send_ready?: boolean
 }
 export interface NativeHistoryMedia {
   sha256?: string; name: string; size: number; mime: string; state: 'ready' | 'pending' | 'unavailable'; download_ready: boolean
@@ -113,10 +113,13 @@ export interface TransferFilePage {
   scope: 'retained_authenticated_files'
 }
 export interface MqConfig {
-  editable: boolean; configured: boolean; applied: boolean; backend: 'file_gateway'; base_url: string; credentials_set: boolean
+  client_cert_file?: string; client_key_file?: string; ca_file?: string
+  reset?: boolean
+  configured: boolean; applied: boolean; backend: 'file_gateway'; base_url: string; credentials_set: boolean
   account_uid: string | null; workbench_id: string | null; revision: string; note: string
 }
 export interface MqConfigInput {
+  client_cert_file?: string; client_key_file?: string; ca_file?: string
   base_url: string; config_yaml: string; expected_revision?: string
 }
 export interface MqConnectionTest {
@@ -129,7 +132,7 @@ function jget<T>(url: string): Promise<T> { return requestJson<T>(url) }
 function jpost<T>(url: string, body: unknown): Promise<T> {
   return requestJson<T>(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) })
 }
-function emptySummary(): { botStatus: string; stats: { k: string; v: string; d: string }[] } {
+function emptySummary(): { botStatus: string; botEnabled?: boolean; stats: { k: string; v: string; d: string }[] } {
   return {
     botStatus: '未知',
     stats: [
@@ -227,11 +230,12 @@ function normCp(r: Dict): Counterparty {
       groupRevision:typeof b.group_revision==='number'?b.group_revision:undefined,
       analysisPending:b.analysis_pending===true,sendAllowed:b.send_allowed==null?undefined:!!b.send_allowed,
       groupSendAllowed:b.group_send_allowed==null?undefined:!!b.group_send_allowed,
+      memberSendAllowed:typeof b.member_send_allowed==='boolean'?b.member_send_allowed:undefined,groupState:optText(b.state),
       pendingCommandId:optText(b.pending_command_id),commandState:optText(b.command_state),responseState:optText(b.response_state),
       tradeDay:optText(b.trade_day),needsReview:!!b.needs_review,
       quotes:b.quotes && typeof b.quotes==='object'?b.quotes as {bid:NegotiationQuote;ofr:NegotiationQuote}:undefined,
       summary:b.summary && typeof b.summary==='object'?b.summary as GroupSummary:undefined,
-      trade: { own_side:s(b.own_side), peer_quote:s(b.peer_quote), own_limit:s(b.own_limit), gap_bp:s(b.gap_bp), market_bid:s(b.market_bid), market_ofr:s(b.market_ofr), quote_at:s(b.quote_at), freshness:s(b.freshness), phase:s(b.phase) },
+      trade: { own_side:s(b.own_side), peer_quote:s(b.peer_quote), own_limit:s(b.own_limit), gap_bp:s(b.gap_bp), peer_volume_wan:s(b.peer_volume_wan), quote_at:s(b.quote_at), freshness:s(b.freshness), phase:s(b.phase) },
       name: s(b.name), code: s(b.code, ''), quote: (s(b.quote ?? b.stage, '待询价') as BondStatus), stage,
       step: STAGE_STEP[stage] ?? 0,
       spread: b.spread != null ? s(b.spread) : bpStr(b.spread_bp),
@@ -296,14 +300,14 @@ function normChat(data: unknown): ChatMsg[] {
   })
 }
 
-function normSummary(d: Dict): { botStatus: string; stats: { k: string; v: string; d: string }[] } {
+function normSummary(d: Dict): { botStatus: string; botEnabled?: boolean; stats: { k: string; v: string; d: string }[] } {
   const bot = (d.bot as Dict) || {}
   const stats = Array.isArray(d.stats) ? (d.stats as Dict[]).map(x => {
     const unit = s(x.unit, ''), val = x.value
     const v = unit === '秒' ? `${val}s` : String(val ?? '—')
     return { k: s(x.label ?? x.k), v, d: s(x.sub ?? x.d, unit && unit !== '秒' ? unit : '') }
   }) : []
-  return { botStatus: s(bot.status ?? d.botStatus, '未知'), stats }
+  return { botStatus: s(bot.status ?? d.botStatus, '未知'), ...(typeof bot.enabled === 'boolean' ? {botEnabled:bot.enabled}:{}), stats }
 }
 
 function normDetailRows(arr: Dict[]): DetailRow[] {
@@ -473,7 +477,7 @@ export const api = {
   },
   summary: () => result(async () => {
     const r = await jget<Resp<Dict>>('/api/monitor/summary')
-    return { ...r, revision:typeof r.data?.revision==='number'?r.data.revision:r.revision,data: normSummary(r.data ?? {}) } as Resp<{ botStatus: string; stats: { k: string; v: string; d: string }[] }>
+    return { ...r, revision:typeof r.data?.revision==='number'?r.data.revision:r.revision,data: normSummary(r.data ?? {}) } as Resp<{ botStatus: string; botEnabled?: boolean; stats: { k: string; v: string; d: string }[] }>
   }, emptySummary()),
   botToggle: (on: boolean) => result(() => jpost<Resp<{ botStatus: string }>>('/api/bot/toggle', { status: on ? '正常' : '停止' }), { botStatus: on ? '正常' : '停止' }),
   counterparties: () => result(async () => {
@@ -526,6 +530,7 @@ export const api = {
   widenFloor: (code: string) => result(() => jpost<Resp<{ before: number; after: number }>>('/api/im/inquiry/floor/widen', { code }), {} as { before: number; after: number }),
   pauseSession: (member_id: string) => result(() => jpost<Resp<{ member_id: string }>>('/api/im/inquiry/session/pause', { member_id }), {} as { member_id: string }),
   resumeSession: (member_id: string) => result(() => jpost<Resp<{ member_id: string }>>('/api/im/inquiry/session/resume', { member_id }), {} as { member_id: string }),
+  memberSending: (memberId:string,allowed:boolean) => result(()=>jpost<Resp<Dict>>('/api/negotiation/members/'+encodeURIComponent(memberId)+'/sending',{allowed}),{}),
   groupSending: (groupId:string,allowed:boolean) => result(()=>jpost<Resp<Dict>>('/api/negotiation/groups/'+encodeURIComponent(groupId)+'/sending',{allowed}),{}),
   markInquiry: (code: string, status: string) => result(() => jpost<Resp<{ code: string; status: string }>>('/api/im/inquiry/status', { code, status }), {} as { code: string; status: string }),
   takeover: (id: string) => result(() => jpost<Resp<{ ok: boolean }>>(`/api/session/${encodeURIComponent(id)}/takeover`, {}), { ok: true }),
@@ -561,6 +566,8 @@ export const api = {
   negotiationCapacity: () => jget<Resp<CounterpartyCapacity>>('/api/negotiation/capacity'),
   imRfqPreview: (items: (RfqPolicy & {peer_ids:string[]})[], requestId: string) =>
     jpost<Resp<RfqPreview>>('/api/im/rfq/preview', {request_id:requestId, items}),
+  imRfqSendDirect: (items: (RfqPolicy & {peer_ids:string[]})[], requestId: string) =>
+    jpost<Resp<RfqSubmission>>('/api/im/rfq/send-direct', {request_id:requestId, items}),
   imRfqSend: (batchId: string, version: number, requestId: string) =>
     jpost<Resp<RfqSubmission>>('/api/im/rfq/send', {batch_id:batchId, expected_version:version, request_id:requestId}),
   imRfqStatus: () => jget<{ ok: boolean; hint?: string; data?: { items?: { code: string; status: string; quote?: Record<string, string | number> | null }[] } }>('/api/im/rfq/status'),

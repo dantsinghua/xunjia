@@ -63,7 +63,7 @@ def test_cli_binding_is_read_by_real_me_api_and_repeat_preserves_control_and_pre
                  '--workbench', 'synthetic-cli-workbench', '--transport', 'mail')
     assert cli(database, *arguments).returncode == 0
     native = FakeNative()
-    app = create_app(database_url='sqlite:///'+str(database),
+    app = create_app(submission_guard=lambda _owner:None, database_url='sqlite:///'+str(database),
         auth_config=AuthConfig(sso_secret='synthetic-only', session_secret='synthetic-session-at-least-32-chars'),
         enable_background=False,  chatflows=FakeFlows(), transport=native)
     with TestClient(app) as client:

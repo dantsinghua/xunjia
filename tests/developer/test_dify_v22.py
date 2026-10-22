@@ -271,21 +271,24 @@ def test_v22_client_distinguishes_timeout_network_and_clears_old_success_evidenc
         def __enter__(self):return self
         def __exit__(self,*args):pass
         def read(self,size):return b'upstream-private-body'
+    now=[0.0]; calls=[]
     class Opener:
         def open(self,*args,**kwargs):
+            calls.append(kwargs); now[0]=.125
             if failure=='timeout':raise TimeoutError('secret')
             if failure=='wrapped-timeout':raise urllib.error.URLError(TimeoutError('secret'))
             if failure=='network':raise urllib.error.URLError(ConnectionRefusedError('secret'))
             if failure=='http':raise urllib.error.HTTPError('https://private.invalid',503,'secret',{},None)
             return Response()
-    clock=iter([0,0.125])
-    client=ChatflowClient('https://synthetic.invalid','synthetic-key',stage='analysis',opener=Opener(),clock=lambda:next(clock))
+    client=ChatflowClient('https://synthetic.invalid','synthetic-key',stage='analysis',opener=Opener(),clock=lambda:now[0])
     client.last_evidence={'message_id':'stale-success'}
     with pytest.raises(FlowUnavailable) as caught:client.call({})
     assert caught.value.code==code
     assert 'secret' not in str(caught.value)
     assert client.last_evidence['error_code']==code
     assert client.last_evidence['elapsed_ms']==125
+    assert len(calls)==1, 'Ambiguous network failures must not be retried'
+    assert len(calls)==1, 'Ambiguous network failures must not be retried'
     assert 'message_id' not in client.last_evidence
     assert 'private' not in json.dumps(client.last_evidence)
 

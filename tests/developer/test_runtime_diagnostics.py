@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from server.legacy_app import create_app
+from server.app import create_app
 from server.auth import AuthConfig,AuthUser
 from types import SimpleNamespace
 

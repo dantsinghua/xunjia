@@ -56,6 +56,7 @@ class ReceiverLedger:
         self.lock_dir.mkdir(exist_ok=True)
         with self._db() as db:
             db.executescript('''
+            CREATE TABLE IF NOT EXISTS rx_context (scope TEXT PRIMARY KEY, context_id TEXT NOT NULL, version INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS rx_command (
                 scope TEXT NOT NULL, command_id TEXT NOT NULL, fingerprint TEXT NOT NULL, command_json TEXT NOT NULL,
                 status TEXT NOT NULL, evidence TEXT NOT NULL, updated REAL NOT NULL, PRIMARY KEY(scope,command_id));
@@ -98,12 +99,40 @@ class ReceiverLedger:
         return db.execute('SELECT * FROM rx_reset WHERE scope=? ORDER BY account_epoch DESC LIMIT 1',
                           (self.scope,)).fetchone()
 
+    def activate_context(self, context_id, version, *, published_source_highwater=0):
+        from relay.protocol import token
+        token(context_id)
+        if type(version) is not int or version < 1 or version > int((self.clock()+60)*1000000):
+            raise ProtocolError('CONTEXT_VERSION_INVALID')
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old=db.execute('SELECT * FROM rx_context WHERE scope=?',(self.scope,)).fetchone()
+            if old and (version < old['version'] or version == old['version'] and context_id != old['context_id']):
+                raise ProtocolError('CONTEXT_SUPERSEDED')
+            db.execute('INSERT INTO rx_context VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET context_id=excluded.context_id,version=excluded.version',
+                       (self.scope,context_id,version))
+            changed=old is None or old['context_id']!=context_id
+            if changed:
+                # Only hashes survive as a rejection set; no old business content
+                # or UNKNOWN reconciliation is carried into the fresh context.
+                db.execute('INSERT OR IGNORE INTO rx_tombstone SELECT scope,command_id,fingerprint,? FROM rx_command WHERE scope=?',(self.clock(),self.scope))
+                db.execute('DELETE FROM rx_command WHERE scope=?',(self.scope,))
+                db.execute('DELETE FROM rx_audit WHERE scope=?',(self.scope,))
+                db.execute('DELETE FROM rx_reset WHERE scope=?',(self.scope,))
+            latest=self._latest_reset(db)
+            epoch=latest['account_epoch'] if latest else 0
+            snap=self._reset_snapshot(db,{'account_epoch':epoch},published_source_highwater,0)
+        return {'context_id':context_id,'context_version':version,'account_epoch':epoch,
+                'peers':snap['peers'],'source_highwater':snap['published_source_highwater']}
+
     def account_epoch(self):
         with self._db() as db:
             row = self._latest_reset(db)
             return row['account_epoch'] if row else 0
 
     def _epoch_permitted(self, db, command):
+        context=db.execute("SELECT context_id FROM rx_context WHERE scope=?",(self.scope,)).fetchone()
+        if context and command.get("context_id") != context["context_id"]:return False
         row = self._latest_reset(db)
         epoch = row['account_epoch'] if row else 0
         return command.get('account_epoch', 0) == epoch and (row is None or row['state'] == 'complete')
@@ -130,6 +159,7 @@ class ReceiverLedger:
     @staticmethod
     def _reset_ack(request, phase, snapshot, code):
         return {**{key: request[key] for key in (*RESET_FIELDS, 'request_hash')},
+                **({'context_id':request['context_id']} if 'context_id' in request else {}),
                 'phase': phase, 'snapshot': snapshot,
                 'snapshot_hash': digest(snapshot) if snapshot is not None else '', 'code': code}
 
@@ -169,7 +199,11 @@ class ReceiverLedger:
     def session_reset(self, payload, *, native_quiescent=None, published_source_highwater=0):
         """Install the account barrier before waiting; never invent native outcomes."""
         validate_session_reset(payload, self.binding)
-        request = {**{key: payload[key] for key in (*RESET_FIELDS, 'request_hash')}, 'phase': 'request'}
+        with self._db() as context_db:
+            context=context_db.execute('SELECT context_id FROM rx_context WHERE scope=?',(self.scope,)).fetchone()
+            if context and payload.get('context_id')!=context['context_id']:raise ProtocolError('SESSION_RESET_CONTEXT_RETIRED')
+        request = {**{key: payload[key] for key in (*RESET_FIELDS, 'request_hash')},
+                   **({'context_id':payload['context_id']} if 'context_id' in payload else {}),'phase': 'request'}
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
             old = db.execute('SELECT * FROM rx_reset WHERE scope=? AND reset_id=?',
@@ -285,7 +319,10 @@ class ReceiverLedger:
     def _peer_commands(self, db, peer):
         latest = self._latest_reset(db)
         epoch = latest['account_epoch'] if latest else 0
-        return [(row,json.loads(row['command_json'])) for row in db.execute('SELECT * FROM rx_command WHERE scope=?',(self.scope,)) if json.loads(row['command_json'])['peer_id']==peer and json.loads(row['command_json']).get('account_epoch',0)==epoch]
+        context=db.execute('SELECT context_id FROM rx_context WHERE scope=?',(self.scope,)).fetchone()
+        return [(row,json.loads(row['command_json'])) for row in db.execute('SELECT * FROM rx_command WHERE scope=?',(self.scope,))
+                if json.loads(row['command_json'])['peer_id']==peer and json.loads(row['command_json']).get('account_epoch',0)==epoch
+                and (context is None or json.loads(row['command_json']).get('context_id')==context['context_id'])]
 
     def _manual_barrier(self, db, peer, event_id):
         old=db.execute('SELECT 1 FROM rx_event_fence WHERE scope=? AND event_id=?',(self.scope,event_id)).fetchone()

@@ -69,7 +69,7 @@ def test_old_crash_between_request_and_fsync_does_not_globally_stop_future_files
     g,s,c=setup(tmp_path)
     with s.store.db() as db:db.execute("INSERT INTO fg_download(scope,state) VALUES(?,?)",(s.store.scope,"RECEIVING"))
     assert s.poll()==[] and s.receive_ready()
-    assert g.calls==[("up.invalid","download")]
+    assert g.calls==[("up.invalid","pending"),("up.invalid","download")]
     with s.store.db() as db:
         assert db.execute("SELECT COUNT(*) FROM fg_download WHERE state='RECEIVING'").fetchone()[0]==1
 
@@ -145,12 +145,19 @@ def test_state_cannot_be_silently_rebound_to_different_queue(tmp_path):
     with pytest.raises(FileGatewayError,match="STATE_ROUTE_CHANGED"):
         FileGatewayTransport(B,g.client("other"),g.client("down"),tmp_path/"service.db",role="service")
 
-def test_production_config_never_accepts_shared_test_escape_hatch(tmp_path):
-    cfg={"uplink_url":"https://up.invalid","downlink_url":"https://up.invalid","auth_file":"unused","allow_shared_test_queue":True}
-    with pytest.raises(FileGatewayError,match="CONFIG_INVALID"):FileGatewayTransport.from_config(B,cfg,tmp_path/"db",role="service",config_dir=tmp_path)
+def test_retired_two_url_factory_is_removed():
+    assert not hasattr(FileGatewayTransport,'from_config')
 
-def test_file_gateway_factory_uses_opposite_uplink_downlink_for_collector(tmp_path):
-    auth=tmp_path/"auth.yaml";auth.write_text(json.dumps({"key":AUTH.key,"sm4_key":AUTH.sm4_key.decode()}))
-    cfg={"uplink_url":"https://up.invalid","downlink_url":"https://down.invalid","auth_file":auth.name}
-    c=FileGatewayTransport.from_config(B,cfg,tmp_path/"db",role="collector",config_dir=tmp_path)
-    assert c.inbound.base_url=="https://down.invalid" and c.outbound.base_url=="https://up.invalid"
+def test_current_factory_restores_opposite_paths_with_mtls(tmp_path):
+    from server.institution_transport import InstitutionTransport
+    from relay.gateway_paths import InstitutionKeys,CONTRACT,account_paths
+    from tests.tls_material import tls_config
+    auth=tmp_path/'auth.yaml';auth.write_text(json.dumps({'key':AUTH.key,'sm4_key':AUTH.sm4_key.decode()}));auth.chmod(0o600)
+    keys=InstitutionKeys.from_auth(AUTH);binding=keys.binding('wb-a','10001')
+    cfg={'contract':CONTRACT,'base_url':'https://relay.invalid','auth_file':auth.name,**tls_config()}
+    c=InstitutionTransport.from_institution_config(binding,cfg,tmp_path/'db',role='collector',config_dir=tmp_path)
+    paths=account_paths('wb-a','10001')
+    assert c.inbound.path==paths['downlink_path'] and c.outbound.path==paths['uplink_path']
+    assert c.inbound.base_url==c.outbound.base_url=='https://relay.invalid'
+    with pytest.raises(FileGatewayError,match='CONFIG_INVALID'):
+        InstitutionTransport.from_institution_config(binding,{**cfg,'uplink_url':'https://old.invalid'},tmp_path/'other',role='collector',config_dir=tmp_path)

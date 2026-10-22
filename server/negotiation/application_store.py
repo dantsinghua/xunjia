@@ -3,6 +3,22 @@ from __future__ import annotations
 import json
 from .store import Store, encoded, identity, new_id
 from .prices import InvalidFact
+def status_label(group, peer=None):
+    """One execution-aware status for market, batch and member projections."""
+    if group['state']=='HANDOFF':return '待人工确认'
+    if group['state']=='CLOSED' or group.get('archived'):return '已放弃'
+    if not group['send_allowed']:return '已暂停'
+    if peer is None:
+        values={status_label(group,p) for p in group.get('peers',[])}
+        return next((value for value in ('待核对','待回执','发送失败','询价中','待人工确认','已暂停','已放弃') if value in values),'待询价')
+    if not peer['send_allowed']:return '已暂停'
+    state=peer.get('command_state')
+    if state=='UNKNOWN':return '待核对'
+    if state in ('QUEUED','PENDING'):return '待回执'
+    if state=='FAILED' or state=='CANCELLED' and peer.get('command_kind')=='INITIAL':return '发送失败'
+    if peer.get('pending_command_id') and not state:return '待回执'
+    return '询价中'
+
 class ApplicationStore(Store):
     def binding_for(self, owner):
         with self.db.transaction(write=False) as tx:
@@ -10,7 +26,7 @@ class ApplicationStore(Store):
         if not row:return None
         return {'owner_user_id':row['owner_id'],'account_uid':row['account_uid'],
                 'workbench_id':row['workbench_id'],'transport':row['transport'],
-                'version':row['version'],'bot_enabled':row['send_allowed']}
+                'version':row['version'],'bot_enabled':row['send_allowed'],**({'context_id':json.loads(row['config_json'])['context_id']} if json.loads(row['config_json']).get('context_id') else {})}
     def bind_account(self,owner_user_id,account_uid,workbench_id,transport='oss'):
         for value,label,size in ((owner_user_id,'owner',160),(account_uid,'account',80),(workbench_id,'workbench',160)):
             identity(value,label,size)
@@ -63,8 +79,12 @@ class ApplicationStore(Store):
                 item['our_quote']=json.loads(item.pop('our_quote_json'))
                 item['quotes']={side:self._quote(tx,item['member_id'],side).dump() for side in ('bid','ofr')}
                 item['analysis_pending']=self._analysis_pending(tx,{'owner_id':owner,**item})
-                pending=tx.execute('SELECT state FROM xj2_command WHERE command_id=?',(item['pending_command_id'],)).fetchone() if item['pending_command_id'] else None
-                item['command_state']=pending['state'] if pending else None
+                command=(tx.execute('SELECT state,body_json FROM xj2_command WHERE command_id=?',(item['pending_command_id'],)).fetchone()
+                         if item['pending_command_id'] else tx.execute(
+                             'SELECT c.state,c.body_json FROM xj2_command c JOIN xj2_command_member cm ON cm.command_id=c.command_id WHERE cm.member_id=? ORDER BY c.created_at DESC,c.command_id DESC LIMIT 1',
+                             (item['member_id'],)).fetchone())
+                item['command_state']=command['state'] if command else None
+                item['command_kind']=json.loads(command['body_json']).get('kind') if command else None
                 g['peers'].append(item)
             result.append(g)
         return result
@@ -104,7 +124,7 @@ class ApplicationStore(Store):
         return {'revision':version,'thread':t,'messages':messages,'next_revision':rows[-1]['ingest_revision'] if rows else after_revision}
     def market_overlays(self,owner):
         groups=self.group_rows(owner)
-        labels={g['bond_code']:('待人工确认' if g['state']=='HANDOFF' else '已暂停' if not g['send_allowed'] else '询价中') for g in groups if not g['archived']}
+        labels={g['bond_code']:status_label(g) for g in groups if not g['archived']}
         try:prefs=self.preferences(owner)
         except PermissionError:prefs={}
         return labels,prefs.get('floors',{})

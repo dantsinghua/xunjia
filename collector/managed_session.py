@@ -6,7 +6,7 @@ from contextlib import suppress
 from collector import qb_ws,qb_apollo
 from collector.qb_gateway import WS,authenticate,merge_sid,QuoteAuthenticationError
 from collector.store import Store
-from imlink.quote_probe import market_connect
+from server.quote_probe import market_connect
 async def _join_io(call,*args):
     task=asyncio.create_task(asyncio.to_thread(call,*args))
     try:return await asyncio.shield(task)

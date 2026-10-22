@@ -1,17 +1,17 @@
 from types import SimpleNamespace
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
-from server.repository import Repository
-from server.business import InquiryService
+from server.negotiation.application_store import ApplicationStore
+from server.negotiation.service import Inquiry
 from server.market import MarketService
 from server.bond_tools import BondTools
 
 
 def client(tmp_path,rows=None):
     from server.qa_routes import qa_router
-    repo=Repository('sqlite:///'+str(tmp_path/'qa.db'))
+    repo=ApplicationStore('sqlite:///'+str(tmp_path/'qa.db'), initialize=True)
     repo.bind_account('alice','a1','wb');repo.bind_account('bob','b1','wb')
-    service=InquiryService(repo,clock=lambda:1800000000)
+    service=Inquiry(repo)
     market=MarketService(repo,rows_provider=(lambda channel,broker:rows) if rows is not None else None)
     app=FastAPI()
     @app.middleware('http')

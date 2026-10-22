@@ -16,7 +16,7 @@ from common import DeployError, snapshot_payload, verify_payload
 
 def prepare(tmp_path, monkeypatch, *, with_dify):
     bundle = tmp_path / 'bundle'
-    for name in ('server', 'imlink', 'relay'):
+    for name in ('server', 'relay', 'collector'):
         shutil.copytree(ROOT / name, bundle / 'app' / name,
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copytree(ROOT / 'deploy', bundle / 'deploy',
@@ -61,7 +61,8 @@ def test_prepared_release_measurement_help_imports_dify_and_hashes_components(tm
         verify_payload(installed, payload)
 
 
-def test_legacy_bundle_without_dify_keeps_existing_prepare_contract(tmp_path, monkeypatch):
+def test_minimal_bundle_without_measurement_components_keeps_current_app(tmp_path, monkeypatch):
     _, release = prepare(tmp_path, monkeypatch, with_dify=False)
     assert (release / 'app/server/app.py').is_file()
     assert not (release / 'app/dify').exists()
+    assert not (release / 'app/imlink').exists()

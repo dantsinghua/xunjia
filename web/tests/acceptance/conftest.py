@@ -1,5 +1,7 @@
 """Real Vue entrypoint against intercepted synthetic APIs; no business server."""
 from collections import Counter
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import json
 import socket
 import subprocess
@@ -115,7 +117,7 @@ def ui(browser, frontend_url):
         elif parsed.path == "/api/monitor/summary":
             data["data"] = {"bot": {"status": "正常"}, "stats": []}
         elif parsed.path == "/api/monitor/counterparties":
-            data["data"] = state.get("counterparties_data", [{"id": "qa-peer", "name": "合成对手甲", "bonds": [{"code": "000100.IB", "name": "合成债券", "stage": "询价中"}]}])
+            data["data"] = state.get("counterparties_data", [{"id": "qa-peer", "name": "合成对手甲", "bonds": [{"code": "000100.IB", "name": "合成债券", "stage": "询价中", "trade_day": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()}]}])
         elif parsed.path == "/api/monitor/chat":
             if state["chat_error"]:
                 status, data = 503, {"ok": False, "hint": "合成查询故障"}

@@ -19,7 +19,7 @@ NOW = datetime(2026, 10, 20, 11, tzinfo=ZoneInfo('Asia/Shanghai')).timestamp()
 def boot(tmp_path):
     now = [NOW]
     wire = RecordedTransport()
-    app = create_app(database_url='sqlite:///' + str(tmp_path / 'default.sqlite'),
+    app = create_app(submission_guard=lambda _owner: None, database_url='sqlite:///' + str(tmp_path / 'default.sqlite'),
         auth_config=AuthConfig(clock=lambda: now[0]), enable_background=False, transport=wire)
     app.state.repository.bind_account(OWNER, 'synthetic-account', 'synthetic-wb')
     return SimpleNamespace(app=app, store=app.state.repository, service=app.state.inquiry,

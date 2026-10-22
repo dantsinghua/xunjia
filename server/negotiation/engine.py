@@ -578,7 +578,15 @@ class Engine:
                 'targets':deepcopy(repair_audit['targets']),'original_response':deepcopy(original)} if repair_audit['targets'] else None
             return prepared,feedback
         try:
-            result=self._tool_call('analyze',snapshot,owner=owner,on_final=final_analysis,repair_audit=repair_audit)
+            if not snapshot['members']:
+                # There is no permitted member ID to associate or update. Keep
+                # every raw message, record the empty scope through the same
+                # Store contract, and do not ask the model to invent members.
+                result={'scopes':{m['message_id']:[] for m in snapshot['messages']},
+                    'observations':[],'unresolved':{},'_public_tool_results':[]}
+                repair_audit['mode']='NO_ACTIVE_MEMBERS'
+            else:
+                result=self._tool_call('analyze',snapshot,owner=owner,on_final=final_analysis,repair_audit=repair_audit)
             saved=self.store.commit_analysis(owner,job['analysis_id'],job['lease_token'],
                 scopes=result['scopes'],observations=result['observations'],unresolved=result['unresolved'],
                 corrections=result.get('corrections'),public_tool_results=result['_public_tool_results'],
@@ -766,6 +774,10 @@ class Engine:
         return body
     def decide_member(self,owner,mid):
         if self.client is None:return None
+        guard=getattr(self.service,'submit_guard',None)
+        if guard is not None:
+            try:guard(owner)
+            except ValueError:return None
         with self.store.write(owner) as tx:
             basis=self.commands._basis(tx,owner,mid,True)
             context=self._reply_context(tx,owner,mid,basis)

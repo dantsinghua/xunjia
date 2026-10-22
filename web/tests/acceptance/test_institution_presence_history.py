@@ -42,8 +42,8 @@ def test_institution_offline_disables_operations_without_mutation(institutional)
  p,_,s,*_=institutional
  s['workbenches'][0]['accounts'][0].update(stale=True,available=False,state='offline')
  open_selector(institutional)
- expect(p.get_by_test_id('collector-offline')).to_contain_text('已离线')
- for name in ('collector-connect','collector-read-saved','collector-sync-contacts'):
+ expect(p.get_by_test_id('collector-offline')).to_contain_text('采集通道心跳过期或未就绪')
+ for name in ('collector-connect','collector-sync-contacts'):
   expect(p.get_by_test_id(name)).to_be_disabled()
  expect(p.get_by_test_id('native-history').get_by_role('button',name='刷新主库历史')).to_be_disabled()
  assert not [c for c in s['calls'] if c[0]!='GET']
@@ -59,7 +59,8 @@ def test_background_directory_refresh_preserves_unsaved_draft(institutional):
  p=open_selector(institutional)
  pick_b(p);p.wait_for_timeout(5500)
  expect(p.get_by_test_id('collector-workbench')).to_have_value('wb-b')
- expect(p.get_by_test_id('collector-account')).to_have_value('same-account')
+ expect(p.get_by_test_id('collector-account')).to_have_value('other-account')
+ assert institutional[2]['selected']=={'workbench_id':'wb-a','account_uid':'same-account','version':1}
  assert not [c for c in institutional[2]['calls'] if c[0]!='GET']
 
 def test_sync_waits_for_both_new_snapshots_not_request_success(institutional):

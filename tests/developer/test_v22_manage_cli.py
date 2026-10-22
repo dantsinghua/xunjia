@@ -39,13 +39,13 @@ def test_cli_binding_is_visible_to_current_store_and_starts_paused(tmp_path):
     database = tmp_path / 'new.sqlite'
     store = ApplicationStore('sqlite:///' + str(database), initialize=True)
     arguments = ('bind', '--owner', 'trader', '--account', 'account',
-                 '--workbench', 'workbench', '--transport', 'mail')
+                 '--workbench', 'workbench', '--transport', 'oss')
     result = cli(database, *arguments)
     assert result.returncode == 0, result.stderr
     binding = store.binding_for('trader')
     assert binding['account_uid'] == 'account'
     assert binding['workbench_id'] == 'workbench'
-    assert binding['transport'] == 'mail'
+    assert binding['transport'] == 'oss'
     assert binding['bot_enabled'] == 0
     assert cli(database, *arguments).returncode == 0
     assert store.binding_for('trader') == binding
@@ -61,28 +61,30 @@ def test_check_rejects_empty_database_without_provisioning(tmp_path):
 
 
 def test_check_rejects_legacy_only_database_without_changing_it(tmp_path):
-    from server.repository import Repository
     database = tmp_path / 'legacy.sqlite'
-    legacy = Repository('sqlite:///' + str(database), initialize=True)
-    legacy.bind_account('legacy-trader', 'legacy-account', 'legacy-desk')
+    with sqlite3.connect(database) as db:
+        db.execute('CREATE TABLE unrelated_history (account TEXT)')
+        db.execute("INSERT INTO unrelated_history VALUES ('legacy-account')")
     before = tables(database)
     result = cli(database, 'check')
     assert result.returncode != 0
     assert 'SCHEMA_INCOMPLETE' in result.stdout + result.stderr
     assert tables(database) == before
-    assert legacy.binding_for('legacy-trader')['account_uid'] == 'legacy-account'
+    with sqlite3.connect(database) as db:
+        assert db.execute('SELECT account FROM unrelated_history').fetchone()[0]=='legacy-account'
 
 
 def test_migration_keeps_existing_legacy_data(tmp_path):
-    from server.repository import Repository
     database = tmp_path / 'legacy.sqlite'
-    legacy = Repository('sqlite:///' + str(database), initialize=True)
-    legacy.bind_account('legacy-trader', 'legacy-account', 'legacy-desk')
+    with sqlite3.connect(database) as db:
+        db.execute('CREATE TABLE unrelated_history (account TEXT)')
+        db.execute("INSERT INTO unrelated_history VALUES ('legacy-account')")
     before = tables(database)
     result = cli(database, 'migrate')
     assert result.returncode == 0, result.stderr
     assert tables(database) == before | set(TABLES)
-    assert legacy.binding_for('legacy-trader')['account_uid'] == 'legacy-account'
+    with sqlite3.connect(database) as db:
+        assert db.execute('SELECT account FROM unrelated_history').fetchone()[0]=='legacy-account'
 
 
 def test_check_requires_complete_current_schema(tmp_path):

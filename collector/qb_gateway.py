@@ -37,7 +37,7 @@ def merge_sid(cookie: str, sid: str) -> str:
 
 
 def load_creds() -> tuple[str, str]:
-    from imlink.quote_source import load_for_probe
+    from server.quote_credentials import load_for_probe
     cookie, device, sid = load_for_probe()
     cookie = merge_sid(cookie, sid)
     if not cookie or not device:

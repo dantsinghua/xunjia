@@ -17,12 +17,17 @@ from .negotiation.runtime import Inbox,Dispatcher
 from .negotiation.settings import Settings,Aggregation
 def create_app(*,database_url=None,auth_config=None,enable_background=None,transport=None,
                chat_client=None,chatflows=None,market=None,reference_provider=None,calendar=None,
-               agent_service_token=None,aggregation=None,stage_budget_seconds=None,quote_control=None,quote_source=None):
-    institution_config=os.environ.get('XUNJIA_INSTITUTION_CONFIG','')
+               agent_service_token=None,aggregation=None,stage_budget_seconds=None,quote_control=None,quote_source=None,submission_guard=None):
+    retired=[name for name in ('XUNJIA_TRANSPORT_CONFIG','XUNJIA_MQ_CONNECTION_CONFIG')
+             if os.environ.get(name,'').strip()]
+    if retired:
+        raise ValueError('旧询价传输入口已停用：'+', '.join(retired)+'；仅使用XUNJIA_INSTITUTION_CONFIG和XUNJIA_STATE_DIR，旧账本不自动迁移或删除')
+    state_dir=os.environ.get('XUNJIA_STATE_DIR','').strip()
+    institution_config=os.environ.get('XUNJIA_INSTITUTION_CONFIG','').strip()
+    if not institution_config and state_dir and transport is None:
+        institution_config=str(Path(state_dir)/'institution-connection.json')
     if institution_config:
-        if not os.environ.get('XUNJIA_STATE_DIR','').strip():raise ValueError('机构模式必须配置XUNJIA_STATE_DIR')
-        if os.environ.get('XUNJIA_TRANSPORT_CONFIG') or os.environ.get('XUNJIA_MQ_CONNECTION_CONFIG'):
-            raise ValueError('机构模式不能同时启用旧传输或MQ连接配置')
+        if not state_dir:raise ValueError('机构模式必须配置XUNJIA_STATE_DIR')
         if transport is not None:raise ValueError('机构模式不能同时注入其它传输实例')
     url=database_url or os.environ.get('XUNJIA_DATABASE_URL','')
     if not url:raise ValueError('尚未配置XUNJIA_DATABASE_URL')
@@ -65,10 +70,6 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
             timeout=float(os.environ.get('XUNJIA_DIFY_TIMEOUT_SECONDS','90'))
             client=Chatflows(ChatflowClient(os.environ['XUNJIA_DIFY_URL'],a,stage='analysis',timeout=timeout),
                             ChatflowClient(os.environ['XUNJIA_DIFY_URL'],b,stage='reply',timeout=timeout))
-    if transport is None and os.environ.get('XUNJIA_TRANSPORT_CONFIG'):
-        from .transport_config import load_transports
-        if not os.environ.get('XUNJIA_STATE_DIR'):raise ValueError('传输状态目录未配置')
-        transport=load_transports(store,os.environ['XUNJIA_TRANSPORT_CONFIG'],os.environ['XUNJIA_STATE_DIR'])
     institution=None
     if institution_config:
         from .transports import TransportRouter
@@ -76,13 +77,6 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
         transport=TransportRouter({})
         institution=InstitutionRuntime(store,transport,institution_config,os.environ['XUNJIA_STATE_DIR'],clock=store.clock)
         institution.background_enabled=enabled
-    managed_mq=None
-    if (os.environ.get('XUNJIA_STATE_DIR') and not os.environ.get('XUNJIA_TRANSPORT_CONFIG')
-            and not os.environ.get('XUNJIA_MQ_CONNECTION_CONFIG') and transport is None):
-        from .transports import TransportRouter
-        from .managed_mq import ManagedMQ
-        transport=TransportRouter({})
-        managed_mq=ManagedMQ(store,transport,os.environ['XUNJIA_STATE_DIR'])
     service=Inquiry(store,reference_provider=reference_provider,calendar=calendar,
                     valuation_source=getattr(source,'valuation',None))
     from .session_reset import SessionReset
@@ -95,14 +89,25 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     engine=Engine(service,client,tools,aggregation=aggregation,stage_budget_seconds=stage_budget)
     inbox=Inbox(service,transport)
     dispatcher=Dispatcher(service,transport)
-    hub=QuoteHub();runtime={'engine':'v22','background_errors':{},'analysis_enabled':client is not None and aggregation is not None,'send_enabled':bool(enabled and transport is not None)}
+    hub=QuoteHub();runtime={'engine':'v22','workers':{},'background_errors':{},'analysis_enabled':client is not None and aggregation is not None,'send_enabled':bool(enabled and transport is not None)}
+    from .channel_readiness import ChannelAdmission
+    admission=ChannelAdmission(service,institution,transport,enabled,runtime)
+    service.submit_guard=admission if submission_guard is None else submission_guard
+    def channel_operation(operation):
+        # Selection/reset and transport I/O cannot interleave in this process.
+        if institution:
+            with institution._lock:return operation()
+        return operation()
     async def repeated(name,operation,delay):
+        runtime['workers'][name]={'running':True}
         while True:
             try:
-                await asyncio.to_thread(operation)
+                await asyncio.to_thread(channel_operation,operation) if name in ('inbox','dispatch','session_reset') else await asyncio.to_thread(operation)
                 runtime['background_errors'].pop(name,None)
                 service.diagnostics.record(name)
-            except asyncio.CancelledError:raise
+            except asyncio.CancelledError:
+                runtime['workers'][name]['running']=False
+                raise
             except Exception as exc:
                 runtime['background_errors'][name]=type(exc).__name__
                 service.diagnostics.record(name,code='BACKGROUND_TASK_FAILED',error=exc)
@@ -127,7 +132,6 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     async def lifespan(app):
         tasks=[]
         try:
-            if managed_mq:managed_mq.restore()
             if enabled and not auth.configured:raise ValueError('后台处理启动前必须配置本系统登录密钥')
             if institution and enabled:await asyncio.to_thread(institution.start)
             if enabled:
@@ -145,46 +149,41 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
             try:
                 await quote_control.shutdown()
             finally:
+                for worker in runtime['workers'].values():worker['running']=False
                 for task in tasks:task.cancel()
                 try:
                     for task in tasks:
                         with suppress(asyncio.CancelledError,Exception):await task
                 finally:
-                    try:
-                        if managed_mq:await asyncio.to_thread(managed_mq.close)
-                    finally:
-                        if institution:await asyncio.to_thread(institution.close)
+                    if institution:await asyncio.to_thread(institution.close)
     app=FastAPI(title='现券询价工作台 V2.2',lifespan=lifespan)
     app.state.repository=store;app.state.auth=auth;app.state.inquiry=service
     app.state.transport=transport;app.state.chat_client=client;app.state.enable_background=enabled
-    app.state.managed_mq=managed_mq
     app.state.institution_runtime=app.state.institution=institution
     app.state.market=market;app.state.bond_tools=tools;app.state.quote_hub=hub
     app.state.chat_runner=app.state.negotiation_engine=engine
     app.state.dispatcher=dispatcher;app.state.inbox=inbox;app.state.runtime_status=runtime
+    app.state.channel_admission=admission
     app.state.session_reset=session_reset
     app.state.business_engine='v22';app.state.rollover_once=rollover_once
     app.state.quote_control=quote_control
-    from .mq_settings import MQSettings,mq_settings_router
-    if institution:
-        from .institution_runtime import InstitutionSettings
-        mq_settings=InstitutionSettings(institution)
-    else:
-        mq_settings=MQSettings(store,transport,os.environ.get('XUNJIA_MQ_CONNECTION_CONFIG'),managed_runtime=managed_mq)
+    from .institution_settings import connection_settings_router
+    from .institution_runtime import InstitutionSettings
+    mq_settings=InstitutionSettings(institution)
     app.state.mq_settings=mq_settings
-    app.include_router(mq_settings_router(mq_settings))
-    from .collector_selection import CollectorSelection
+    app.include_router(connection_settings_router(mq_settings))
+    collector_selection=None
     if institution:
         from .institution_selection import InstitutionSelection
         collector_selection=InstitutionSelection(store,transport,institution)
-    else:
-        collector_selection=CollectorSelection(store,transport,os.environ.get('XUNJIA_TRANSPORT_CONFIG'),
-            os.environ.get('XUNJIA_STATE_DIR'),os.environ.get('XUNJIA_MQ_CONNECTION_CONFIG'),managed_runtime=managed_mq)
     app.state.collector_selection=collector_selection
     @app.exception_handler(PermissionError)
     async def forbidden(_req,exc):return JSONResponse({'ok':False,'hint':str(exc)},status_code=403)
     @app.exception_handler(ValueError)
-    async def invalid(_req,exc):return JSONResponse({'ok':False,'hint':str(exc)},status_code=400)
+    async def invalid(_req,exc):
+        result={'ok':False,'hint':str(exc)}
+        if hasattr(exc,'submitted'):result.update(submitted=exc.submitted,code=getattr(exc,'code','SUBMISSION_REJECTED'))
+        return JSONResponse(result,status_code=503 if getattr(exc,'code','') in ('DISPATCH_DISABLED','DISPATCH_NOT_RUNNING','GATEWAY_UNAVAILABLE','COLLECTOR_HEARTBEAT_STALE','COLLECTOR_NOT_READY','COLLECTOR_NOT_DISCOVERED','COLLECTOR_IDENTITY_CONFLICT','CONTEXT_NOT_READY','CHANNEL_WORKER_FAILED') else 400)
     def headers(response,path):
         response.headers['X-Content-Type-Options']='nosniff'
         response.headers['Referrer-Policy']='no-referrer'
@@ -222,10 +221,15 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     def ready():
         data=report();return JSONResponse({'ok':data['ready'],'data':data},status_code=200 if data['ready'] else 503)
     @app.get('/api/health/automation')
-    def auto_ready():return JSONResponse({'ok':False,'data':report()},status_code=503)
+    def auto_ready():
+        data=report()
+        workers=runtime.get('workers',{})
+        running=bool(enabled and all(workers.get(n,{}).get('running') for n in ('dispatch','inbox','analysis')))
+        data.update(automation_ready=running,automation_state='workers_running' if running else 'workers_not_running',live_chain_verified=False)
+        return JSONResponse({'ok':running,'data':data},status_code=200 if running else 503)
     @app.get('/api/runtime/status')
     def runtime_status(request:Request):
-        return {'ok':True,'data':{**runtime,'readiness':report(),'components':service.diagnostics.snapshot(request.state.user.user_id)}}
+        return {'ok':True,'data':{**runtime,'readiness':report(),'sending':admission.report(request.state.user.user_id),'components':service.diagnostics.snapshot(request.state.user.user_id)}}
     @app.get("/api/auth/sso-config")
     def sso_config():
         dev = auth.config.dev_login is True and auth.configured

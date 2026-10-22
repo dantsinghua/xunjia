@@ -3,7 +3,7 @@ import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 interface SourceState {
   account?: string; sid_set?: boolean; cookie_set?: boolean; device_id_set?: boolean
-  configured?: boolean; can_manage?: boolean; reader_configured?: boolean
+  configured?: boolean; reader_configured?: boolean
   collector_state?: string; collector_active?: boolean; note?: string; code?: string
   stats?: { quotes_received?:number; quotes_written?:number; trades_written?:number; decode_errors?:number; last_quote_at?:number|null }
   database?: {ok:boolean;note:string}|null
@@ -32,7 +32,7 @@ async function refresh(quiet=false){
   finally{loading.value=false}
 }
 async function act(kind:'save'|'test'|'start'|'stop'){
-  if(busy.value || !state.value?.can_manage)return
+  if(busy.value || !state.value)return
   busy.value=true;error.value='';notice.value=''
   try{
     const body={...form}
@@ -61,7 +61,6 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);clearSecrets()}
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <p v-if="notice" role="status">{{ notice }}</p>
     <template v-if="state">
-      <p v-if="!state.can_manage" class="warning">当前用户只能查看行情状态。配置与启停权限由 XUNJIA_QUOTE_MANAGERS 指定。</p>
       <div class="summary" data-testid="inno-state">
         <span>凭据：{{ state.configured ? '已保存' : '未完整配置' }}</span>
         <span>采集：{{ labels[state.collector_state||''] || '尚未启动' }}</span>
@@ -70,7 +69,7 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);clearSecrets()}
       <p>{{ state.note }}</p>
       <p v-if="!state.reader_configured" class="warning">行情读取尚未接入。服务端须配置 XUNJIA_QUOTE_SOURCE=qb、QB_MYSQL_* 和 XUNJIA_QUOTE_CACHE；连接测试通过不等于行情已进入工作台。</p>
       <form @submit.prevent="act('save')" autocomplete="off">
-        <fieldset :disabled="busy || !state.can_manage || !!state.collector_active">
+        <fieldset :disabled="busy || !!state.collector_active">
           <label>Innodealing 账号（配置标记）<input v-model="form.account" name="inno-account" maxlength="256" autocomplete="off" /></label>
           <label>SID<input v-model="form.sid" name="inno-sid" type="password" autocomplete="new-password" :placeholder="state.sid_set ? '已保存，留空不修改' : '可选；Cookie已包含sid时无需重复填写'" /></label>
           <label class="wide">Cookie<input v-model="form.cookie" name="inno-cookie" type="password" autocomplete="new-password" :placeholder="state.cookie_set ? '已保存，留空不修改' : '填写Innodealing已登录会话的Cookie'" /></label>
@@ -78,10 +77,10 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);clearSecrets()}
         </fieldset>
         <p class="hint">凭据只写入服务端受保护配置，不回显、不存入浏览器。运行中修改凭据须先停止采集；测试新凭据不会覆盖已保存配置。</p>
         <div class="controls">
-          <button class="btn-primary" type="submit" :disabled="busy || !state.can_manage || !!state.collector_active" data-testid="inno-save">保存配置</button>
-          <button class="btn-ghost" type="button" :disabled="busy || !state.can_manage" @click="act('test')" data-testid="inno-test">测试连接</button>
-          <button class="btn-primary" type="button" :disabled="busy || !state.can_manage || !!state.collector_active || !state.configured || !state.reader_configured" @click="act('start')" data-testid="inno-start">启动采集</button>
-          <button class="btn-ghost" type="button" :disabled="busy || !state.can_manage || !state.collector_active" @click="act('stop')" data-testid="inno-stop">停止采集</button>
+          <button class="btn-primary" type="submit" :disabled="busy || !!state.collector_active" data-testid="inno-save">保存配置</button>
+          <button class="btn-ghost" type="button" :disabled="busy" @click="act('test')" data-testid="inno-test">测试连接</button>
+          <button class="btn-primary" type="button" :disabled="busy || !!state.collector_active || !state.configured || !state.reader_configured" @click="act('start')" data-testid="inno-start">启动采集</button>
+          <button class="btn-ghost" type="button" :disabled="busy || !state.collector_active" @click="act('stop')" data-testid="inno-stop">停止采集</button>
           <button class="btn-ghost" type="button" :disabled="busy || loading" @click="refresh()">刷新行情状态</button>
         </div>
       </form>

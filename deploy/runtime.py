@@ -21,15 +21,15 @@ def main():
     static=Path(values['XUNJIA_WEB_DIST'])
     if not (static/'index.html').is_file() or not (static/'assets').is_dir():
         raise DeployError('STATIC_ASSETS_MISSING')
-    transport=values.get('XUNJIA_TRANSPORT_CONFIG','')
-    if transport and not Path(transport).is_file():raise DeployError('TRANSPORT_CONFIG_MISSING')
+    institution=values.get('XUNJIA_INSTITUTION_CONFIG','')
+    if institution and not Path(institution).is_file():raise DeployError('INSTITUTION_CONFIG_MISSING')
     python=app.parent/'venv/bin/python'
     if not python.is_file():python=prefix/'venv/bin/python'
     if not python.is_file():raise DeployError('RELEASE_PYTHON_MISSING')
     env={k:v for k,v in os.environ.items() if not k.startswith(('XUNJIA_','QB_'))}
     env.update(values)
     env.update(PYTHONPATH=str(app),PYTHONNOUSERSITE='1',PYTHONDONTWRITEBYTECODE='1')
-    args=[str(python),'-m','uvicorn','server.app:create_app','--factory','--workers','1',
+    args=[str(python),'-m','uvicorn','server.app:create_app','--factory','--workers','1','--timeout-graceful-shutdown','20',
           '--host',values['XUNJIA_HOST'],'--port',values['XUNJIA_PORT']]
     os.chdir(app)
     os.execve(str(python),args,env)

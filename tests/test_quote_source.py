@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from imlink.quote_source import public_view, save_quote
+from server.quote_credentials import public_view, save_quote
 
 _COOKIE = "sid=unit-test-sid-value; other=1"
 _SID = "unit-test-sid-value"

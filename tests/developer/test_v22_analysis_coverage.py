@@ -17,7 +17,7 @@ DAY = '2026-10-17'
 
 def desk(tmp_path):
     flows = SimpleNamespace(analyze=lambda context: None, decide=lambda context: None)
-    app = create_app(database_url='sqlite:///' + str(tmp_path / 'coverage.db'),
+    app = create_app(submission_guard=lambda _owner: None, database_url='sqlite:///' + str(tmp_path / 'coverage.db'),
         enable_background=False, auth_config=AuthConfig(clock=lambda: 1792202400.0), chatflows=flows)
     store = app.state.repository
     store.bind_account(OWNER, 'synthetic-account', 'synthetic-workbench')

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from imlink.quote_probe import probe_quote
+from server.quote_probe import probe_quote
 
 
 class _Ws:

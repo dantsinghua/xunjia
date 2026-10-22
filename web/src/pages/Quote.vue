@@ -1010,7 +1010,7 @@ function onJump(cpId: string, bondName: string) {
 .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; font-weight: 700; color: #B01C24; border-bottom: 1px dashed rgba(176, 28, 36,.4); transition: all .2s; }
 .name:hover { color: #C2333B; text-shadow: 0 0 12px rgba(176, 28, 36,.35); }
 .new-badge { padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #C2333B, #8E1620); box-shadow: 0 0 10px rgba(176, 28, 36,.5); }
-.mono { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+.mono { font-family: var(--font-ui); font-size: 12.5px; }
 .muted { color: #6E6258; }
 .b { font-weight: 700; font-size: 13px; }
 .red { color: #B01C24; }

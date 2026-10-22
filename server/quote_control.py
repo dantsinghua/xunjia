@@ -9,7 +9,7 @@ import time
 from contextlib import suppress
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
-from imlink.quote_source import config_dir, public_view, merged, save_quote
+from server.quote_credentials import config_dir, public_view, merged, save_quote
 _REQUIRED=('QB_MYSQL_HOST','QB_MYSQL_USER','QB_MYSQL_PASSWORD','QB_MYSQL_DB')
 def database_options():
     if not all(os.environ.get(k,'').strip() for k in _REQUIRED):
@@ -66,10 +66,9 @@ class _Lease:
     def release(self):
         if self.file is not None:self.file.close();self.file=None
 class QuoteControl:
-    def __init__(self,*,directory=None,reader=None,managers=None,probe=None,session=None,db_check=None):
+    def __init__(self,*,directory=None,reader=None,probe=None,session=None,db_check=None):
         self.directory=Path(directory) if directory else config_dir()
         self.reader=reader
-        self.managers=set(managers if managers is not None else (v.strip() for v in os.environ.get('XUNJIA_QUOTE_MANAGERS','').split(',') if v.strip()))
         self._probe=probe;self._session=session;self._db_check=db_check or (lambda:check_database(getattr(getattr(self.reader,"source",None),"connection_options",None)))
         self._lock=asyncio.Lock();self._task=None;self._lease=None
         self._state='stopped';self._note='采集尚未启动';self._code='QUOTE_STOPPED'
@@ -79,29 +78,23 @@ class QuoteControl:
     def _database_options(self):
         options=getattr(getattr(self.reader,"source",None),"connection_options",None)
         return options if options is not None else database_options()
-    def can_manage(self,user):return user in self.managers
-    def require_manager(self,user):
-        if not self.can_manage(user):raise PermissionError('当前用户没有公共行情管理权限；请配置 XUNJIA_QUOTE_MANAGERS')
     def status(self,user):
         data=public_view(self.directory)
-        if not self.can_manage(user):data['account']=''
         active=self._task is not None and not self._task.done()
         return {**data,'configured':bool((data['cookie_set'] or data['sid_set']) and data['device_id_set']),
-                'managed':True,'can_manage':self.can_manage(user),'source':'innodealing',
+                'managed':True,'source':'innodealing',
                 'reader_configured':self.reader is not None,'collector_state':self._state,'collector_active':active,
                 'note':self._note,'code':self._code,'stats':dict(self._stats),
                 'database':self._database,'reader':dict(self._reader_health),'last_test':self._last_probe}
     def reader_result(self,*,ok,note):
         self._reader_health={'ok':ok,'note':note,'last_poll_at':time.time()}
     async def save(self,user,body):
-        self.require_manager(user)
         async with self._lock:
             if self._task and not self._task.done():raise ValueError('请先停止采集，再修改行情凭据；保存不会隐式启动采集')
             save_quote(body,self.directory)
             self._last_probe=None
             return self.status(user)
     async def test(self,user,body):
-        self.require_manager(user)
         async with self._lock:
             if self._task and not self._task.done():
                 if any(isinstance(v,str) and v.strip() for k,v in body.items() if k!='account'):
@@ -111,7 +104,7 @@ class QuoteControl:
             if self._probe:
                 result=await self._probe(values)
             else:
-                from imlink.quote_probe import probe_quote,market_connect
+                from server.quote_probe import probe_quote,market_connect
                 from collector.qb_gateway import authenticate,WS
                 from collector.qb_ws import ws_url
                 result=await probe_quote(creds=lambda:(values['cookie'],values['device_id'],values['sid']),authenticate=authenticate,connect=market_connect,ws_url=ws_url,ws_base=WS)
@@ -127,7 +120,6 @@ class QuoteControl:
         finally:
             if os.path.exists(p):os.unlink(p)
     async def start(self,user,*,persist=True):
-        self.require_manager(user)
         async with self._lock:
             if self._task and not self._task.done():return self.status(user)
             values=merged({},self.directory)
@@ -143,7 +135,6 @@ class QuoteControl:
             except BaseException:lease.release();raise
             return self.status(user)
     async def stop(self,user,*,persist=True):
-        self.require_manager(user)
         async with self._lock:
             if persist:self._desired(False)
             if self._task:
@@ -154,15 +145,15 @@ class QuoteControl:
             self._state='stopped';self._code='QUOTE_STOPPED';self._note='采集已停止；历史行情保留，未删除数据'
             return self.status(user)
     async def startup(self):
-        if os.environ.get('XUNJIA_QUOTE_AUTOSTART')!='1' or not self.managers:return
+        if os.environ.get('XUNJIA_QUOTE_AUTOSTART')!='1':return
         try:
             saved=json.loads((self.directory/'collector-state.json').read_text())
-            if saved.get('enabled') is True:await self.start(sorted(self.managers)[0],persist=False)
+            if saved.get('enabled') is True:await self.start('system',persist=False)
         except FileNotFoundError:pass
         except Exception:
             self._state='error';self._code='QUOTE_RESUME_FAILED';self._note='行情恢复未完成，请在采集通道检查凭据和数据库后重新启动'
     async def shutdown(self):
-        if self.managers:await self.stop(sorted(self.managers)[0],persist=False)
+        await self.stop('system',persist=False)
     def _update(self,**values):
         for key in self._stats:
             if key in values:self._stats[key]=values[key]

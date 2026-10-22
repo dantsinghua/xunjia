@@ -60,7 +60,11 @@ def json_object(text):
             out[k]=v
         return out
     def invalid(_):raise InvalidFact('Nonfinite Chatflow JSON number')
-    try:result=json.loads(text,object_pairs_hook=pairs,parse_constant=invalid)
+    def finite(raw):
+        value=float(raw)
+        if not math.isfinite(value):raise InvalidFact('Nonfinite Chatflow JSON number')
+        return value
+    try:result=json.loads(text,object_pairs_hook=pairs,parse_constant=invalid,parse_float=finite)
     except (ValueError,TypeError) as exc:raise InvalidFact('Chatflow did not return one valid JSON object') from exc
     if not isinstance(result,dict):raise InvalidFact('Expected a structured Chatflow object')
     return result
@@ -77,6 +81,24 @@ class ChatflowClient:
         self._key=app_key;self.stage=stage;self.timeout=timeout
         self.opener=opener or urllib.request.build_opener(_NoRedirect());self.clock=clock
         self.last_evidence={}
+    def _request_once(self,request,timeout):
+        try:
+            with self.opener.open(request,timeout=timeout) as response:
+                raw=response.read(2*1024*1024+1)
+                if len(raw)>2*1024*1024:raise FlowUnavailable('DIFY_RESPONSE_TOO_LARGE')
+                if response.status!=200:raise FlowUnavailable('DIFY_HTTP_ERROR',response.status)
+        except urllib.error.HTTPError as exc:
+            status=exc.code
+            try:body=exc.read(16385)
+            except (OSError,ValueError):body=b""
+            finally:exc.close()
+            raise FlowUnavailable(_http_error_code(status,body),status) from None
+        except TimeoutError:raise FlowUnavailable('DIFY_TIMEOUT') from None
+        except ssl.SSLError:raise FlowUnavailable("DIFY_TLS_ERROR") from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason,ssl.SSLError):raise FlowUnavailable("DIFY_TLS_ERROR") from None
+            raise FlowUnavailable('DIFY_TIMEOUT' if isinstance(exc.reason,TimeoutError) else 'DIFY_NETWORK_ERROR') from None
+        return raw
     def call(self,context):
         context={**context,'schema_version':'2.2','stage':self.stage}
         budget=context.pop('_stage_budget_seconds',self.timeout)
@@ -85,25 +107,24 @@ class ChatflowClient:
                  'response_mode':'blocking','user':'xunjia-'+hashlib.sha256((self.stage+str(context.get('thread_id',context.get('member_id','')))).encode()).hexdigest()[:32]}
         request=urllib.request.Request(self.url,data=encoded(payload).encode('utf8'),method='POST',
               headers={'Authorization':'Bearer '+self._key,'Content-Type':'application/json'})
-        start=self.clock()
+        start=self.clock();deadline=start+timeout;attempts=0;failures=[]
         self.last_evidence={}
         try:
-            try:
-                with self.opener.open(request,timeout=timeout) as response:
-                    raw=response.read(2*1024*1024+1)
-                    if len(raw)>2*1024*1024:raise FlowUnavailable('DIFY_RESPONSE_TOO_LARGE')
-                    if response.status!=200:raise FlowUnavailable('DIFY_HTTP_ERROR',response.status)
-            except urllib.error.HTTPError as exc:
-                status=exc.code
-                try:body=exc.read(16385)
-                except (OSError,ValueError):body=b""
-                finally:exc.close()
-                raise FlowUnavailable(_http_error_code(status,body),status) from None
-            except TimeoutError:raise FlowUnavailable('DIFY_TIMEOUT') from None
-            except ssl.SSLError:raise FlowUnavailable("DIFY_TLS_ERROR") from None
-            except urllib.error.URLError as exc:
-                if isinstance(exc.reason,ssl.SSLError):raise FlowUnavailable("DIFY_TLS_ERROR") from None
-                raise FlowUnavailable('DIFY_TIMEOUT' if isinstance(exc.reason,TimeoutError) else 'DIFY_NETWORK_ERROR') from None
+            for index in range(2):
+                remaining=timeout if index==0 else deadline-self.clock()
+                if remaining<=0:raise FlowUnavailable('DIFY_TIMEOUT')
+                attempts+=1
+                try:
+                    raw=self._request_once(request,remaining)
+                    break
+                except FlowUnavailable as exc:
+                    failures.append({'error_code':exc.code,'http_status':exc.status,
+                                     'elapsed_ms':round((self.clock()-start)*1000,3)})
+                    # Only an explicit provider service failure is eligible. A
+                    # timeout, invalid model contract or auth failure is not.
+                    if index or exc.code!='DIFY_UPSTREAM_UNAVAILABLE' or deadline-self.clock()<=.6:
+                        raise
+                    time.sleep(.5)
             try:
                 wrapper=json_object(raw.decode('utf8'))
                 result=json_object(wrapper.get('answer'))
@@ -112,10 +133,12 @@ class ChatflowClient:
         except FlowUnavailable as exc:
             self.last_evidence={'stage':self.stage,'elapsed_ms':round((self.clock()-start)*1000,3),
                                 'error_code':exc.code,'http_status':exc.status}
+            if attempts>1:self.last_evidence.update(request_attempts=attempts,retry_failures=failures)
             raise
         self.last_evidence={'stage':self.stage,'elapsed_ms':round((self.clock()-start)*1000,3),
                             'message_id':wrapper.get('message_id'),'conversation_id':wrapper.get('conversation_id'),
                             'workflow_run_id':wrapper.get('workflow_run_id')}
+        if attempts>1:self.last_evidence.update(request_attempts=attempts,retry_failures=failures)
         return result
 class Chatflows:
     def __init__(self,analysis,reply):self.analysis,self.reply=analysis,reply

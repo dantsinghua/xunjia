@@ -18,12 +18,15 @@ ROOT = Path(__file__).resolve().parents[3]
 def production_builds(tmp_path_factory):
     folder = tmp_path_factory.mktemp('version-builds')
     builds = []
+    source=folder/'web-source'
+    shutil.copytree(ROOT/'web',source,ignore=shutil.ignore_patterns('node_modules','dist','.vite'))
+    (source/'node_modules').symlink_to(ROOT/'web/node_modules',target_is_directory=True)
     for label in ['A', 'B']:
         with (folder / ('build-' + label + '.log')).open('w') as log:
-            result = subprocess.run(['npm', 'run', 'build'], cwd=ROOT / 'web', stdout=log, stderr=subprocess.STDOUT, timeout=300)
+            result = subprocess.run(['npm', 'run', 'build'], cwd=source, stdout=log, stderr=subprocess.STDOUT, timeout=300)
         assert result.returncode == 0, 'Production build failed; inspect owned build log'
         destination = folder / label
-        shutil.copytree(ROOT / 'web/dist', destination)
+        shutil.copytree(source / 'dist', destination)
         manifest = json.loads((destination / 'assets/build-version.json').read_text())
         html = (destination / 'index.html').read_text()
         asset = re.search(r'src="(/assets/[^\"]+\.js)"', html).group(1)
@@ -162,13 +165,14 @@ def test_bad_manifest_is_not_evidence_of_new_build_or_auth_failure(version_page,
 from tests.cutover.test_production_mq_bootstrap import bootstrap, OWNER, BASE, YAML
 
 
-def test_unbound_user_completes_two_field_setup_discovery_selection_and_quote_bar_with_real_backend(bootstrap, browser, frontend_url):
+def test_unbound_user_completes_mtls_setup_discovery_selection_and_quote_bar_with_real_backend(bootstrap, browser, frontend_url):
     import socket
     import time
     import uvicorn
     s = bootstrap
-    for wid in ['wb-a', 'wb-b']:
-        for uid in ['account-a', 'account-b']:
+    s['runtime'].background_enabled = True
+    for wid,uids in [('wb-a',['account-a','account-b']),('wb-b',['account-c','account-d'])]:
+        for uid in uids:
             s['seed'](wid, uid)
     s['vendor'].calls.clear()
     listener = socket.socket();listener.bind(('127.0.0.1', 0));listener.listen(128)
@@ -202,6 +206,11 @@ def test_unbound_user_completes_two_field_setup_discovery_selection_and_quote_ba
         expect(page.get_by_test_id('collector-current')).to_have_count(0)
         page.locator('[name=mq-base-url]').fill(BASE)
         page.locator('[name=mq-config-yaml]').fill(YAML)
+        from tests.tls_material import tls_config
+        certificate = tls_config()
+        page.locator('[name=mq-client-cert]').fill(certificate['client_cert_file'])
+        page.locator('[name=mq-client-key]').fill(certificate['client_key_file'])
+        page.locator('[name=mq-ca-file]').fill(certificate['ca_file'])
         assert not any(op == 'download' for _, op in s['vendor'].calls)
         page.get_by_test_id('mq-save').click()
         expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
@@ -212,13 +221,17 @@ def test_unbound_user_completes_two_field_setup_discovery_selection_and_quote_ba
 
         expect(page.get_by_test_id('collector-workbench').locator('option')).to_have_count(3)
         page.get_by_test_id('collector-workbench').select_option('wb-b')
-        page.get_by_test_id('collector-account').select_option('account-a')
+        page.get_by_test_id('collector-account').select_option('account-c')
         page.get_by_test_id('collector-connect').click()
         expect(page.get_by_test_id('collector-current')).to_contain_text('wb-b')
-        expect(page.get_by_test_id('collector-contacts')).to_contain_text('peer-wb-b-account-a')
+        deadline=time.monotonic()+5
+        while not s['runtime'].directory.contacts('wb-b','account-c',OWNER)['contacts'] and time.monotonic()<deadline:
+            time.sleep(.02)
+        page.get_by_test_id('collector-read-saved').click()
+        expect(page.get_by_test_id('collector-contacts')).to_contain_text('peer-wb-b-account-c')
         page.goto(frontend_url + '/#/quote')
         bar = page.locator('.im-bar')
-        expect(bar.locator('.im-sel')).to_have_value('account-a:oss')
+        expect(bar.locator('.im-sel')).to_have_value('account-c:oss')
         expect(bar).to_contain_text('wb-b')
         expect(bar.get_by_role('button', name='读取通讯录', exact=True)).to_have_count(0)
         expect(bar.locator('.im-book')).to_have_count(0)
@@ -226,11 +239,13 @@ def test_unbound_user_completes_two_field_setup_discovery_selection_and_quote_ba
         bar = page.locator('.im-bar')
         expect(bar).to_contain_text('wb-b')
         bar.get_by_role('button', name='读取通讯录', exact=True).click()
-        expect(bar.locator('.im-person')).to_have_count(1)
-        expect(bar).to_contain_text('peer-wb-b-account-a')
+        expect(bar.locator('.im-person, .im-book')).to_have_count(0)
+        expect(page.get_by_text('已读取 1 人（通讯录）', exact=True)).to_be_visible()
+        expect(bar).not_to_contain_text('peer-wb-b-account-c')
         assert [x for x in calls if x[0] != 'GET'] == [
             ('PUT', '/api/im/mq-config'), ('POST', '/api/im/catalog/refresh'), ('POST', '/api/im/binding/select')]
-        assert sum(op == 'download' for _, op in s['vendor'].calls) == 8
+        assert all(path and len(path)<=20 for path,op in s['vendor'].calls)
+        assert any(op=='download' for path,op in s['vendor'].calls)
         assert s['app'].state.repository.binding_for(OWNER)['workbench_id'] == 'wb-b'
     finally:
         page.unroute_all(behavior='wait');context.close();server.should_exit=True;thread.join(10);listener.close()

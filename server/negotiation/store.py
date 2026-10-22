@@ -63,7 +63,9 @@ class Store:
         reset=self._account_reset(tx,owner,account_uid,workbench_id=workbench_id)
         if reset and require_complete and reset['state']!='complete':
             raise InvalidFact('SESSION_RESET_IN_PROGRESS:'+reset['state'])
-        return reset['account_epoch'] if reset else 0
+        if reset:return reset['account_epoch']
+        binding=tx.execute('SELECT config_json FROM xj2_binding WHERE owner_id=? AND account_uid=?',(owner,account_uid)).fetchone()
+        return int(json.loads(binding['config_json']).get('context_epoch',0)) if binding else 0
     @staticmethod
     def thread_is_current(tx,thread):
         binding=tx.execute('SELECT account_uid,workbench_id FROM xj2_binding WHERE owner_id=?',(thread['owner_id'],)).fetchone()
@@ -74,8 +76,11 @@ class Store:
         return thread
     def _restore_thread_reset(self,tx,owner,account_uid,peer_uid,thread_id,workbench_id):
         reset=self._account_reset(tx,owner,account_uid,workbench_id=workbench_id or '',applied_only=True)
-        if not reset:return
-        peer=json.loads(reset['snapshot_json'])['peers'].get(peer_uid,{})
+        if reset:peer=json.loads(reset['snapshot_json'])['peers'].get(peer_uid,{})
+        else:
+            binding=tx.execute('SELECT config_json FROM xj2_binding WHERE owner_id=? AND workbench_id=? AND account_uid=?',(owner,workbench_id,account_uid)).fetchone()
+            if not binding:return
+            peer=json.loads(binding['config_json']).get('context_peers',{}).get(peer_uid,{})
         tx.execute('UPDATE xj2_thread SET source_watermark=?,dispatch_version=?,receiver_fence_id=?,receiver_fence_version=? WHERE thread_id=?',
             (peer.get('source_watermark',0),max(0,peer.get('min_control_version',1)-1),peer.get('receiver_fence_id',''),peer.get('receiver_fence_version',0),thread_id))
     def _reset_message_filter(self,tx,thread,alias=''):

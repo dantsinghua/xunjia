@@ -23,7 +23,7 @@ class Reference:
             bonds=[{'code':'SYN-A','valuation_date':self.day,'valuation_yield_pct':self.value}])
 def setup(tmp_path):
     ref=Reference();now=[datetime(2026,10,16,23,59,tzinfo=ZoneInfo('Asia/Shanghai')).timestamp()]
-    app=create_app(database_url='sqlite:///'+str(tmp_path/'recovery.sqlite'),enable_background=False,
+    app=create_app(submission_guard=lambda _owner: None, database_url='sqlite:///'+str(tmp_path/'recovery.sqlite'),enable_background=False,
         auth_config=AuthConfig(clock=lambda:now[0]),reference_provider=ref,calendar=ref)
     store=app.state.repository
     group=store.create_group(OWNER,bond_code='SYN-A',our_side='BUY',target_volume='2000',trade_day='2026-10-16',

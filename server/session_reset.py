@@ -107,6 +107,8 @@ class SessionReset:
             payload={'reset_id':new_id(),'owner_user_id':owner,'workbench_id':binding['workbench_id'],
                 'account_uid':binding['account_uid'],'binding_version':binding['version'],
                 'expected_account_epoch':epoch,'account_epoch':epoch+1,'transport':binding['transport']}
+            context=json.loads(binding['config_json']).get('context_id')
+            if context:payload['context_id']=context
             payload['request_hash']=session_reset_hash(payload)
             groups=self._groups(tx,owner,binding['account_uid'],binding['workbench_id'])
             for group in groups:

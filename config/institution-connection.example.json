@@ -1,0 +1,7 @@
+{
+  "contract": "its-relay-path-v1",
+  "base_url": "https://its-relay.yingmi.cn",
+  "auth_file": "institution-auth.yaml",
+  "client_cert_file": "tls/client.crt",
+  "client_key_file": "tls/client.key"
+}

@@ -8,16 +8,33 @@ from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
 import io
 import json
+from contextlib import nullcontext
 from fastapi import APIRouter,Body,Query,Request
 from fastapi.responses import Response,StreamingResponse
 from .prices import InvalidFact,number,comparison
 from .service import digest
 from .store import encoded
+from .application_store import status_label as label
 from ..market import parse_filter
 from ..quote_runtime import public_static
 def router(service,market,tools,transport,*,collector_selection=None):
     r=APIRouter(prefix='/api');store=service.store;commands=service.commands_core
     def owner(req):return req.state.user.user_id
+    def submission(req, operation):
+        from ..channel_readiness import ChannelUnavailable
+        lock=collector_selection._lock if collector_selection else nullcontext()
+        with lock:
+            if collector_selection:
+                context=store.preferences(owner(req)).get('context_id')
+                if context and req.headers.get('X-Xunjia-Context')!=context:
+                    raise ChannelUnavailable('ACCOUNT_CONTEXT_CHANGED','当前账号或配置已变化，请重新读取并填写本次发送；未提交')
+            try:return {'ok':True,'data':operation()}
+            except (ValueError,PermissionError) as exc:
+                if hasattr(exc,'submitted'):raise
+                # These are pre-commit domain rejections; server/network faults
+                # remain uncertain and must be queried with the same request id.
+                raise ChannelUnavailable('SUBMISSION_REJECTED',str(exc)) from None
+
     def require_online(req):
         guard=getattr(collector_selection,"require_online",None)
         if callable(guard):guard(owner(req))
@@ -40,12 +57,6 @@ def router(service,market,tools,transport,*,collector_selection=None):
         row=commands.get(who,command_id)
         with store.db.transaction(write=False) as tx:store.require_current_thread(tx,who,row['thread_id'])
         return row
-    def label(group,peer=None):
-        if group['state']=='HANDOFF':return '待人工确认'
-        if not group['send_allowed'] or peer and not peer['send_allowed']:return '已暂停'
-        if peer and peer['command_state']=='UNKNOWN':return '待核对'
-        if peer and peer['pending_command_id']:return '待回执'
-        return '询价中'
     @r.get('/negotiation/capacity')
     def capacity(request:Request):
         b=bound(request)
@@ -117,11 +128,15 @@ def router(service,market,tools,transport,*,collector_selection=None):
     def preview(request:Request,body:dict=Body(default_factory=dict)):
         require_online(request)
         return {'ok':True,'data':service.preview(owner(request),body.get('request_id'),body.get('items'))}
+    @r.post('/im/rfq/send-direct')
+    def send_direct(request:Request,body:dict=Body(default_factory=dict)):
+        if set(body)-{'request_id','items'}:
+            raise InvalidFact('直接发送只接受本次询价参数及请求编号')
+        return submission(request,lambda:service.send_direct(owner(request),body.get('request_id'),body.get('items')))
     @r.post('/im/rfq/send')
     def confirm(request:Request,body:dict=Body(default_factory=dict)):
-        require_online(request)
         if 'items' in body:raise InvalidFact('须先预览并确认，不能直接发送原始明细')
-        return {'ok':True,'data':service.confirm(owner(request),body.get('batch_id'),body.get('expected_version'),body.get('request_id'))}
+        return submission(request,lambda:service.confirm(owner(request),body.get('batch_id'),body.get('expected_version'),body.get('request_id')))
     @r.get('/im/rfq/status')
     def rfq_status(request:Request):
         bound(request);groups=store.group_rows(owner(request));items=[];sessions=[]
@@ -132,13 +147,19 @@ def router(service,market,tools,transport,*,collector_selection=None):
         return {'ok':True,'data':{'engine':'v22','items':items,'sessions':sessions}}
     @r.post('/bot/toggle')
     def bot(request:Request,body:dict=Body(default_factory=dict)):
-        if body.get("status")=="正常":require_online(request)
+        if body.get("status")=="正常":
+            require_online(request)
+            guard=getattr(service,'submit_guard',None)
+            if guard is not None:guard(owner(request))
         if body.get('status') not in ('正常','停止'):raise InvalidFact('指定正常或停止')
         return {'ok':True,'data':service.set_bot(owner(request),body['status']=='正常')}
     @r.get('/monitor/summary')
     def summary(request:Request):
         bound(request);s=store.snapshot(owner(request))
-        return {'ok':True,'data':{'revision':s['revision'],'engine':'v22','bot':{'status':'正常' if s['send_allowed'] else '停止'},'stats':[
+        guard=getattr(service,'submit_guard',None)
+        channel=guard.report(owner(request)) if callable(getattr(guard,'report',None)) else {'ready':True}
+        status='停止' if not s['send_allowed'] else '正常' if channel['ready'] else '通道不可用'
+        return {'ok':True,'data':{'revision':s['revision'],'engine':'v22','bot':{'status':status,'enabled':bool(s['send_allowed'])},'sending':channel,'stats':[
             {'label':'券组','value':len(s['groups']),'unit':'组','sub':'按券共享目标量'},
             {'label':'对手子会话','value':sum(len(g['peers']) for g in s['groups']),'unit':'个','sub':'逐对手独立价量'},
             {'label':'待解析线程','value':sum(t['analysis_pending'] for t in s['threads']),'unit':'个','sub':'停止发送仍继续分析'}]}}
@@ -158,10 +179,16 @@ def router(service,market,tools,transport,*,collector_selection=None):
                     'peer_volume_wan':q['volume_wan'],'analysis_pending':p['analysis_pending'],'summary':g['summary'],
                     'freshness':q['validity'],'finality':q['finality'],'revision':p['version'],
                     'group_revision':g['version'],'group_send_allowed':bool(g['send_allowed']),
+                    'member_send_allowed':bool(p['send_allowed']),
                     'send_allowed':bool(s['send_allowed'] and g['send_allowed'] and p['send_allowed']),
                     'pending_command_id':p['pending_command_id'],'command_state':p['command_state'],
                     'response_state':p['response_state'],'trade_day':g['trade_day'],
                     'needs_review':bool(g['review_needed'])})
+        current=store.binding_for(owner(request))
+        with store.db.transaction(write=False) as tx:
+            for thread in tx.execute('SELECT thread_id,peer_uid FROM xj2_thread WHERE owner_id=? AND workbench_id=? AND account_uid=? ORDER BY thread_id',
+                (owner(request),current['workbench_id'],current['account_uid'])).fetchall():
+                peers.setdefault(thread['thread_id'],{'cp_id':thread['peer_uid'],'name':thread['peer_uid'],'thread_id':thread['thread_id'],'channel':'qidian','bonds':[]})
         return {'ok':True,'revision':s['revision'],'data':list(peers.values())}
     @r.get('/monitor/chat')
     def chat(request:Request,cp:str='',cursor:str='',limit:int=Query(50,ge=1,le=200)):
@@ -202,12 +229,10 @@ def router(service,market,tools,transport,*,collector_selection=None):
             'analysis_pending':s['analysis_pending'],'trader':request.state.user.display_name} for s in rows]}
     @r.post('/monitor/send')
     def send(request:Request,body:dict=Body(default_factory=dict)):
-        require_online(request)
-        return {'ok':True,'data':service.manual_send(owner(request),body.get('cp'),body.get('text'),body.get('request_id'))}
+        return submission(request,lambda:service.manual_send(owner(request),body.get('cp'),body.get('text'),body.get('request_id')))
     @r.post('/im/send')
     def im_send(request:Request,body:dict=Body(default_factory=dict)):
-        require_online(request)
-        return {'ok':True,'data':service.manual_send(owner(request),body.get('uin'),body.get('text'),body.get('request_id'))}
+        return submission(request,lambda:service.manual_send(owner(request),body.get('uin'),body.get('text'),body.get('request_id')))
     @r.post('/session/{session_id}/takeover')
     def takeover(request:Request,session_id:str):
         store.set_sending(owner(request),False,member_id=session_id)
@@ -242,7 +267,11 @@ def router(service,market,tools,transport,*,collector_selection=None):
     @r.get('/im/receipts/{command_id}')
     def receipt(request:Request,command_id:str):
         row=current_command(owner(request),command_id);result=json.loads(row['result_json'])
-        return {'ok':True,'data':{'cmd_id':command_id,'status':row['state'].lower(),'ok':row['state']=='SENT','reason':result.get('reason',''),'expected_result_hash':digest(result),'native_id':row['native_id']}}
+        reason=result.get('reason','')
+        if not reason and row['state'] in ('FAILED','UNKNOWN'):
+            reason=next((r.get('evidence','') for r in reversed(result.get('receipts',[]))
+                         if r.get('status')==row['state']), '')
+        return {'ok':True,'data':{'cmd_id':command_id,'status':row['state'].lower(),'ok':row['state']=='SENT','reason':reason,'expected_result_hash':digest(result),'native_id':row['native_id']}}
     @r.get('/im/commands/unknown')
     def unknown(request:Request):
         return {'ok':True,'data':[{'cmd_id':c['command_id'],'peer_id':c['peer_id'],'text':c['text'],'created_at':c['created_at'],'expected_result_hash':digest(json.loads(c['result_json'])),'conflict':json.loads(c['result_json']).get('conflict',False)} for c in service.commands(owner(request)) if c['state']=='UNKNOWN']}
@@ -278,7 +307,7 @@ def router(service,market,tools,transport,*,collector_selection=None):
                 except (KeyError,TypeError,ValueError):pass
             links.append({'id':b['account_uid']+':'+route,'account_id':b['account_uid'],'account_uid':b['account_uid'],'self_uid':b['account_uid'],
               'mode':route,'name':request.state.user.display_name,'workbench_id':b['workbench_id'],'active':route==b['transport'],
-              'configured':configured,'version':b['version'],'tested':tested,'catalog_stale':stale,
+              'configured':configured,'version':b['version'],'context_id':store.preferences(owner(request)).get('context_id',''),'tested':tested,'catalog_stale':stale,
               'state':('缓存目录已校验' if stale else '目录已校验') if tested else '未检查' if configured else '未配置',
               'account':{'id':b['account_uid'],'self_uid':b['account_uid'],'label':b['account_uid'],'state':'已绑定'},
               'form':{route:{'workbench_id':b['workbench_id'],'account_uid':b['account_uid']}},'contacts':[],'secret_set':configured})

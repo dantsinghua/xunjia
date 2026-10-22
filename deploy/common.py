@@ -119,12 +119,15 @@ def read_env(path: Path, *, require_private=True) -> dict[str, str]:
     return result
 def effective_env(values: dict, prefix: Path, app: Path) -> dict[str, str]:
     env = dict(values)
+    retired=[key for key in ('XUNJIA_TRANSPORT_CONFIG','XUNJIA_MQ_CONNECTION_CONFIG') if env.get(key,'').strip()]
+    if retired:raise DeployError('RETIRED_TRANSPORT_CONFIG', ', '.join(retired))
+    for key in ('XUNJIA_TRANSPORT_CONFIG','XUNJIA_MQ_CONNECTION_CONFIG','XUNJIA_SEAL_KEY','XUNJIA_SIGN_KEY'):env.pop(key,None)
     defaults = {'XUNJIA_HOST': '127.0.0.1', 'XUNJIA_PORT': '18770',
                 'XUNJIA_RUN_BACKGROUND': '1',
                 'XUNJIA_DIFY_URL': '', 'XUNJIA_DIFY_ANALYSIS_APP_KEY': '',
                 'XUNJIA_DIFY_REPLY_APP_KEY': '', 'XUNJIA_AGGREGATION_PROFILE': '',
-                'XUNJIA_TRANSPORT_CONFIG': '', 'XUNJIA_MQ_CONNECTION_CONFIG': '', 'XUNJIA_QUOTE_SOURCE': '',
-                'XUNJIA_SEAL_KEY': '', 'XUNJIA_SIGN_KEY': '', 'XUNJIA_MQ_ALLOW_HTTP': '0'}
+                'XUNJIA_INSTITUTION_CONFIG': '', 'XUNJIA_QUOTE_SOURCE': '',
+                'XUNJIA_MQ_ALLOW_HTTP': '0'}
     for key, val in defaults.items(): env.setdefault(key, val)
     if env.get('XUNJIA_WEB_DIST', '') in ('', '/home/xunjia/app/frontend/dist', str(prefix/'app/frontend/dist')):
         env['XUNJIA_WEB_DIST'] = str(app/'frontend/dist')

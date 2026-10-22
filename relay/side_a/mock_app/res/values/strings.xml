@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="list_title">MockQidian 会话</string>
-    <string name="back">返回</string>
-    <string name="send">发送</string>
-    <string name="input_hint">输入消息</string>
-</resources>

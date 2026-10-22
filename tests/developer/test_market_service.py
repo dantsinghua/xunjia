@@ -1,11 +1,11 @@
 import json
 import pytest
-from server.repository import Repository
+from server.negotiation.application_store import ApplicationStore
 
 
 def test_market_filter_before_pagination_and_private_overlay(tmp_path):
     from server.market import MarketService
-    repo = Repository('sqlite:///' + str(tmp_path/'business.db'))
+    repo = ApplicationStore('sqlite:///' + str(tmp_path/'business.db'), initialize=True)
     repo.bind_account('a','a1','wb')
     repo.bind_account('b','b1','wb')
     rows = [dict(code=f'SYN{i:03}.IB',name='甲' if i%2 else '乙',bondUniCode=str(i),flowId=i,
@@ -22,7 +22,7 @@ def test_market_filter_before_pagination_and_private_overlay(tmp_path):
 
 def test_market_unknown_filter_does_not_expand_selection(tmp_path):
     from server.market import MarketService
-    repo=Repository('sqlite:///' + str(tmp_path/'x.db'))
+    repo=ApplicationStore('sqlite:///' + str(tmp_path/'x.db'), initialize=True)
     svc=MarketService(repo,rows_provider=lambda c,b:[])
     with pytest.raises(ValueError):svc.page('a',filter_spec={'channel':'other'})
     with pytest.raises(ValueError):svc.page('a',filter_spec={'chips':{'类型':100}})

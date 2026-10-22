@@ -134,7 +134,7 @@ function dirColor(d: string) { return d === 'GVN' ? '#B01C24' : d === 'TKN' ? '#
             <div class="legend"><span><i class="ls red" />平均成交</span><span><i class="ls gold dash" />中债估值</span></div>
             <svg v-if="detail.hist.avg || detail.hist.zz" viewBox="0 0 560 170" class="chart">
               <g stroke="rgba(176, 28, 36,.1)" stroke-width="1"><line x1="40" y1="20" x2="550" y2="20" /><line x1="40" y1="60" x2="550" y2="60" /><line x1="40" y1="100" x2="550" y2="100" /><line x1="40" y1="140" x2="550" y2="140" /></g>
-              <g font-family="JetBrains Mono" font-size="10" fill="#A89C90"><text x="4" y="24">{{ detail.hist.max }}</text><text x="4" y="144">{{ detail.hist.min }}</text><text x="40" y="164">{{ detail.hist.d0 }}</text><text x="285" y="164">{{ detail.hist.d1 }}</text><text x="500" y="164">{{ detail.hist.d2 }}</text></g>
+              <g font-family="var(--font-ui)" font-size="10" fill="#A89C90"><text x="4" y="24">{{ detail.hist.max }}</text><text x="4" y="144">{{ detail.hist.min }}</text><text x="40" y="164">{{ detail.hist.d0 }}</text><text x="285" y="164">{{ detail.hist.d1 }}</text><text x="500" y="164">{{ detail.hist.d2 }}</text></g>
               <polyline :points="detail.hist.zz" fill="none" stroke="#C68D58" stroke-width="1.6" stroke-dasharray="4 4" />
               <polyline :points="detail.hist.avg" fill="none" stroke="#C2333B" stroke-width="2.2" stroke-linejoin="round" style="filter:drop-shadow(0 0 6px rgba(176, 28, 36,.45))" />
             </svg>
@@ -144,7 +144,7 @@ function dirColor(d: string) { return d === 'GVN' ? '#B01C24' : d === 'TKN' ? '#
             <div class="legend"><span><i class="ls red" />bid</span><span><i class="ls green" />ofr</span><span><i class="ls gold dash" />中债估值</span></div>
             <svg v-if="detail.intra.bid || detail.intra.ofr" viewBox="0 0 560 170" class="chart">
               <g stroke="rgba(176, 28, 36,.1)" stroke-width="1"><line x1="40" y1="20" x2="550" y2="20" /><line x1="40" y1="60" x2="550" y2="60" /><line x1="40" y1="100" x2="550" y2="100" /><line x1="40" y1="140" x2="550" y2="140" /></g>
-              <g font-family="JetBrains Mono" font-size="10" fill="#A89C90"><text x="4" y="24">{{ detail.intra.max }}</text><text x="4" y="144">{{ detail.intra.min }}</text><text x="40" y="164">09:00</text><text x="170" y="164">10:30</text><text x="300" y="164">13:30</text><text x="430" y="164">14:30</text><text x="525" y="164">15:00</text></g>
+              <g font-family="var(--font-ui)" font-size="10" fill="#A89C90"><text x="4" y="24">{{ detail.intra.max }}</text><text x="4" y="144">{{ detail.intra.min }}</text><text x="40" y="164">09:00</text><text x="170" y="164">10:30</text><text x="300" y="164">13:30</text><text x="430" y="164">14:30</text><text x="525" y="164">15:00</text></g>
               <polyline :points="detail.intra.zz" fill="none" stroke="#C68D58" stroke-width="1.6" stroke-dasharray="4 4" />
               <polyline :points="detail.intra.bid" fill="none" stroke="#C2333B" stroke-width="2.2" stroke-linejoin="round" style="filter:drop-shadow(0 0 6px rgba(176, 28, 36,.45))" />
               <polyline :points="detail.intra.ofr" fill="none" stroke="#2E8B57" stroke-width="2.2" stroke-linejoin="round" style="filter:drop-shadow(0 0 6px rgba(46,125,79,.4))" />

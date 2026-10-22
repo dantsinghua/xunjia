@@ -24,7 +24,7 @@ def setup(tmp_path):
     provider = SimpleNamespace(snapshot=lambda: reference_snapshot('tool-issuer-info'))
     flows = SimpleNamespace(analyze=lambda context: None, decide=lambda context: None)
     url = 'sqlite:///' + str(tmp_path/'tools.db')
-    app = create_app(database_url=url, auth_config=AuthConfig(clock=lambda: NOW),
+    app = create_app(submission_guard=lambda _owner: None, database_url=url, auth_config=AuthConfig(clock=lambda: NOW),
                      enable_background=False, chatflows=flows, reference_provider=provider)
     store = app.state.repository
     store.bind_account(OWNER, 'synthetic-account', 'synthetic-workbench')

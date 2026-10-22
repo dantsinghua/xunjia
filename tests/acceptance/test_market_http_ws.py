@@ -8,23 +8,23 @@ from openpyxl import load_workbook
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-from server.legacy_app import create_app
+from server.app import create_app
 from server.auth import AuthConfig
 from server.market import MarketService
-from server.repository import Repository
+from server.negotiation.application_store import ApplicationStore
 
 
 @pytest.fixture
 def market_http(tmp_path):
     url = "sqlite:///" + str(tmp_path / "market-business.db")
-    repo = Repository(url)
+    repo = ApplicationStore(url, initialize=True)
     for user, uid in [("a", "910001"), ("b", "910002")]:
         repo.bind_account(user, uid, "synthetic-wb")
     rows = [{"code": f"{number:06d}.IB", "name": "合成券-" + str(number), "bondUniCode": str(number + 10000),
              "flowId": number, "ob": "2.10", "oo": "2.20", "tags": [], "clearing": "+1",
              "ib": "PRIVATE-INTENT", "status": "已成交"} for number in range(1, 2052)]
     clock = [1_800_000_000]
-    app = create_app(database_url=url, market=MarketService(repo, rows_provider=lambda channel, broker: rows),
+    app = create_app(enable_background=False, database_url=url, market=MarketService(repo, rows_provider=lambda channel, broker: rows),
                      auth_config=AuthConfig(sso_secret="sso", session_secret="market-test-session-secret-over-32", token_ttl_seconds=30, clock=lambda: clock[0]))
     with TestClient(app) as client:
         tokens = {}
@@ -112,10 +112,10 @@ def test_sql_filter_pagination_selection_and_export_agree_on_combined_constraint
 
 
 def test_sql_status_filter_is_derived_only_from_authenticated_owners_sessions(sql_market_http):
-    from server.business import InquiryService
+    from server.negotiation.service import Inquiry
 
     app, client, tokens, _ = sql_market_http
-    service = InquiryService(app.state.repository)
+    service = Inquiry(app.state.repository)
     draft = service.preview("a", "sql-owner-preview", [{"code": "000001.IB", "name": "SQL合成券1", "peer_ids": ["sql-peer"],
                             "our_side": "BUY", "volume_wan": "1000", "opening_yield_pct": "2.50", "limit_yield_pct": "2.40", "step_bp": "2"}])
     service.confirm("a", draft["batch_id"], draft["version"], "sql-owner-confirm")
@@ -162,10 +162,10 @@ def test_readonly_question_rejects_sql_identity_override_and_invalid_shapes(mark
 
 
 def test_readonly_summary_only_reads_own_live_sessions_without_creating_commands(market_http):
-    from server.business import InquiryService
+    from server.negotiation.service import Inquiry
 
     app, client, tokens, _, _ = market_http
-    service = InquiryService(app.state.repository)
+    service = Inquiry(app.state.repository)
     for owner, code in (("a", "000001.IB"), ("b", "000002.IB")):
         draft = service.preview(owner, "qa-preview", [{"code": code, "name": "合成问答券", "peer_ids": ["private-peer-" + owner],
                 "our_side": "BUY", "volume_wan": "1000", "opening_yield_pct": "2.50", "limit_yield_pct": "2.40", "step_bp": "2"}])

@@ -11,7 +11,7 @@ export function startBuildVersionWatch(currentVersion: string): () => void {
     banner.setAttribute('aria-live', 'polite')
     banner.setAttribute('aria-label', '工作台版本更新')
     banner.dataset.testid = 'app-update-banner'
-    banner.style.cssText = 'position:fixed;top:80px;right:16px;z-index:150;width:min(600px,calc(100vw - 32px));box-sizing:border-box;padding:16px;display:flex;align-items:center;flex-wrap:wrap;gap:12px;border:1px solid #b01c24;border-radius:12px;background:#fffaf5;color:#2b2320;box-shadow:0 8px 28px #2b232033;font:14px/1.6 system-ui,sans-serif'
+    banner.style.cssText = 'position:fixed;top:80px;right:16px;z-index:150;width:min(600px,calc(100vw - 32px));box-sizing:border-box;padding:16px;display:flex;align-items:center;flex-wrap:wrap;gap:12px;border:1px solid #b01c24;border-radius:12px;background:#fffaf5;color:#2b2320;box-shadow:0 8px 28px #2b232033;font:14px/1.6 var(--font-ui, system-ui),sans-serif'
     const text = document.createElement('div')
     text.style.cssText = 'flex:1;min-width:200px;overflow-wrap:anywhere'
     const title = document.createElement('strong')

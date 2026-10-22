@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import time
 from relay.file_gateway import FileGatewayClient, FileGatewayError, GatewayAuth
 from relay.protocol import ProtocolError, canonical, digest
@@ -41,23 +42,6 @@ class FileGatewayTransport(_Transport):
             if row and row[0] != identity:
                 raise FileGatewayError("FILE_GATEWAY_STATE_ROUTE_CHANGED")
             db.execute("INSERT OR IGNORE INTO fg_identity VALUES(?,?)", (self.store.scope, identity))
-
-    @classmethod
-    def from_config(cls, binding, config, path, *, role, config_dir):
-        if isinstance(config, dict) and config.get("contract") == "its-relay-path-v1":
-            from .institution_transport import InstitutionTransport
-            return InstitutionTransport.from_institution_config(binding, config, path, role=role, config_dir=config_dir)
-        allowed = {"uplink_url", "downlink_url", "auth_file", "allow_http", "timeout_seconds", "max_bytes"}
-        if not isinstance(config, dict) or set(config) - allowed or not {"uplink_url", "downlink_url", "auth_file"} <= config.keys():
-            raise FileGatewayError("FILE_GATEWAY_CONFIG_INVALID")
-        auth_path = Path(config["auth_file"])
-        if not auth_path.is_absolute():
-            auth_path = Path(config_dir) / auth_path
-        auth = GatewayAuth.from_file(auth_path)
-        options = dict(allow_http=config.get("allow_http", False), timeout=config.get("timeout_seconds", 15), max_bytes=config.get("max_bytes", 4*1024*1024))
-        up = FileGatewayClient(config["uplink_url"], auth, **options)
-        down = FileGatewayClient(config["downlink_url"], auth, **options)
-        return cls(binding, up if role == "service" else down, down if role == "service" else up, path, role=role)
 
     def _publish(self, data, blob):
         if data["kind"] not in self.outgoing_kinds:
@@ -107,7 +91,15 @@ class FileGatewayTransport(_Transport):
 
     def _poll_pending(self, limit, control_intake):
         if not control_intake:
-            return self._pending(self.stream, limit)
+            rows=self._pending(self.stream, limit)
+            if self.role == "service":
+                # A prefetched batch may complete in another HTTP order. Native
+                # source sequence, not thread completion, orders message facts.
+                def source_order(row):
+                    value=row['envelope']['payload'].get('source_seq')
+                    return row['kind']=='event',value if row['kind']=='event' and type(value) is int else 0
+                rows.sort(key=source_order)
+            return rows
         rows = self.store.pending(self.stream)
         rows.sort(key=lambda row: row['kind'] != 'session_reset')
         rows = rows[:limit]
@@ -117,6 +109,21 @@ class FileGatewayTransport(_Transport):
             # that rejection to retire the old input without hiding a reset.
             self.codec._validate(row['envelope'], allow_expired=row['kind'] in DOWNLINK)
         return rows
+
+    def _receive_one(self):
+        with self.store.db() as db:
+            seq = db.execute("INSERT INTO fg_download(scope,state,name,blob,code) VALUES(?,?,?,?,?)", (self.store.scope, "RECEIVING", "", None, "")).lastrowid
+        try:
+            value = self.inbound.download()
+        except Exception as exc:
+            ambiguous = not isinstance(exc, FileGatewayError) or exc.ambiguous
+            code = exc.code if isinstance(exc, FileGatewayError) else "FILE_DOWNLOAD_OUTCOME_UNKNOWN"
+            with self.store.db() as db:
+                db.execute("UPDATE fg_download SET state=?,code=? WHERE seq=? AND scope=?", ("UNKNOWN" if ambiguous else "REJECTED", code, seq, self.store.scope))
+            raise FileGatewayError(code, status=getattr(exc,"status",None), ambiguous=ambiguous) from None
+        with self.store.db() as db:
+            db.execute("UPDATE fg_download SET state=?,name=?,blob=?,received_at=? WHERE seq=? AND scope=?", ("EMPTY" if value is None else "STORED", value.name if value else "", value.content if value else None, self.clock() if value else None, seq, self.store.scope))
+        return value
 
     def poll(self, limit=50, *, control_intake=False):
         if type(limit) is not int or not 1 <= limit <= 200:
@@ -129,19 +136,19 @@ class FileGatewayTransport(_Transport):
             pending = self._poll_pending(limit, control_intake)
             if pending and not control_intake:
                 return pending
+            if self.role == "service" and limit >= 8:
+                available=self.inbound.pending()
+                if available >= 8:
+                    # One consumer holds the account download lock. Each bounded
+                    # HTTP request commits its RECEIVING/STORED outcome separately;
+                    # an interrupted batch is recovered from the same local journal.
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        futures=[pool.submit(self._receive_one) for _ in range(min(limit,available))]
+                        for future in futures:future.result()
+                    self._stage_downloads()
+                    return self._poll_pending(limit, control_intake)
             for _ in range(limit):
-                with self.store.db() as db:
-                    seq = db.execute("INSERT INTO fg_download(scope,state,name,blob,code) VALUES(?,?,?,?,?)", (self.store.scope, "RECEIVING", "", None, "")).lastrowid
-                try:
-                    value = self.inbound.download()
-                except Exception as exc:
-                    ambiguous = not isinstance(exc, FileGatewayError) or exc.ambiguous
-                    code = exc.code if isinstance(exc, FileGatewayError) else "FILE_DOWNLOAD_OUTCOME_UNKNOWN"
-                    with self.store.db() as db:
-                        db.execute("UPDATE fg_download SET state=?,code=? WHERE seq=? AND scope=?", ("UNKNOWN" if ambiguous else "REJECTED", code, seq, self.store.scope))
-                    raise FileGatewayError(code, status=getattr(exc,"status",None), ambiguous=ambiguous) from None
-                with self.store.db() as db:
-                    db.execute("UPDATE fg_download SET state=?,name=?,blob=?,received_at=? WHERE seq=? AND scope=?", ("EMPTY" if value is None else "STORED", value.name if value else "", value.content if value else None, self.clock() if value else None, seq, self.store.scope))
+                value = self._receive_one()
                 if value is None:
                     break
                 self._stage_downloads()

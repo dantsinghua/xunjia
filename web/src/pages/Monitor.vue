@@ -8,19 +8,18 @@ import { App } from 'ant-design-vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import { STATUS_COLOR } from '../theme'
-import type { BondRow, ChatMsg, Counterparty, DetailRow, NegotiationQuote } from '../lib/types'
+import type { BondRow, ChatMsg, Counterparty, DetailRow, NegotiationQuote, CpBond } from '../lib/types'
 import BondModal from '../components/BondModal.vue'
 import TraceModal from '../components/TraceModal.vue'
 import ImLinkBar from '../components/ImLinkBar.vue'
 import ReconcileModal from '../components/ReconcileModal.vue'
-import NegotiationGroups from '../components/NegotiationGroups.vue'
 import { imCurrent, imBoundAccount, imFeedError, imIdentity } from '../lib/imLink'
 import { useBodyScrollLock } from '../lib/useModal'
+import { monitorTradeDay, isCurrentInquiry, canResumeInquiry } from '../lib/monitorBonds'
 
 const { message } = App.useApp()
 const route = useRoute()
 const reconcileOpen=ref(false)
-const groupsPanel=ref<InstanceType<typeof NegotiationGroups>|null>(null)
 
 const botOn = ref(false)
 const serverBotStatus = ref('未知')
@@ -30,6 +29,8 @@ const cps = ref<Counterparty[]>([])
 const bonds = ref<BondRow[]>([])
 const selCpId = ref('gl')
 const activeBond = ref('')
+const messageBondFocus = ref('')
+const tradingDay = ref(monitorTradeDay())
 const openBonds = reactive<Record<string, boolean>>({})
 const chatInput = ref('')
 const sendBusy = ref(false)
@@ -59,6 +60,19 @@ onMounted(async () => {
 })
 
 const selCp = computed(() => cps.value.find(c => c.id === selCpId.value) || cps.value[0])
+function visibleBonds(cp?: Counterparty): CpBond[] {
+  return (cp?.bonds || []).filter(bond => isCurrentInquiry(bond, tradingDay.value))
+}
+const currentBonds = computed(() => visibleBonds(selCp.value))
+const resumableBonds = computed(() => (selCp.value?.bonds || []).filter(bond => canResumeInquiry(bond, tradingDay.value)))
+function syncActiveBond() {
+  if (currentBonds.value.some(bond => bond.code === activeBond.value)) return
+  const requested = route.query.bond as string | undefined
+  activeBond.value = currentBonds.value.find(bond => bond.code === requested)?.code || currentBonds.value[0]?.code || ''
+  Object.keys(openBonds).forEach(key => delete openBonds[key])
+  if (activeBond.value) openBonds[activeBond.value] = true
+}
+watch(currentBonds, syncActiveBond, { flush: 'sync' })
 const botStatus = computed(() => botStarting.value ? '启动中' : serverBotStatus.value)
 const botDot = computed(() => botStarting.value ? '#E0A030' : botOn.value ? '#3DA65E' : '#B0A69B')
 
@@ -80,7 +94,8 @@ function st(status: string) { return STATUS_COLOR[status] || STATUS_COLOR['待�
 /* ---- 左:对手卡 ---- */
 function selectCp(cp: Counterparty) {
   selCpId.value = cp.id
-  activeBond.value = cp.bonds[0]?.code ?? ''
+  messageBondFocus.value = ''
+  activeBond.value = visibleBonds(cp)[0]?.code ?? ''
   Object.keys(openBonds).forEach(k => delete openBonds[k])
   if (activeBond.value) openBonds[activeBond.value] = true
 }
@@ -102,13 +117,48 @@ function quoteValidity(q:NegotiationQuote,day?:string):string {
   if(!day || q.confirmed_day!==day)return '跨日待对手确认，不计覆盖'
   return '当日有效'
 }
-function quoteFinality(q:NegotiationQuote):string {
-  return ({FINAL:'最终实价',NEGOTIABLE:'仍有议价空间',UNKNOWN:'最终性待识别'} as Record<string,string>)[q.finality]||'最终性未知'
+function counterpartyQuote(b: CpBond): NegotiationQuote | undefined {
+  const side = b.trade?.own_side === 'BUY' ? 'ofr' : b.trade?.own_side === 'SELL' ? 'bid' : undefined
+  return side ? b.quotes?.[side] : undefined
 }
-function quoteAssertion(q:NegotiationQuote):string {
-  return ({QUOTE:'直接报价',INDICATIVE:'意向',QUESTION:'询问',REPORTED:'转述'} as Record<string,string>)[q.assertion]||'性质未知'
+function counterpartyPrice(b: CpBond): string {
+  const quote = counterpartyQuote(b)
+  return quote ? quotePrice(quote) : b.quotes ? '—' : b.trade?.peer_quote || '—'
 }
-function evidenceText(q:NegotiationQuote,field:string):string {return (q.evidence[field]||[]).join('、')||'尚无来源'}
+function counterpartyVolume(b: CpBond): string {
+  const quote = counterpartyQuote(b)
+  return quote ? quote.volume_wan ?? '—' : b.quotes ? '—' : b.trade?.peer_volume_wan || '—'
+}
+// Controls are keyed by the immutable peer/bond member, never by the current tab.
+const bondRequests = reactive(new Set<string>())
+const pendingBondControls = reactive(new Map<string, boolean>())
+let accountGeneration = 0
+function bondControlBusy(b: CpBond): boolean {
+  return !!b.sessionId && (bondRequests.has(b.sessionId) || pendingBondControls.has(b.sessionId))
+}
+async function toggleBondNegotiation(b: CpBond) {
+  const memberId = b.sessionId
+  if (!memberId || typeof b.memberSendAllowed !== 'boolean' || bondControlBusy(b)) return
+  const allowed = !b.memberSendAllowed
+  const account = accountScope(), generation = accountGeneration, cp = selCp.value?.id
+  bondRequests.add(memberId)
+  try {
+    const response = await api.memberSending(memberId, allowed)
+    if (disposed || account !== accountScope() || generation !== accountGeneration) return
+    if (!response.ok) {
+      message.error(response.hint || '本券谈价状态未更新')
+      return
+    }
+    // Wait for the authoritative projection before flipping the button label.
+    pendingBondControls.set(memberId, allowed)
+    await reloadDesk()
+    if (cp === selCp.value?.id) {
+      message.success(allowed ? '已恢复本券，沿用原会话、报价和谈价进度；全局或券组暂停仍生效'
+        : '已暂停与该对手的本券谈价；其他债券和对手不受影响')
+    }
+  } finally { bondRequests.delete(memberId) }
+}
+
 
 const chatMsgs = computed(() => {
 
@@ -119,8 +169,9 @@ const chatMsgs = computed(() => {
   return list.map((m, idx) => {
     const contexts = Array.isArray((m as any).contexts) ? (m as any).contexts : []
     const hasBond = contexts.length > 0 || !!m.bond
-    const hit = contexts.some((c: { code?: string }) => c.code === activeBond.value) || m.bond === activeBond.value
-    const dim = !hasBond || (!!activeBond.value && !hit)
+    const focus = messageBondFocus.value || activeBond.value
+    const hit = contexts.some((c: { code?: string }) => c.code === focus) || m.bond === focus
+    const dim = !!focus && (!hasBond || !hit)
     const isBot = m.role === 'bot'
     const isHuman = m.role === 'human'
     return {
@@ -144,7 +195,6 @@ const sendLabel = computed(() => unknownPending.value ? '待核对' : sendPhase.
 
 let deskTimer: ReturnType<typeof setInterval> | null = null
 let rawTimer: ReturnType<typeof setInterval> | null = null
-async function onV22Change(){void loadChat();void reloadDesk()}
 let deskBusy = false
 let deskQueued=false
 let deskGeneration = 0
@@ -181,7 +231,7 @@ async function connectUpdates(){
     }
   }
 }
-const accountScope = () => `${imBoundAccount.value?.id || ''}:${imBoundAccount.value?.account_uid||''}:${imBoundAccount.value?.workbench_id||''}`
+const accountScope = () => `${imBoundAccount.value?.id || ''}:${imBoundAccount.value?.account_uid||''}:${imBoundAccount.value?.workbench_id||''}:${imBoundAccount.value?.version||0}:${imBoundAccount.value?.context_id||''}`
 const chatPageCursor=reactive<Record<string,string>>({})
 const chatNextCursor=reactive<Record<string,string>>({})
 async function olderChat(){const cp=selCp.value?.id;if(cp&&chatNextCursor[cp]){chatPageCursor[cp]=chatNextCursor[cp];await loadChat()}}
@@ -214,6 +264,7 @@ async function fetchChat() {
 }
 async function reloadDesk() {
   if (disposed)return
+  tradingDay.value = monitorTradeDay()
   if (deskBusy){deskQueued=true;return}
   deskBusy = true
   const generation = ++deskGeneration
@@ -222,25 +273,24 @@ async function reloadDesk() {
   // Raw messages never wait for model projections or collector receipts.
   const chatRequest=loadChat()
   const receiptsRequest=pollReceipts()
-  const groupsRequest=groupsPanel.value?.refresh()
   try {
     const [s, c] = await Promise.all([api.summary(), api.counterparties()])
     if (disposed || generation !== deskGeneration || account !== accountScope()) return
-    if (s.ok && (s.revision==null||s.revision>=summaryRevision)) { stats.value = s.data.stats; serverBotStatus.value = s.data.botStatus; botOn.value = s.data.botStatus === '正常';summaryRevision=s.revision??summaryRevision }
+    if (s.ok && (s.revision==null||s.revision>=summaryRevision)) { stats.value = s.data.stats; serverBotStatus.value = s.data.botStatus; botOn.value = s.data.botEnabled ?? s.data.botStatus === '正常';summaryRevision=s.revision??summaryRevision }
     if (c.ok && (c.revision==null||c.revision>=counterpartiesRevision)) {
       cps.value = c.data
       counterpartiesRevision=c.revision??counterpartiesRevision
+      for (const [memberId, allowed] of pendingBondControls) {
+        const current = c.data.flatMap(cp => cp.bonds).find(b => b.sessionId === memberId)
+        if (current?.memberSendAllowed === allowed) pendingBondControls.delete(memberId)
+      }
       if (!cps.value.some(x => x.id === selCpId.value)) {
         const requested=route.query.cp as string|undefined
         selCpId.value=cps.value.find(x=>x.id===requested)?.id||cps.value[0]?.id||''
       }
-      if(!selCp.value?.bonds.some(b=>b.code===activeBond.value)){
-        const requested=route.query.bond as string|undefined
-        activeBond.value=selCp.value?.bonds.find(b=>b.code===requested)?.code||selCp.value?.bonds[0]?.code||''
-        if(activeBond.value)openBonds[activeBond.value]=true
-      }
+      syncActiveBond()
     }
-    await Promise.all([chatRequest,receiptsRequest,groupsRequest])
+    await Promise.all([chatRequest,receiptsRequest])
     if(selCp.value?.id!==initialCp)await loadChat()
     if (!s.ok || !c.ok) imFeedError.value = s.hint || c.hint || '刷新失败，保留上次成功内容'
   } catch (e) { imFeedError.value = e instanceof Error ? e.message : '刷新失败' }
@@ -248,12 +298,13 @@ async function reloadDesk() {
 }
 watch(() => selCp.value?.id, () => { sendPhase.value = ''; sendFail.value = ''; void loadChat() })
 watch(accountScope, () => {
+  accountGeneration++; bondRequests.clear(); pendingBondControls.clear()
   deskGeneration++; chatGeneration++
   counterpartiesRevision=0;summaryRevision=0
   lastEventRevision=0;stopUpdates()
   for(const key of Object.keys(chatRevisions))delete chatRevisions[key]
   Object.keys(chatPageCursor).forEach(k=>delete chatPageCursor[k]);Object.keys(chatNextCursor).forEach(k=>delete chatNextCursor[k])
-  cps.value = []; selCpId.value = ''; activeBond.value = ''
+  cps.value = []; selCpId.value = ''; activeBond.value = ''; messageBondFocus.value = ''
   for (const key of Object.keys(rawChatCache)) delete rawChatCache[key]
   pendingReceipts.clear()
   sendPhase.value = ''; sendFail.value = ''
@@ -390,6 +441,9 @@ async function archiveSession(id:string){
   catch(error){message.error(error instanceof Error?error.message:'归档失败')}
 }
 function focusBond(bond: string) {
+  messageBondFocus.value = bond
+  // A historical message may be focused without reviving an expired bond card.
+  if (!currentBonds.value.some(item => item.code === bond)) return
   activeBond.value = bond
   Object.keys(openBonds).forEach(k => delete openBonds[k])
   openBonds[bond] = true
@@ -399,6 +453,7 @@ function openTrace(m: ChatMsg & { idx: number; cp: string }) { traceMsg.value = 
 /* ---- 右:在聊债券 ---- */
 const STEPS = ['待询价', '询价中', '转人工']
 function toggleBond(name: string) {
+  messageBondFocus.value = ''
   if (activeBond.value === name && openBonds[name]) { Object.keys(openBonds).forEach(k => delete openBonds[k]) }
   else { activeBond.value = name; Object.keys(openBonds).forEach(k => delete openBonds[k]); openBonds[name] = true }
 }
@@ -449,8 +504,7 @@ function onJump(cpId: string, bondName: string) {
 
 <template>
   <main class="monitor fade-up">
-    <ImLinkBar />
-    <NegotiationGroups ref="groupsPanel" @changed="onV22Change" />
+    <ImLinkBar :show-address-book-details="false" />
     <ReconcileModal :open="reconcileOpen" @close="reconcileOpen=false" @resolved="reloadDesk" />
     <!-- 统计条 -->
     <section class="hero">
@@ -485,11 +539,12 @@ function onJump(cpId: string, bondName: string) {
             <div class="cp-top">
               <span class="qd">企点</span><b>{{ cp.name }}</b>
               <span v-if="cp.username" class="mono cp-user">{{ cp.username }}</span>
-              <span v-if="cp.bonds.length > 1" class="thread-warn" title="同一对手多券共用一个线程/thread">同一线程 ⚠</span>
-              <span v-if="cp.bonds[0]" class="dot" :style="{ background: st(cp.bonds[0].stage)[1], boxShadow: '0 0 8px ' + st(cp.bonds[0].stage)[1] }" />
+              <span v-if="visibleBonds(cp).length > 1" class="thread-warn" title="同一对手多券共用一个线程/thread">同一线程 ⚠</span>
+              <span v-if="visibleBonds(cp)[0]" class="dot" :style="{ background: st(visibleBonds(cp)[0].stage)[1], boxShadow: '0 0 8px ' + st(visibleBonds(cp)[0].stage)[1] }" />
             </div>
             <div class="cp-bonds">
-              <div v-for="b in cp.bonds" :key="b.sessionId || b.code" class="cp-bond">
+              <span v-if="!visibleBonds(cp).length" class="history-only">今日暂无询价中债券，可查看历史对话</span>
+              <div v-for="b in visibleBonds(cp)" :key="b.sessionId || b.code" class="cp-bond">
                 <span class="cb-name mono">{{ b.name }}</span>
                 <span class="stage" :style="{ background: st(b.stage)[0], color: st(b.stage)[1] }">{{ b.stage }}</span>
               </div>
@@ -502,7 +557,7 @@ function onJump(cpId: string, bondName: string) {
       <section class="panel chat-panel">
         <div class="chat-hd">
           <span class="qd">企点</span>
-          <div class="chat-hd-mid"><div class="ch-name">{{ selCp?.name }}</div><div class="ch-org">{{ selCp?.username || selCp?.org }} · 在聊 {{ selCp?.bonds.length }} 只</div></div>
+          <div class="chat-hd-mid"><div class="ch-name">{{ selCp?.name }}</div><div class="ch-org">{{ selCp?.username || selCp?.org }} · 在聊 {{ currentBonds.length }} 只</div></div>
           <button class="hd-btn primary" @click="openDetail">询价明细</button>
           <button class="hd-btn" @click="exportOpen = true">导出记录</button>
           <button class="hd-btn" @click="reconcileOpen = true">核对未决指令</button>
@@ -522,7 +577,7 @@ function onJump(cpId: string, bondName: string) {
                 <span v-if="m.kind === 'retract'" class="ctx">撤回消息 · {{ m.targetId }}</span>
                 <span v-else-if="m.kind === 'edit'" class="ctx">修订消息 · {{ m.targetId }}</span>
                 <template v-if="m.contexts && m.contexts.length">
-                  <span v-for="c in m.contexts" :key="c.memberId || c.code" class="ctx" :class="{ active: c.code === activeBond }" @click.stop="focusBond(c.code)">{{ c.name || c.code }}</span>
+                  <span v-for="c in m.contexts" :key="c.memberId || c.code" class="ctx" :class="{ active: c.code === (messageBondFocus || activeBond) }" @click.stop="focusBond(c.code)">{{ c.name || c.code }}</span>
                 </template>
               </div>
             </div>
@@ -532,9 +587,15 @@ function onJump(cpId: string, bondName: string) {
 
       <!-- 右:在聊债券 -->
       <aside class="panel bond-panel">
-        <div class="panel-hd"><b>当前在聊债券</b><span class="cnt">{{ selCp?.bonds.length }} 只</span></div>
+        <div class="panel-hd"><b>当前在聊债券</b><span class="cnt">{{ currentBonds.length }} 只</span></div>
+        <details v-if="resumableBonds.length" class="resume-menu" data-testid="paused-bond-actions">
+          <summary>恢复本券</summary>
+          <button v-for="b in resumableBonds" :key="b.sessionId" class="rba" type="button"
+            :disabled="bondControlBusy(b)" @click="toggleBondNegotiation(b)">{{ b.name }} · 恢复本券</button>
+        </details>
         <div class="panel-body">
-          <div v-for="b in selCp?.bonds || []" :key="b.sessionId || b.code" class="rb-card" :class="{ act: b.code === activeBond }">
+          <p v-if="!currentBonds.length" class="empty-real" data-testid="current-bonds-empty">今日暂无询价中债券，历史消息及识券结果仍保留在对话中。</p>
+          <div v-for="b in currentBonds" :key="b.sessionId || b.code" class="rb-card" :class="{ act: b.code === activeBond }">
             <div class="rb-hd" @click="toggleBond(b.code || '')">
               <span class="rb-name mono" @click.stop="openBondModal(b.code || '')">{{ b.name }}</span>
               <span class="stage" :style="{ background: st(b.stage)[0], color: st(b.stage)[1] }">{{ b.stage }}</span>
@@ -544,31 +605,6 @@ function onJump(cpId: string, bondName: string) {
               <p v-if="b.analysisPending" class="analysis-note" data-testid="analysis-pending">新原文解析中；以下仍是最近已确认的结构化事实。</p>
               <p v-if="b.responseState === 'NO_RESPONSE' || b.responseState === 'UNRESPONSIVE'" class="analysis-note">对手一小时未响应；不代表最终实价或确认成交。</p>
               <p v-if="b.pendingCommandId" class="analysis-note" data-testid="command-state">{{ b.commandState === 'UNKNOWN' ? '结果未知，仅等待对账，不自动重发' : '发送处理中，等待原生回执' }} · <span class="mono">{{ b.pendingCommandId }}</span></p>
-              <div v-if="b.quotes" class="bilateral-quotes" data-testid="bilateral-quotes">
-                <section v-for="side in (['bid','ofr'] as const)" :key="side" :data-side="side" class="quote-fact">
-                  <b>{{ side === 'bid' ? '对手 Bid / 收' : '对手 Ofr / 出' }}</b>
-                  <div class="quote-fact-main"><span class="mono" data-field="price">{{ quotePrice(b.quotes[side]) }}</span><span data-field="volume">{{ b.quotes[side].volume_wan == null ? '数量未知' : b.quotes[side].volume_wan + ' 万' }}</span></div>
-                  <div data-field="finality">{{ quoteAssertion(b.quotes[side]) }} · {{ quoteFinality(b.quotes[side]) }}</div>
-                  <div data-field="validity">{{ quoteValidity(b.quotes[side],b.tradeDay) }}</div>
-                  <div class="muted">确认日 {{ b.quotes[side].confirmed_day || '尚未确认' }} · 版本 {{ b.quotes[side].revision }}</div>
-                  <details class="quote-evidence"><summary>字段来源</summary>
-                    <div>价格：<span data-field="price-evidence">{{ evidenceText(b.quotes[side],'price') }}</span></div>
-                    <div>数量：<span data-field="volume-evidence">{{ evidenceText(b.quotes[side],'volume_wan') }}</span></div>
-                    <div>最终性：{{ evidenceText(b.quotes[side],'finality') }}</div>
-                    <div>有效性：{{ evidenceText(b.quotes[side],'validity') }}</div>
-                    <div>当日确认：{{ evidenceText(b.quotes[side],'confirmed_day') }}</div>
-                  </details>
-                </section>
-              </div>
-              <div v-if="b.summary" class="group-summary" data-testid="group-summary">
-                <b>该券所有对手共享目标 {{ b.summary.target_volume_wan }} 万</b>
-                <div>当日有效报量 {{ b.summary.reported_volume_wan }} 万 · 达价量 {{ b.summary.price_eligible_volume_wan }} 万</div>
-                <div data-field="final-confirmed-volume">合格最终确认 {{ b.summary.final_confirmed_volume_wan }} 万 · 尚差 {{ b.summary.final_shortfall_wan }} 万</div>
-                <p v-if="b.needsReview" class="review-warning" data-testid="needs-review">原人工方案依赖的报价已变化，需人工复核；停止发送状态保持。</p>
-                <p v-else-if="b.summary.goal_ready">最终合格量已达到目标，可提前交人工配量。</p>
-                <div v-for="lot in b.summary.whole_lots" :key="lot.member_id">整量 {{ lot.volume_wan }} 万 · {{ lot.member_id }} · 报价版本 {{ lot.quote_revision }}</div>
-                <small>不拆分对手整量，不承诺成交、锁量或占用额度。</small>
-              </div>
               <!-- 三步进度 -->
               <div class="steps">
                 <div class="steps-line" />
@@ -579,13 +615,12 @@ function onJump(cpId: string, bondName: string) {
               </div>
               <div class="rb-grid" data-testid="trade-board">
                 <div class="rb-metric"><div class="rm-k">本方方向</div><div class="rm-v" data-field="own_side">{{ b.trade?.own_side === 'BUY' ? '买入 BUY' : b.trade?.own_side === 'SELL' ? '卖出 SELL' : b.trade?.own_side || '—' }}</div></div>
-                <div v-if="!b.quotes" class="rb-metric"><div class="rm-k">对方有效报价（%）</div><div class="rm-v mono" data-field="peer_quote">{{ b.trade?.peer_quote || '—' }}</div></div>
                 <div class="rb-metric amber"><div class="rm-k">本方收益率边界（%）</div><div class="rm-v mono" data-field="own_limit">{{ b.trade?.own_limit || '—' }}</div></div>
                 <div class="rb-metric"><div class="rm-k">距目标价差（BP）</div><div class="rm-v mono" data-field="gap_bp">{{ b.trade?.gap_bp || '—' }}</div></div>
-                <div class="rb-metric"><div class="rm-k">市场 Bid（%）</div><div class="rm-v mono" data-field="market_bid">{{ b.trade?.market_bid || '—' }}</div></div>
-                <div class="rb-metric"><div class="rm-k">市场 Ofr（%）</div><div class="rm-v mono" data-field="market_ofr">{{ b.trade?.market_ofr || '—' }}</div></div>
+                <div class="rb-metric"><div class="rm-k">对手报价</div><div class="rm-v mono" data-field="peer_quote">{{ counterpartyPrice(b) }}</div></div>
+                <div class="rb-metric"><div class="rm-k">对手报量（万）</div><div class="rm-v mono" data-field="peer_volume_wan">{{ counterpartyVolume(b) }}</div></div>
                 <div class="rb-metric"><div class="rm-k">报价时间</div><div class="rm-v mono" data-field="quote_at">{{ b.trade?.quote_at || '—' }}</div></div>
-                <div class="rb-metric"><div class="rm-k">有效性 / 新鲜度</div><div class="rm-v" data-field="freshness">{{ b.trade?.freshness || '—' }}</div></div>
+                <div class="rb-metric"><div class="rm-k">有效性 / 新鲜度</div><div class="rm-v" data-field="freshness">{{ counterpartyQuote(b) ? quoteValidity(counterpartyQuote(b)!, b.tradeDay) : b.trade?.freshness || '—' }}</div></div>
                 <div class="rb-metric"><div class="rm-k">当前阶段</div><div class="rm-v" data-field="phase">{{ b.trade?.phase || '—' }}</div></div>
               </div>
               <div class="room-bar">
@@ -597,10 +632,13 @@ function onJump(cpId: string, bondName: string) {
                 <button class="rba" :disabled="!b.sessionId" @click="resumeSession(b.sessionId)">交回机器</button>
                 <button class="rba"  :disabled="!b.code" @click="widenFloor(b.code || '')">重新确认底价</button>
                 <button class="rba"  :disabled="!b.code" title="停止该券组后续发送；此操作不会向对手发送撤价消息" @click="markBond(b.code || '', '已撤价',b.groupId)">主动撤价</button>
-                <button class="rba"  :disabled="!b.code" @click="markBond(b.code || '', '已放弃',b.groupId)">放弃本轮</button>
+                <button class="rba" data-testid="bond-negotiation-toggle"
+                  :disabled="!b.sessionId || b.memberSendAllowed == null || bondControlBusy(b) || (b.memberSendAllowed === false && b.groupState === 'HANDOFF')"
+                  :title="b.memberSendAllowed === false ? '沿用本券原会话、报价及谈价进度；不重发旧指令' : '只暂停与当前对手的本券谈价，其他债券和对手不受影响'"
+                  @click="toggleBondNegotiation(b)">{{ bondControlBusy(b) ? '正在更新…' : b.memberSendAllowed === false ? '恢复本券' : '放弃本轮' }}</button>
                 <button v-if="b.sessionId" class="rba" :disabled="!['已暂停','已放弃'].includes(b.stage)" @click="archiveSession(b.sessionId)">归档此会话</button>
               </div>
-              <p class="rb-confirm">接管/恢复仅作用于该对手的这只券；撤价/放弃停止该券组发送，其他券继续。接收与分析始终继续。</p>
+              <p class="rb-confirm">放弃/恢复仅作用于当前对手的本券，保留原会话、报价和谈价进度；主动撤价停止该券组发送。接收与分析继续，其他债券不受影响。</p>
             </div>
           </div>
         </div>
@@ -693,13 +731,6 @@ function onJump(cpId: string, bondName: string) {
 
 <style scoped>
 .analysis-note { font-size:12px; color:#8F6412; line-height:1.6; }
-.bilateral-quotes { display:grid; gap:8px; margin:10px 0; }
-.quote-fact,.group-summary { border:1px solid rgba(176,28,36,.15); background:rgba(255,255,255,.65); padding:10px; border-radius:8px; font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
-.quote-fact-main { display:flex; justify-content:space-between; gap:8px; font-weight:700; font-size:14px; }
-.quote-evidence { margin-top:5px; color:#75675B; }
-.quote-evidence summary { cursor:pointer; }
-.group-summary { background:#FFF8EE; }
-.review-warning { color:#B01C24; font-weight:700; }
 .monitor { height: calc(100vh - 66px); overflow: hidden; padding: 16px 24px 16px; display: flex; flex-direction: column; gap: 16px; box-sizing: border-box; }
 
 /* Hero */
@@ -771,7 +802,7 @@ function onJump(cpId: string, bondName: string) {
 .msg-meta.right { justify-content: flex-end; }
 .tag { padding: 1px 7px; border-radius: 5px; font-weight: 600; background: rgba(30,95,180,.1); color: #1E5FB4; }
 .mtime { color: #A89C90; }
-.ctx { cursor: pointer; white-space: nowrap; padding: 1px 8px; border-radius: 5px; font-size: 11px; font-family: 'JetBrains Mono', monospace; background: rgba(255,255,255,.7); color: #8A7F76; border: 1px solid rgba(176, 28, 36,.14); transition: all .2s; }
+.ctx { cursor: pointer; white-space: nowrap; padding: 1px 8px; border-radius: 5px; font-size: 11px; font-family: var(--font-ui); background: rgba(255,255,255,.7); color: #8A7F76; border: 1px solid rgba(176, 28, 36,.14); transition: all .2s; }
 .ctx:hover { border-color: rgba(176, 28, 36,.5); }
 .ctx.active { background: rgba(176, 28, 36,.1); color: #B01C24; border-color: rgba(176, 28, 36,.4); }
 
@@ -811,7 +842,7 @@ function onJump(cpId: string, bondName: string) {
 .rb-metric.amber .rm-k { color: #8A6B1F; }
 .rm-v[data-field="quote_at"], .rm-v[data-field="freshness"], .rm-v[data-field="phase"] { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
 .rm-v { font-weight: 700; font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.rb-metric.amber .rm-v { color: #8A6B1F; font-size: 16px; }
+.rb-metric.amber .rm-v { color: #8A6B1F; }
 .rb-track { height: 6px; border-radius: 999px; background: rgba(176, 28, 36,.1); overflow: hidden; }
 .rb-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #2E8B57, #C68D58, #C2333B); }
 .rb-cap { display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; color: #A89C90; margin-top: 4px; }
@@ -851,7 +882,7 @@ th.dm-sr { z-index: 4; }
 .red { color: #B01C24; }
 .green { color: #1F6B3E; }
 .muted { color: #6E6258; }
-.mono { font-family: 'JetBrains Mono', monospace; }
+.mono { font-family: var(--font-ui); }
 
 /* 导出弹窗 */
 .export-mdl { max-width: 460px; }
@@ -868,4 +899,8 @@ th.dm-sr { z-index: 4; }
 .mdl-ft .btn-ghost { padding: 9px 20px; border-radius: 10px; font-size: 13px; }
 .e-do { padding: 9px 24px; border-radius: 10px; font-size: 13px; font-weight: 600; letter-spacing: 2px; }
 .empty-real { margin: 8px 4px; font-size: 12.5px; color: #8A7F76; }
+.history-only { font-size: 12px; color: var(--muted); line-height: 1.6; }
+.resume-menu { flex: none; margin: 0 16px 8px; font-size: 12px; color: var(--muted); }
+.resume-menu summary { cursor: pointer; }
+.resume-menu button { display: block; margin-top: 6px; width: 100%; text-align: left; }
 </style>

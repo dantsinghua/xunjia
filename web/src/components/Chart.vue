@@ -163,9 +163,9 @@ function fmt(v: number): string {
 .chart { border-radius: 14px; padding: 14px 16px 10px; background: rgba(255,255,255,.75); border: 1px solid rgba(176, 28, 36,.14); box-shadow: 0 6px 20px rgba(43,35,32,.05); margin-top: 6px; }
 .chart-title { font-size: 12.5px; font-weight: 700; letter-spacing: .5px; color: #B01C24; margin-bottom: 4px; }
 .svg { width: 100%; height: auto; display: block; overflow: visible; }
-.axis { font-family: 'JetBrains Mono', monospace; font-size: 10px; fill: #A89C90; }
-.axis.cat { font-family: 'Noto Sans SC', sans-serif; fill: #6E6258; font-size: 10.5px; }
-.pt-label { font-family: 'Noto Sans SC', sans-serif; font-size: 10px; fill: #5C5148; }
+.axis { font-family: var(--font-ui); font-size: 10px; fill: #A89C90; }
+.axis.cat { font-family: var(--font-ui); fill: #6E6258; font-size: 10.5px; }
+.pt-label { font-family: var(--font-ui); font-size: 10px; fill: #5C5148; }
 .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; font-size: 11.5px; color: #6E6258; }
 .legend .sw { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 .axis-labels { display: flex; gap: 16px; margin-top: 4px; font-size: 10.5px; color: #A89C90; }

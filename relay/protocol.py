@@ -82,7 +82,7 @@ def digest(value: Any) -> str:
 def session_reset_hash(payload: dict) -> str:
     if not isinstance(payload, dict) or any(key not in payload for key in RESET_FIELDS):
         raise ProtocolError('SESSION_RESET_REQUEST_INVALID')
-    return digest({key: payload[key] for key in RESET_FIELDS})
+    return digest({**{key: payload[key] for key in RESET_FIELDS},**({'context_id':payload['context_id']} if 'context_id' in payload else {})})
 
 
 def validate_session_reset(payload: dict, binding: Binding, *, ack=False) -> None:
@@ -102,7 +102,8 @@ def validate_session_reset(payload: dict, binding: Binding, *, ack=False) -> Non
     if payload.get('request_hash') != session_reset_hash(payload):
         raise ProtocolError('SESSION_RESET_HASH_MISMATCH')
     phase = payload.get('phase')
-    allowed = set(RESET_FIELDS) | {'request_hash', 'phase'}
+    if 'context_id' in payload:token(payload['context_id'])
+    allowed = set(RESET_FIELDS) | {'request_hash', 'phase','context_id'}
     if not ack:
         if phase not in ('request', 'applied'):
             raise ProtocolError('SESSION_RESET_PHASE_INVALID')
@@ -166,6 +167,7 @@ def validate_command(command: dict, binding: Binding) -> None:
             raise ProtocolError("命令身份与固定绑定不符")
     if command.get('kind','send_text') not in ('send_text','manual_send') or command.get('op','send_text')!='send_text':
         raise ProtocolError('协议只允许已授权文本发送')
+    if 'context_id' in command:token(command['context_id'])
     for name in ("command_id", "peer_id"):
         token(command.get(name))
     if not isinstance(command.get("content_hash"), str) or not re.fullmatch(r"[a-f0-9]{64}", command["content_hash"]):

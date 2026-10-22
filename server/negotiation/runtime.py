@@ -18,6 +18,11 @@ class Inbox:
         payload=envelope.get('payload')
         if not isinstance(payload,dict):raise InvalidFact('Invalid input envelope')
         kind=envelope.get('kind')
+        if kind in ('receipt','session_reset_ack'):
+            table,key=('xj2_command','command_id') if kind=='receipt' else ('xj2_session_reset','reset_id')
+            value=payload.get(key)
+            with store.db.transaction(write=False) as tx:
+                if not tx.execute('SELECT 1 FROM '+table+' WHERE '+key+'=?',(value,)).fetchone():return None
         if kind=='session_reset_ack':
             return self.service.session_reset.accept_ack(binding,payload)
         if kind=='receipt':
@@ -32,6 +37,9 @@ class Inbox:
         peer=payload.get('peer_id')
         if peer!=envelope.get('peer_id'):raise InvalidFact('Counterparty envelope mismatch')
         identity(peer,'counterparty')
+        preferences=store.preferences(owner)
+        if envelope.get('created_at',0)<preferences.get('context_started_at',0):
+            payload={**payload,'historical':True}
         direction=payload.get('direction',payload.get('dir','in'))
         direction={'incoming':'in','inbound':'in','outgoing':'out','outbound':'out'}.get(direction,direction)
         occurred=payload.get('occurred_at',payload.get('ts'))
@@ -110,6 +118,8 @@ class Dispatcher:
                   'content_hash':original['content_hash'],'control_version':result['dispatch_version'],
                   'expires_at':original['expires_at'],'transport':binding['transport'],
                   'source_watermark':result['source_watermark'],'dispatch_watermark':result['dispatch_watermark']}
+            preferences=json.loads(tx.execute('SELECT config_json FROM xj2_binding WHERE owner_id=?',(owner,)).fetchone()['config_json'])
+            if preferences.get('context_id'):wire['context_id']=preferences['context_id']
             if thread['receiver_fence_id']:
                 wire.update(receiver_fence_id=thread['receiver_fence_id'],receiver_fence_version=thread['receiver_fence_version'])
             result['wire']=wire

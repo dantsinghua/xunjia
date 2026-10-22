@@ -1,6 +1,6 @@
 """Explicit post-build acceptance of same-origin production static serving."""
 from fastapi.testclient import TestClient
-from server.legacy_app import create_app
+from server.app import create_app
 from server.auth import AuthConfig
 
 

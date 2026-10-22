@@ -15,9 +15,9 @@ from relay.file_gateway import GatewayAuth, FileGatewayClient
 NOW=1800000000
 AUTH=GatewayAuth("synthetic-file-gateway", b"0123456789abcdef")
 
-def decode_token(token):
+def decode_token(token, auth=AUTH):
     blob=base64.b64decode(token,validate=True)
-    decoder=Cipher(algorithms.SM4(AUTH.sm4_key),modes.CBC(blob[:16])).decryptor()
+    decoder=Cipher(algorithms.SM4(auth.sm4_key),modes.CBC(blob[:16])).decryptor()
     raw=decoder.update(blob[16:])+decoder.finalize()
     pad=padding.PKCS7(128).unpadder()
     return json.loads(pad.update(raw)+pad.finalize())
@@ -39,7 +39,7 @@ class Gateway:
     def open(self,request,timeout):
         url=urlsplit(request.full_url);op=url.path.rsplit("/",1)[-1]
         headers={k.lower():v for k,v in request.header_items()};self.calls.append((url.netloc,op))
-        token=headers.get("access_token");self.tokens.append(token)
+        token=headers.get("accesstoken");self.tokens.append(token)
         try:
             decoded=decode_token(token)
             valid=decoded["key"]==AUTH.key and type(decoded["ts"]) is str and abs(int(decoded["ts"])-NOW)<=60

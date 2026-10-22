@@ -44,7 +44,7 @@ export interface BondDetail {
 }
 
 export interface TradeBoard {
-  own_side:string; peer_quote:string; own_limit:string; gap_bp:string; market_bid:string; market_ofr:string; quote_at:string; freshness:string; phase:string
+  own_side:string; peer_quote:string; own_limit:string; gap_bp:string; peer_volume_wan:string; quote_at:string; freshness:string; phase:string
 }
 export interface CpBond {
   sessionId?: string
@@ -53,6 +53,8 @@ export interface CpBond {
   groupRevision?: number
   analysisPending?: boolean
   sendAllowed?: boolean
+  memberSendAllowed?: boolean
+  groupState?: string
   groupSendAllowed?: boolean
   pendingCommandId?: string
   commandState?: string
