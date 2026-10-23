@@ -1,4 +1,6 @@
 """Developer checks for the delivered account-bound organization source and host."""
+import asyncio
+import importlib
 import importlib.util
 import json
 from pathlib import Path
@@ -6,8 +8,9 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
-from relay.protocol import Binding
-from tests.mq_fixtures import MQWire
+from relay.file_gateway import GatewayAuth
+from relay.gateway_paths import InstitutionKeys, ORGANIZATION_PATH
+from relay.protocol import Codec
 
 ROOT = Path(__file__).resolve().parents[2]
 MIRROR = ROOT / 'deploy/collector-qtrade-v22/source/src/qtrade_agent'
@@ -20,8 +23,6 @@ def load(name, relative):
     return module
 
 ORG = load('org_source_development', 'adapters/qidian/org.py')
-HOST = load('org_host_development', 'ossbox/xunjia_v22.py')
-B = Binding('org-owner', '100001', 'org-wb', b'k' * 32, b's' * 32)
 
 
 def fixtures(tmp_path, *, empty=False):
@@ -94,71 +95,108 @@ def test_reader_rejects_wrong_scope_missing_key_or_schema_without_returning_fake
     assert 'synthetic-only' not in str(exc.value)
 
 
-def host(tmp_path, provider):
-    wire = MQWire(); now = [100.0]
-    adapter = wire.transport(B, tmp_path / 'publication.db', role='collector', clock=lambda: now[0])
-    instance = HOST.XunjiaV22Host.__new__(HOST.XunjiaV22Host)
-    instance.state_path = tmp_path / 'host.db'
-    with instance._db() as db:
-        db.execute('CREATE TABLE host_meta(key TEXT PRIMARY KEY,value TEXT)')
-    instance.binding = B; instance.ledger = SimpleNamespace(clock=lambda: now[0])
-    instance.port = SimpleNamespace(_account=lambda: {'id': 'qd-fixture', 'self_uid': B.account_uid})
-    instance.bridge = SimpleNamespace(adapters={'oss': adapter}, publish_capabilities=lambda: None)
-    instance.contacts_provider = provider
-    return instance, adapter, wire, now
+
+# Import only the reference package's publisher and receiver core; no complete collector is installed.
+INSTITUTION = importlib.import_module('deploy.collector-qtrade-v22.source.src.qtrade_agent.ossbox.institution')
 
 
-def latest(adapter):
-    with adapter.store.db() as db:
-        return json.loads(db.execute('SELECT data FROM tx_publication ORDER BY rowid DESC LIMIT 1').fetchone()[0])['payload']
+@pytest.fixture
+def publisher_chain(tmp_path):
+    source, cfg, key = fixtures(tmp_path)
+    now = [1800000000.0]; uploaded = []; cache = {}
+    account = {'id': 'qd-fixture', 'channel': 'qidian', 'self_uid': '100001', 'state': 'running'}
+    class Accounts:
+        def list_accounts(self, channel):
+            return [account] if channel == 'qidian' else []
+    class Client:
+        def __init__(self, path): self.path = path
+        def upload(self, name, blob): uploaded.append((self.path, name, blob))
+    keys = InstitutionKeys.from_auth(GatewayAuth('synthetic', b'0123456789abcdef'))
+    loop = asyncio.new_event_loop()
+    reader = lambda row: ORG.read_account_org(source, row['self_uid'], cfg, cache=cache, clock=lambda: now[0])
+    instance = INSTITUTION.InstitutionCollectorHost(store=Accounts(), bus=None, loop=loop, keys=keys,
+        config={'workbench_name': 'Synthetic desk'}, settings=SimpleNamespace(workbench_id='org-wb'),
+        data_dir=tmp_path, legacy_inbox_disabled=lambda: True,
+        friends_provider=lambda row: [{'uin': 'friend', 'name': 'Synthetic friend'}],
+        organization_provider=reader, clock=lambda: now[0], client_factory=Client)
+    instance.active = True
+    def publications():
+        codec = Codec(keys.binding('org-wb', 'organization'), clock=lambda: now[0])
+        return [codec.unpack(blob) for path, _, blob in uploaded if path == ORGANIZATION_PATH]
+    try:
+        yield SimpleNamespace(host=instance, now=now, uploaded=uploaded, publications=publications,
+                              source=source, config=cfg, key=key, org=tmp_path/'100001-org.db',
+                              people=tmp_path/'100001-org-member.db')
+    finally:
+        instance.active = False
+        loop.close()
 
 
-def test_host_preserves_previous_successful_org_on_error_and_restart_with_pointer_only(tmp_path):
-    organization = {'departments': [{'id': 'd', 'parent_id': '', 'name': 'Synthetic', 'order': 0}],
-                    'members': [{'uin': 'm', 'name': 'Synthetic', 'account': 'staff', 'department_id': 'd', 'order': 0}]}
-    provider = lambda _: {'contacts': [{'uin': 'friend', 'name': 'Synthetic'}], 'org': organization,
-                          'org_state': 'ready', 'org_updated_at': 99.0}
-    h, adapter, _, now = host(tmp_path, provider)
-    h._publish_directory()
-    with h._db() as db:
-        pointer = db.execute("SELECT value FROM host_meta WHERE key='org_publication_id'").fetchone()[0]
-    assert pointer.startswith('contacts-') and len(pointer) < 128
-    now[0] = 160
-    h.contacts_provider = lambda _: {'contacts': [{'uin': 'friend', 'name': 'Synthetic'}], 'org_state': 'error', 'org_error': 'ORG_SOURCE_UNAVAILABLE'}
-    h._publish_directory()
-    book = latest(adapter)
-    assert book['org'] == organization and book['org_updated_at'] == 99
-    assert book['org_state'] == 'error' and book['org_error'] == 'ORG_SOURCE_UNAVAILABLE'
-    assert h._previous_org() == {'org': organization, 'org_updated_at': 99.0}
-    with h._db() as db:
-        assert db.execute("SELECT value FROM host_meta WHERE key='org_publication_id'").fetchone()[0] == pointer
+def test_current_provider_reads_real_org_and_publisher_signs_without_mutating_sources(publisher_chain):
+    s = publisher_chain
+    paths = [Path(s.source.path), s.config, s.key, s.org, s.people]
+    import hashlib
+    before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    s.host.metadata_once()
+    [published] = s.publications()
+    assert published['payload']['state'] == 'ready'
+    assert len(published['payload']['org']['departments']) == 2
+    assert all(hashlib.sha256(p.read_bytes()).hexdigest() == value for p, value in before.items())
+    assert s.host.errors == {}
 
 
-def test_host_distinguishes_true_empty_from_no_report(tmp_path):
-    h, adapter, _, _ = host(tmp_path, lambda _: {'contacts': [{'uin': 'friend'}], 'org_state': 'unreported', 'org_error': 'ORG_CREDENTIALS_NOT_CONFIGURED'})
-    h._publish_directory(); assert latest(adapter)['org_state'] == 'unreported'
-    h.contacts_provider = lambda _: {'contacts': [], 'org': {'departments': [], 'members': []}, 'org_state': 'empty', 'org_updated_at': 100}
-    h._publish_directory(); assert latest(adapter)['org_state'] == 'empty'
+def test_current_provider_and_publisher_distinguish_verified_empty(publisher_chain):
+    s = publisher_chain
+    with sqlite3.connect(s.org) as db:
+        db.executescript('DELETE FROM OrgD2M; DELETE FROM OrgDepartment;')
+    with sqlite3.connect(s.people) as db:
+        db.execute('DELETE FROM OrgMember')
+    s.host.metadata_once()
+    [published] = s.publications()
+    assert published['payload']['state'] == 'empty'
+    assert published['payload']['org'] == {'departments': [], 'members': []}
 
 
-def test_host_oversize_org_reports_error_without_losing_private_contacts(tmp_path):
-    org = {'departments': [{'id': 'd', 'name': 'x' * (4 * 1024 * 1024)}], 'members': []}
-    h, adapter, _, _ = host(tmp_path, lambda _: {'contacts': [{'uin': 'friend'}], 'org': org, 'org_state': 'ready', 'org_updated_at': 100})
-    h._publish_directory(); book = latest(adapter)
-    assert book['org_state'] == 'error' and book['org_error'] == 'ORG_DOCUMENT_TOO_LARGE'
-    assert book['org'] == {} and book['org_updated_at'] is None and book['contacts'] == [{'uin': 'friend'}]
+@pytest.mark.parametrize('failure', ['unreported', 'bad-data', 'unexpected-provider'])
+def test_current_provider_failure_preserves_previous_signed_org_and_timestamp(publisher_chain, failure):
+    s = publisher_chain
+    s.host.metadata_once()
+    [previous] = s.publications()
+    stamp = s.host.publisher.last('organization:organization')
+    previous_uploads = [item for item in s.uploaded if item[0] == ORGANIZATION_PATH]
+    if failure == 'unreported':
+        s.config.write_text(json.dumps({'account_uid': '100001'}))
+    elif failure == 'bad-data':
+        s.org.write_bytes(b'synthetic-bad-data' * 64)
+    else:
+        def broken(row): raise RuntimeError('synthetic-private-detail')
+        s.host.organization_provider = broken
+    s.now[0] += 60
+    s.host.publisher.request_sync('100001', True)
+    s.host.metadata_once()
+    assert s.publications() == [previous]
+    assert [item for item in s.uploaded if item[0] == ORGANIZATION_PATH] == previous_uploads
+    assert s.host.publisher.last('organization:organization') == stamp
+    assert 'contacts:100001' in s.host.errors and 'synthetic-private-detail' not in json.dumps(s.host.errors)
+    assert len(s.host.publisher.pending_sync()) == 1
 
 
-def test_unexpected_provider_exception_publishes_error_with_previous_contacts_and_org(tmp_path):
-    previous = {'contacts': [{'uin': 'friend', 'name': 'Synthetic'}],
-                'org': {'departments': [{'id': 'd', 'name': 'Synthetic'}], 'members': []},
-                'org_state': 'ready', 'org_updated_at': 99}
-    h, adapter, _, now = host(tmp_path, lambda _: previous)
-    h._publish_directory()
-    def fail(_): raise RuntimeError('synthetic secret must not escape')
-    h.contacts_provider = fail; now[0] = 160
-    h._publish_directory(); book = latest(adapter)
-    assert book['contacts'] == previous['contacts'] and book['org'] == previous['org']
-    assert book['org_updated_at'] == 99
-    assert book['org_state'] == 'error' and book['org_error'] == 'ORG_PROVIDER_UNAVAILABLE'
-    assert 'synthetic secret' not in json.dumps(book)
+def test_current_oversize_org_preserves_last_publication_and_private_contacts(publisher_chain):
+    s = publisher_chain
+    s.host.metadata_once()
+    [previous] = s.publications()
+    previous_stamp = s.host.publisher.last('organization:organization')
+    s.now[0] += 60
+    s.host.organization_provider = lambda row: {'org_state': 'ready',
+        'org': {'departments': [{'id': 'large', 'name': 'x' * (4 * 1024 * 1024)}], 'members': []}}
+    s.host.publisher.request_sync('100001', True)
+    s.host.metadata_once()
+    assert s.publications() == [previous]
+    assert s.host.publisher.last('organization:organization') == previous_stamp
+    assert s.host.errors['contacts:100001'] == 'ProtocolError'
+    assert len(s.host.publisher.pending_sync()) == 1
+    from relay.gateway_paths import account_paths
+    friends_path = account_paths('org-wb', '100001')['friends_path']
+    friends = [Codec(s.host.keys.binding('org-wb', '100001'), clock=lambda:s.now[0]).unpack(blob)
+               for path, _, blob in s.uploaded if path == friends_path]
+    assert len(friends) == 2 and friends[-1]['payload']['contacts'] == friends[0]['payload']['contacts']

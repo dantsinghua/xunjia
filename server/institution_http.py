@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter,Request
 from fastapi.responses import FileResponse,JSONResponse
 from relay.protocol import token
+from relay.institution_archive import MediaIntegrityError
 
 def institution_router(selection):
     router=APIRouter(prefix='/api/im')
@@ -35,6 +36,7 @@ def institution_router(selection):
         owner=checked(request,set())
         if re.fullmatch(r'[a-f0-9]{64}',sha256) is None:raise ValueError('附件SHA256标识无效')
         try:path=Path(selection.media(owner,sha256))
+        except MediaIntegrityError:return JSONResponse({'ok':False,'hint':'附件内容校验失败'},status_code=409)
         except LookupError:return JSONResponse({'ok':False,'hint':'附件尚未到达或已经过期'},status_code=404)
         if path.is_symlink() or not path.is_file():
             return JSONResponse({'ok':False,'hint':'附件尚未到达或已经过期'},status_code=404)

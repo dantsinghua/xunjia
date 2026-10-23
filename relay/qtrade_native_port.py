@@ -1,4 +1,4 @@
-"""Fail-closed QTrade Bus boundary for a future v2 CollectorBridge host integration.
+"""Fail-closed QTrade Bus boundary for the current institutional CollectorBridge host.
 
 This adapter is NOT a background poller and NEVER starts a QTrade account.
 Valid authorized commands use the bound native account. The legacy
@@ -18,6 +18,7 @@ Contract:
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 from concurrent.futures import TimeoutError as FutureTimeout
 import hashlib
@@ -61,6 +62,7 @@ class QTradeNativePort:
         timeout_seconds: float = 45.0,
         command_factory: Callable[[str, dict[str, Any]], Any] = _qtrade_command,
         execution_permission: Callable[[dict[str, Any]], bool] | None = None,
+        identity_epoch: int | None = None,
     ):
         if not isinstance(binding, Binding):
             raise ValueError("v2 collector binding is required")
@@ -71,11 +73,13 @@ class QTradeNativePort:
         if not legacy_inbox_disabled():
             raise RuntimeError("Refuse native activation while legacy XunjiaInbox is enabled")
         self.binding, self.store, self.bus, self.loop = binding, store, bus, loop
+        self.channel = getattr(binding, "channel", "qidian")
+        self.identity_epoch = identity_epoch
         self.legacy_inbox_disabled = legacy_inbox_disabled
         self.timeout_seconds = float(timeout_seconds)
         self.command_factory = command_factory
         self.execution_permission = execution_permission
-        self._task_scope = (id(bus), binding.owner_user_id, binding.workbench_id, binding.account_uid)
+        self._task_scope = (id(bus), binding.owner_user_id, binding.workbench_id, self.channel, binding.account_uid)
 
     def quiescent(self):
         """Queued and timed-out submissions remain active until their coroutine exits."""
@@ -93,12 +97,33 @@ class QTradeNativePort:
 
     def _account(self):
         matches = [
-            row for row in self.store.list_accounts(channel="qidian")
+            row for row in self.store.list_accounts(channel=self.channel)
             if isinstance(row, dict) and str(row.get("self_uid") or "") == self.binding.account_uid
         ]
         if len(matches) != 1:
             return None
-        return matches[0]
+        account = matches[0]
+        identity = getattr(self.store, "native_identity", lambda _: {})(account["id"])
+        if self.identity_epoch is not None and identity.get("epoch", 0) != self.identity_epoch:
+            return None
+        return account
+
+    def _native_peer(self, peer):
+        if self.channel != "wechat":
+            return peer
+        if not isinstance(peer, str) or not peer.startswith("wxpeer-"):
+            raise ProtocolError("Wechat peer is missing native session encoding")
+        encoded = peer[7:]
+        try:
+            value = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf8")
+        except (ValueError, UnicodeError):
+            raise ProtocolError("Wechat native peer is invalid") from None
+        if not value or self._relay_peer(value) != peer or any(ord(c) < 32 for c in value):
+            raise ProtocolError("Wechat native peer is invalid")
+        return value
+
+    def _relay_peer(self, peer):
+        return ("wxpeer-" + base64.urlsafe_b64encode(peer.encode("utf8")).decode("ascii").rstrip("=")) if self.channel == "wechat" else peer
 
     def ready(self) -> dict[str, bool]:
         account = self._account()
@@ -153,12 +178,20 @@ class QTradeNativePort:
         account, reason = self._preflight(command)
         if reason is not None:
             return reason
-        qcommand = self.command_factory(str(account["id"]), command)
+        identity = getattr(self.store, "native_identity", lambda _: {})(account["id"])
+        previous = self.store.idem_get(str(account["id"]), command["command_id"])
+        if isinstance(previous, dict) and previous.get("identity_epoch", 0) != identity.get("epoch", 0):
+            return {"status": "unknown", "evidence": "qtrade-native-identity-epoch-mismatch"}
+        try:
+            native_command = {**command, "peer_id": self._native_peer(command["peer_id"])}
+        except ProtocolError:
+            return {"status": "failed", "evidence": "qtrade-invalid-native-session"}
+        qcommand = self.command_factory(str(account["id"]), native_command)
         if command.get('business_version') == '2.2' or 'account_epoch' in command or callable(self.execution_permission):
             if not callable(self.execution_permission) or getattr(self.bus,'supports_xunjia_v22_guard',False) is not True:
                 return {'status':'failed','evidence':'qtrade-v22-native-guard-not-installed'}
             fixed = copy.deepcopy(command)
-            expected_args = {'session':fixed['peer_id'],'text':fixed['text']}
+            expected_args = {'session':self._native_peer(fixed['peer_id']),'text':fixed['text']}
             def permitted():
                 current = self._account()
                 return bool(self.legacy_inbox_disabled()
@@ -195,11 +228,10 @@ class QTradeNativePort:
             return {"status": "unknown", "evidence": "qtrade-native-result-exception"}
         return self._result(result)
 
-    @staticmethod
-    def _args_hash(command: dict[str, Any]) -> str:
+    def _args_hash(self, command: dict[str, Any]) -> str:
         # Match QTrade Bus.canonical_args_hash exactly. Reconciliation must
         # not accept a historical idempotency key bound to different text.
-        args = {"session": command["peer_id"], "text": command["text"]}
+        args = {"session": self._native_peer(command["peer_id"]), "text": command["text"]}
         return hashlib.sha256(json.dumps(
             args, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")).hexdigest()
@@ -209,10 +241,16 @@ class QTradeNativePort:
         account = self._account()
         if not account:
             return {"status": "unknown", "evidence": "qtrade-account-identity-not-resolved"}
+        identity = getattr(self.store, "native_identity", lambda _: {})(account["id"])
+        previous = getattr(self.store, "get_command", lambda _: None)
         # Read-only: never use bus.submit (even with the same idempotency key).
         row = self.store.idem_get(str(account["id"]), command["command_id"])
         if not isinstance(row, dict):
             return {"status": "unknown", "evidence": "qtrade-no-native-idempotency-record"}
+        native_command = previous(row.get("trace_id"))
+        if (identity.get("epoch", 0) and (not isinstance(native_command, dict)
+                or native_command.get("identity_epoch") != identity["epoch"])):
+            return {"status": "unknown", "evidence": "qtrade-native-identity-epoch-mismatch"}
         if row.get("op") != "send_text" or row.get("args_hash") != self._args_hash(command):
             return {"status": "unknown", "evidence": "qtrade-idempotency-identity-mismatch"}
         if row.get("status") != "DONE":
@@ -234,7 +272,7 @@ class QTradeNativePort:
             message = readback(row["trace_id"]) if callable(readback) else None
             if (isinstance(message, dict) and message.get("trace_id") == row["trace_id"]
                     and message.get("account_id") == account["id"]
-                    and message.get("session_id") == str(account["id"]) + ":" + command["peer_id"]
+                    and message.get("session_id") == str(account["id"]) + ":" + self._native_peer(command["peer_id"])
                     and message.get("dir") == "out" and message.get("type") == "text"
                     and message.get("text") == command["text"] and message.get("state") == "DELIVERED"
                     and isinstance(message.get("ext_msg_id"), str) and message["ext_msg_id"]
@@ -254,19 +292,25 @@ class QTradeNativePort:
         if not isinstance(row, dict) or type(live) is not bool:
             raise ProtocolError("QTrade native record is invalid")
         account = self._account()
-        if not account or row.get("account_id") != account["id"]:
+        if not account or row.get("account_id") != account["id"] or row.get("channel", self.channel) != self.channel:
             raise ProtocolError("QTrade record belongs to another account")
+        identity = getattr(self.store, "native_identity", lambda _: {})(account["id"])
+        if (row.get("native_account_uid", self.binding.account_uid) != self.binding.account_uid
+                or row.get("identity_epoch", 0) != identity.get("epoch", 0)
+                or (identity.get("epoch", 0) and row.get("source_seq", 0) <= identity.get("outbox_seq", 0))):
+            raise ProtocolError("QTrade record belongs to another native identity epoch")
         session = row.get("session_id")
         prefix = str(account["id"]) + ":"
         if not isinstance(session, str) or not session.startswith(prefix):
             raise ProtocolError("QTrade record lacks a bound peer session")
-        peer = session[len(prefix):]
+        native_peer = session[len(prefix):]
+        peer = self._relay_peer(native_peer)
         native = row.get("ext_msg_id")
         direction = row.get("dir")
         text = row.get("text")
         stamp = row.get("ts_ms")
         if (not peer or not isinstance(native, str) or not native
-                or direction not in ("in", "out") or not isinstance(text, str)
+                or direction not in ("in", "out") or (not isinstance(text, str) and row.get("type", "text") == "text")
                 or isinstance(stamp, bool) or not isinstance(stamp, (int, float))
                 or not math.isfinite(stamp) or stamp <= 0):
             raise ProtocolError("QTrade record is missing verified native facts")
@@ -277,8 +321,19 @@ class QTradeNativePort:
             "event_id": event_id,
             "peer_id": peer,
             "direction": direction,
-            "text": text,
+            "text": text if isinstance(text, str) else "",
             "kind": "message",
+            "channel": self.channel,
+            "type": row.get("type", "text"),
+            "native_account_uid": self.binding.account_uid,
+            "native_message_id": row.get("id"),
+            "identity_epoch": identity.get("epoch", 0),
+            "session": {"kind": (row.get("session") or {}).get("kind") or ("group" if native_peer.endswith("@chatroom") or native_peer.startswith("g_") else "private"),
+                        "native_id": native_peer, "id": session, "name": (row.get("session") or {}).get("name", "")},
+            "sender": row.get("sender") or {"id": row.get("sender_id"), "name": row.get("sender_name")},
+            "is_recalled": bool(row.get("revoked")),
+            "media": row.get("media", []),
+            "attachments": row.get("attachments", []),
             "ext_msg_id": native,
             "occurred_at": stamp / 1000,
             "historical": not live,

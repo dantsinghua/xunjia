@@ -20,6 +20,11 @@ def status_label(group, peer=None):
     return '询价中'
 
 class ApplicationStore(Store):
+    @staticmethod
+    def thread_is_current(tx,thread):
+        binding=tx.execute('SELECT account_uid,workbench_id FROM xj2_binding WHERE owner_id=?',(thread['owner_id'],)).fetchone()
+        return bool(binding and thread.get('workbench_id') is not None and
+            (thread['account_uid'],thread['workbench_id'])==(binding['account_uid'],binding['workbench_id']))
     def binding_for(self, owner):
         with self.db.transaction(write=False) as tx:
             row=tx.execute('SELECT b.*,o.send_allowed FROM xj2_binding b JOIN xj2_owner o ON o.owner_id=b.owner_id WHERE b.owner_id=?',(owner,)).fetchone()
@@ -65,9 +70,12 @@ class ApplicationStore(Store):
     def group_rows(self,owner,*,tx=None):
         if tx is None:
             with self.db.transaction(write=False) as session:return self.group_rows(owner,tx=session)
+        if not tx.execute('SELECT 1 FROM xj2_binding WHERE owner_id=?',(owner,)).fetchone():return []
+        retired={row['entity_id'] for row in tx.execute("SELECT entity_id FROM xj2_audit WHERE owner_id=? AND kind='workspace_group_retired'",(owner,)).fetchall()}
         rows=tx.execute('SELECT * FROM xj2_group g WHERE owner_id=? AND (NOT EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=g.owner_id) OR EXISTS (SELECT 1 FROM xj2_peer p JOIN xj2_thread t ON t.thread_id=p.thread_id JOIN xj2_binding b ON b.owner_id=t.owner_id AND b.account_uid=t.account_uid AND b.workbench_id=t.workbench_id WHERE p.group_id=g.group_id AND t.owner_id=g.owner_id)) AND NOT EXISTS (SELECT 1 FROM xj2_peer p JOIN xj2_thread t ON t.thread_id=p.thread_id JOIN xj2_binding b ON b.owner_id=g.owner_id WHERE p.group_id=g.group_id AND (t.owner_id<>b.owner_id OR t.account_uid<>b.account_uid OR t.workbench_id IS NULL OR t.workbench_id<>b.workbench_id)) ORDER BY created_at,group_id',(owner,)).fetchall()
         result=[]
         for row in rows:
+            if row['group_id'] in retired:continue
             g=dict(row)
             for field in ('policy','boundary','valuation','plan','handoff'):
                 g[field]=json.loads(g.pop(field+'_json'))
@@ -96,9 +104,14 @@ class ApplicationStore(Store):
             if not owner_row:return {'engine':'v22','revision':0,'groups':[],'threads':[],'send_allowed':False}
             groups=self.group_rows(owner,tx=tx)
             threads=[dict(row) for row in tx.execute('SELECT * FROM xj2_thread t WHERE owner_id=? AND (NOT EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=t.owner_id) OR EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=t.owner_id AND b.account_uid=t.account_uid AND b.workbench_id=t.workbench_id)) ORDER BY thread_id',(owner,)).fetchall()]
+            active_threads={p['thread_id'] for group in groups for p in group['peers']}
+            threads=[t for t in threads if self.thread_is_current(tx,t) and
+                (self.workspace_cut(tx,owner,t['thread_id'])<0 or t['thread_id'] in active_threads or
+                 bool(tx.execute('SELECT 1 FROM xj2_message WHERE thread_id=? AND ingest_revision>? AND historical=0 LIMIT 1',
+                    (t['thread_id'],self.workspace_cut(tx,owner,t['thread_id']))).fetchone()))]
             for t in threads:
                 t['analysis_pending']=self._analysis_pending(tx,t)
-                latest=tx.execute('SELECT state,result_json FROM xj2_analysis WHERE thread_id=? ORDER BY through_revision DESC LIMIT 1',(t['thread_id'],)).fetchone()
+                latest=tx.execute('SELECT state,result_json FROM xj2_analysis WHERE thread_id=? AND through_revision>? ORDER BY through_revision DESC LIMIT 1',(t['thread_id'],self.workspace_cut(tx,owner,t['thread_id']))).fetchone()
                 t['analysis_state']=latest['state'] if latest else 'IDLE'
                 t['analysis_result']=json.loads(latest['result_json']) if latest else None
             return {'engine':'v22','revision':owner_row['projection_version'],'groups':groups,
@@ -106,8 +119,9 @@ class ApplicationStore(Store):
     def raw_page(self,owner,thread_id,*,after_revision=0,limit=200):
         with self.db.transaction(write=False) as tx:
             t=self.require_current_thread(tx,owner,thread_id)
-            rows=tx.execute('SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>? ORDER BY ingest_revision LIMIT ?',
-                            (thread_id,after_revision,limit)).fetchall()
+            cutoff=self.workspace_cut(tx,owner,thread_id)
+            rows=tx.execute('SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>?'+(' AND historical=0' if cutoff>=0 else '')+' ORDER BY ingest_revision LIMIT ?',
+                            (thread_id,max(after_revision,cutoff),limit)).fetchall()
             messages=[]
             reset=self._account_reset(tx,owner,t['account_uid'],workbench_id=t.get('workbench_id') or '',applied_only=True)
             cut=json.loads(reset['local_cut_json']) if reset else None
@@ -122,6 +136,12 @@ class ApplicationStore(Store):
                 messages.append(item)
             version=tx.execute('SELECT projection_version FROM xj2_owner WHERE owner_id=?',(owner,)).fetchone()['projection_version']
         return {'revision':version,'thread':t,'messages':messages,'next_revision':rows[-1]['ingest_revision'] if rows else after_revision}
+    def command_rows(self,owner):
+        with self.db.transaction(write=False) as tx:
+            if not tx.execute('SELECT 1 FROM xj2_binding WHERE owner_id=?',(owner,)).fetchone():return []
+            retired={row['entity_id'] for row in tx.execute("SELECT entity_id FROM xj2_audit WHERE owner_id=? AND kind='workspace_group_retired'",(owner,)).fetchall()}
+            rows=tx.execute('SELECT c.*,t.peer_uid FROM xj2_command c JOIN xj2_thread t ON t.thread_id=c.thread_id WHERE t.owner_id=? AND (NOT EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=t.owner_id) OR EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=t.owner_id AND b.account_uid=t.account_uid AND b.workbench_id=t.workbench_id)) ORDER BY c.created_at,c.command_id',(owner,)).fetchall()
+            return [dict(row) for row in rows if row['group_id'] not in retired]
     def market_overlays(self,owner):
         groups=self.group_rows(owner)
         labels={g['bond_code']:status_label(g) for g in groups if not g['archived']}

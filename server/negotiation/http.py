@@ -184,11 +184,8 @@ def router(service,market,tools,transport,*,collector_selection=None):
                     'pending_command_id':p['pending_command_id'],'command_state':p['command_state'],
                     'response_state':p['response_state'],'trade_day':g['trade_day'],
                     'needs_review':bool(g['review_needed'])})
-        current=store.binding_for(owner(request))
-        with store.db.transaction(write=False) as tx:
-            for thread in tx.execute('SELECT thread_id,peer_uid FROM xj2_thread WHERE owner_id=? AND workbench_id=? AND account_uid=? ORDER BY thread_id',
-                (owner(request),current['workbench_id'],current['account_uid'])).fetchall():
-                peers.setdefault(thread['thread_id'],{'cp_id':thread['peer_uid'],'name':thread['peer_uid'],'thread_id':thread['thread_id'],'channel':'qidian','bonds':[]})
+        for thread in s['threads']:
+            peers.setdefault(thread['thread_id'],{'cp_id':thread['peer_uid'],'name':thread['peer_uid'],'thread_id':thread['thread_id'],'channel':'qidian','bonds':[]})
         return {'ok':True,'revision':s['revision'],'data':list(peers.values())}
     @r.get('/monitor/chat')
     def chat(request:Request,cp:str='',cursor:str='',limit:int=Query(50,ge=1,le=200)):
@@ -203,6 +200,8 @@ def router(service,market,tools,transport,*,collector_selection=None):
         # Pagination is stable on receive sequence; UI ordering stays by native time.
         with store.db.transaction(write=False) as tx:
             query='SELECT ingest_revision FROM xj2_message WHERE thread_id=?';args=[tid]
+            cutoff=store.workspace_cut(tx,owner(request),tid)
+            if cutoff>=0:query+=' AND ingest_revision>? AND historical=0';args.append(cutoff)
             if before is not None:query+=' AND ingest_revision<?';args.append(before)
             positions=tx.execute(query+' ORDER BY ingest_revision DESC LIMIT ?',(*args,limit+1)).fetchall()
         positions=[p['ingest_revision'] for p in positions];selected=positions[:limit]
@@ -446,8 +445,16 @@ def router(service,market,tools,transport,*,collector_selection=None):
         if hi<lo:raise InvalidFact('日期范围错误')
         from ..db import stream_rows
         selected=bound(request)
-        query='SELECT m.occurred_at,m.direction,m.text FROM xj2_message m JOIN xj2_thread t ON t.thread_id=m.thread_id WHERE t.owner_id=? AND t.account_uid=? AND t.workbench_id=? AND m.occurred_at>=? AND m.occurred_at<?'
+        with store.db.transaction(write=False) as tx:
+            cuts={}
+            for row in tx.execute("SELECT entity_id,data_json FROM xj2_audit WHERE owner_id=? AND kind='workspace_thread_retired'",(owner(request),)).fetchall():
+                cuts[row['entity_id']]=max(cuts.get(row['entity_id'],-1),json.loads(row['data_json'])['through_revision'])
+        query='SELECT m.thread_id,m.ingest_revision,m.historical,m.occurred_at,m.direction,m.text FROM xj2_message m JOIN xj2_thread t ON t.thread_id=m.thread_id WHERE t.owner_id=? AND t.account_uid=? AND t.workbench_id=? AND m.occurred_at>=? AND m.occurred_at<?'
         params=[owner(request),selected['account_uid'],selected['workbench_id'],lo,hi]
         if peer:query+=' AND t.peer_uid=?';params.append(peer)
-        return spreadsheet(stream_rows(store.db,query+' ORDER BY m.occurred_at,m.message_id LIMIT 100001',tuple(params)),[('occurred_at','时间'),('direction','方向'),('text','原文')])
+        from itertools import islice
+        rows=stream_rows(store.db,query+' ORDER BY m.occurred_at,m.message_id'+('' if cuts else ' LIMIT 100001'),tuple(params))
+        visible=(row for row in rows if row['thread_id'] not in cuts or
+            row['ingest_revision']>cuts[row['thread_id']] and not row['historical'])
+        return spreadsheet(islice(visible,100001),[('occurred_at','时间'),('direction','方向'),('text','原文')])
     return r

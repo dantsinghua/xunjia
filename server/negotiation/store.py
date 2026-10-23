@@ -57,8 +57,12 @@ class Store:
             workbench_id=binding['workbench_id']
         if not workbench_id:return None # Unattributed legacy threads never inherit a selected collector.
         state=" AND r.state IN ('local_applied','complete')" if applied_only else ''
-        row=tx.execute('SELECT r.* FROM xj2_session_reset r WHERE r.owner_id=? AND r.account_uid=? AND r.workbench_id=?'+state+' ORDER BY r.account_epoch DESC LIMIT 1',(owner,account_uid,workbench_id)).fetchone()
-        return dict(row) if row else None
+        rows=tx.execute('SELECT r.* FROM xj2_session_reset r WHERE r.owner_id=? AND r.account_uid=? AND r.workbench_id=?'+state+' ORDER BY r.account_epoch DESC',(owner,account_uid,workbench_id)).fetchall()
+        binding=tx.execute('SELECT config_json FROM xj2_binding WHERE owner_id=? AND account_uid=? AND workbench_id=?',(owner,account_uid,workbench_id)).fetchone()
+        context=json.loads(binding['config_json']).get('context_id') if binding else None
+        for row in rows:
+            if not context or json.loads(row['request_json']).get('context_id')==context:return dict(row)
+        return None
     def account_epoch(self,tx,owner,account_uid,*,workbench_id=None,require_complete=False):
         reset=self._account_reset(tx,owner,account_uid,workbench_id=workbench_id)
         if reset and require_complete and reset['state']!='complete':
@@ -69,7 +73,16 @@ class Store:
     @staticmethod
     def thread_is_current(tx,thread):
         binding=tx.execute('SELECT account_uid,workbench_id FROM xj2_binding WHERE owner_id=?',(thread['owner_id'],)).fetchone()
-        return binding is None or (thread.get('workbench_id') is not None and (thread['account_uid'],thread['workbench_id'])==(binding['account_uid'],binding['workbench_id']))
+        if binding is None:
+            return not tx.execute("SELECT 1 FROM xj2_audit WHERE owner_id=? AND kind='workspace_retired' LIMIT 1",(thread['owner_id'],)).fetchone()
+        return thread.get('workbench_id') is not None and (thread['account_uid'],thread['workbench_id'])==(binding['account_uid'],binding['workbench_id'])
+    @staticmethod
+    def workspace_cut(tx,owner,thread_id):
+        rows=tx.execute("SELECT data_json FROM xj2_audit WHERE owner_id=? AND entity_id=? AND kind='workspace_thread_retired'",(owner,thread_id)).fetchall()
+        return max((json.loads(row['data_json'])['through_revision'] for row in rows),default=-1)
+    @staticmethod
+    def group_is_retired(tx,owner,group_id):
+        return bool(tx.execute("SELECT 1 FROM xj2_audit WHERE owner_id=? AND entity_id=? AND kind='workspace_group_retired' LIMIT 1",(owner,group_id)).fetchone())
     def require_current_thread(self,tx,owner,thread_id):
         thread=self._thread(tx,owner,thread_id)
         if not self.thread_is_current(tx,thread):raise InvalidFact('Thread does not belong to the selected collector/account')
@@ -84,11 +97,14 @@ class Store:
         tx.execute('UPDATE xj2_thread SET source_watermark=?,dispatch_version=?,receiver_fence_id=?,receiver_fence_version=? WHERE thread_id=?',
             (peer.get('source_watermark',0),max(0,peer.get('min_control_version',1)-1),peer.get('receiver_fence_id',''),peer.get('receiver_fence_version',0),thread_id))
     def _reset_message_filter(self,tx,thread,alias=''):
+        prefix=alias+'.' if alias else ''
+        workspace_cut=self.workspace_cut(tx,thread['owner_id'],thread['thread_id'])
+        clause,args=(' AND '+prefix+'ingest_revision>? AND '+prefix+'historical=0',[workspace_cut]) if workspace_cut>=0 else ('',[])
         reset=self._account_reset(tx,thread['owner_id'],thread['account_uid'],workbench_id=thread.get('workbench_id') or '',applied_only=True)
-        if not reset:return '',[]
-        cut=json.loads(reset['local_cut_json']);prefix=alias+'.' if alias else ''
-        return (' AND '+prefix+'ingest_revision>? AND ('+prefix+'source_seq<=0 OR '+prefix+'source_seq>?) AND '+prefix+'historical=0',
-            [cut.get('local_revisions',{}).get(thread['thread_id'],0),cut['source_highwater']])
+        if not reset:return clause,args
+        cut=json.loads(reset['local_cut_json'])
+        return (clause+' AND '+prefix+'ingest_revision>? AND ('+prefix+'source_seq<=0 OR '+prefix+'source_seq>?) AND '+prefix+'historical=0',
+            args+[cut.get('local_revisions',{}).get(thread['thread_id'],0),cut['source_highwater']])
     def _eligible_messages(self,tx,thread,after,limit=100):
         clause,args=self._reset_message_filter(tx,thread)
         return [dict(r) for r in tx.execute('SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>?'+clause+' ORDER BY ingest_revision LIMIT ?',
@@ -96,7 +112,7 @@ class Store:
     def _analysis_pending(self,tx,thread):
         if not self.thread_is_current(tx,thread):return False
         reset=self._account_reset(tx,thread['owner_id'],thread['account_uid'],workbench_id=thread.get('workbench_id') or '')
-        if not reset:return thread['analyzed_revision']<thread['ingest_revision']
+        if not reset:return bool(self._eligible_messages(tx,thread,thread['analyzed_revision'],1))
         if reset['state']!='complete':return False
         return bool(self._eligible_messages(tx,thread,thread['analyzed_revision'],1))
     def source_before_reset(self,tx,thread,source_seq):
@@ -180,8 +196,12 @@ class Store:
         original = tx.execute('SELECT * FROM xj2_message WHERE message_id=? AND thread_id=?', (message_id, thread_id)).fetchone()
         if not original:
             raise InvalidFact('Correction target is outside this thread')
+        if original['ingest_revision']<=self.workspace_cut(tx,owner,thread_id):
+            raise InvalidFact('Retired workspace history is read only')
         for mid in member_ids:
-            if self._member(tx, owner, mid)['thread_id'] != thread_id:
+            member=self._member(tx, owner, mid)
+            if self.group_is_retired(tx,owner,member['group_id']):raise InvalidFact('Retired workspace is read only')
+            if member['thread_id'] != thread_id:
                 raise InvalidFact('Correction cannot cross counterparty threads')
         old = {r['member_id']: r['relation'] for r in tx.execute('SELECT * FROM xj2_scope WHERE message_id=?', (message_id,)).fetchall()}
         for mid in old:
@@ -281,6 +301,7 @@ class Store:
             workbench_id=binding['workbench_id']
         if workbench_id is not None:identity(workbench_id,'workbench',160)
         group = self._group(tx, owner, group_id)
+        if self.group_is_retired(tx,owner,group_id):raise InvalidFact('Retired workspace is read only')
         existing_pairs=tx.execute('SELECT t.account_uid,t.workbench_id FROM xj2_peer p JOIN xj2_thread t ON t.thread_id=p.thread_id WHERE p.group_id=?',(group_id,)).fetchall()
         if any((p['account_uid'],p['workbench_id'])!=(account_uid,workbench_id) for p in existing_pairs):
             raise InvalidFact('A bond group cannot mix collector/account identities')
@@ -323,9 +344,19 @@ class Store:
         digest = hashlib.sha256(encoded(payload).encode()).hexdigest()
         with self.write(owner) as tx:
             thread = self._thread(tx, owner, thread_id)
-            previous = tx.execute("SELECT message_id,content_hash FROM xj2_message WHERE thread_id=? AND event_id=?", (thread_id, event_id)).fetchone()
+            previous = tx.execute("SELECT * FROM xj2_message WHERE thread_id=? AND event_id=?", (thread_id, event_id)).fetchone()
             if previous:
                 if previous["content_hash"] != digest:
+                    # A new workspace may replay the same retired native event
+                    # with a fresh transport sequence/historical classification.
+                    # Accept only provably identical native facts; never rewrite
+                    # their original hash, sequence, scope or financial evidence.
+                    if historical and occurred_at is not None and previous['ingest_revision']<=self.workspace_cut(tx,owner,thread_id):
+                        target=tx.execute('SELECT message_id FROM xj2_message WHERE thread_id=? AND event_id=?',(thread_id,target_event_id)).fetchone() if target_event_id else None
+                        target_matches=(previous['target_id']==target['message_id']) if target is not None else target_event_id is None and previous['target_id'] is None
+                        fields=('text','direction','kind','native_id','occurred_at','trade_day')
+                        if target_matches and tuple(previous[key] for key in fields)==(text,direction,kind,native_id,stamp,trade_day):
+                            return previous['message_id']
                     raise InvalidFact("Replayed event ID has different native content")
                 return previous["message_id"]
             if direction == "out" and native_id:
@@ -406,10 +437,12 @@ class Store:
         with self.write(owner) as tx:
             if member_id:
                 member=self._member(tx, owner, member_id)
+                if self.group_is_retired(tx,owner,member['group_id']):raise InvalidFact('Retired workspace is read only')
                 self.require_current_thread(tx,owner,member['thread_id'])
                 tx.execute("UPDATE xj2_peer SET send_allowed=?,control_version=control_version+1 WHERE member_id=?", (int(allowed), member_id))
             elif group_id:
                 group = self._group(tx, owner, group_id)
+                if self.group_is_retired(tx,owner,group_id):raise InvalidFact('Retired workspace is read only')
                 for peer in tx.execute('SELECT thread_id FROM xj2_peer WHERE group_id=?',(group_id,)).fetchall():
                     self.require_current_thread(tx,owner,peer['thread_id'])
                 if allowed and group["state"] == "HANDOFF":

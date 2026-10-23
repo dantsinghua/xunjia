@@ -233,6 +233,7 @@ class Inquiry:
             epoch=self.repo.account_epoch(tx,owner,binding['account_uid'])
             old=tx.execute('SELECT * FROM xj2_batch WHERE owner_id=? AND request_id=?',(owner,request_id)).fetchone()
             if old:
+                self._require_batch_scope(tx,owner,old)
                 if old['content_hash']!=content_hash:raise InvalidFact('Preview idempotency key reused with different inputs')
                 return json.loads(old['preview_json'])['public']
             self.repo._ensure_peer_capacity(tx,owner,binding['account_uid'],per_peer)
@@ -242,11 +243,21 @@ class Inquiry:
             tx.execute("INSERT INTO xj2_batch(batch_id,owner_id,request_id,content_hash,version,state,binding_version,preview_json,result_json,created_at) VALUES(?,?,?,?,1,'PREVIEW',?,?,'{}',?)",(bid,owner,request_id,content_hash,binding['version'],encoded(payload),self.clock()))
             self.repo.audit(tx,owner,'rfq_preview',bid,{'bond_count':len(codes),'peers':len(per_peer)})
         return public
+    def _require_batch_scope(self,tx,owner,row):
+        binding=self.repo.require_binding(tx,owner)
+        preview=json.loads(row['preview_json'])
+        epoch=self.repo.account_epoch(tx,owner,binding['account_uid'])
+        if row['binding_version']!=binding['version'] or preview.get('account_epoch',0)!=epoch:
+            raise InvalidFact('Stored request belongs to a retired account context; submit a new request id')
+        result=json.loads(row['result_json'])
+        if any(self.repo.group_is_retired(tx,owner,gid) for gid in result.get('group_ids',[])):
+            raise InvalidFact('Stored request belongs to a retired workspace')
     def confirm(self,owner,batch_id,expected_version,request_id):
         with self._submission(owner):
             identity(request_id,'confirm request');identity(batch_id,'batch')
             with self.repo.db.transaction(write=False) as tx:
                 found=tx.execute('SELECT * FROM xj2_batch WHERE batch_id=? AND owner_id=?',(batch_id,owner)).fetchone()
+                if found:self._require_batch_scope(tx,owner,found)
             if not found:raise PermissionError('Preview does not exist for this trader')
             if found['state']=='CONFIRMED':return json.loads(found['result_json'])
             self._guard_submit(owner)
@@ -255,6 +266,7 @@ class Inquiry:
             fresh={r['plan']['code']:self.valuation(r['plan']['code']) for r in preview['items'] if r['policy']['mode']=='CHINABOND_BP'}
             with self.repo.write(owner) as tx:
                 row=tx.execute('SELECT * FROM xj2_batch WHERE batch_id=? AND owner_id=?',(batch_id,owner)).fetchone()
+                self._require_batch_scope(tx,owner,row)
                 if row['state']=='CONFIRMED':return json.loads(row['result_json'])
                 b=self.repo.require_binding(tx,owner)
                 return self._commit_batch(tx,owner,row,b,preview,expected_version,fresh)
@@ -322,6 +334,7 @@ class Inquiry:
             with self.repo.db.transaction(write=False) as tx:
                 old=tx.execute('SELECT * FROM xj2_batch WHERE owner_id=? AND request_id=?',(owner,request_key)).fetchone()
                 if old:
+                    self._require_batch_scope(tx,owner,old)
                     if old['content_hash']!=content_hash:raise InvalidFact('同一发送请求的参数已变化，请勿重复使用请求编号')
                     if old['state']=='CONFIRMED':return json.loads(old['result_json'])
                 before=self.repo.require_binding(tx,owner)
@@ -336,6 +349,7 @@ class Inquiry:
             with self.repo.write(owner) as tx:
                 row=tx.execute('SELECT * FROM xj2_batch WHERE owner_id=? AND request_id=?',(owner,request_key)).fetchone()
                 if row:
+                    self._require_batch_scope(tx,owner,row)
                     if row['content_hash']!=content_hash:raise InvalidFact('同一发送请求的参数已变化，请勿重复使用请求编号')
                     if row['state']=='CONFIRMED':return json.loads(row['result_json'])
                 b=self.repo.require_binding(tx,owner)
@@ -373,6 +387,12 @@ class Inquiry:
     def _manual_result(self,tx,owner,peer,text,request_id):
         old=tx.execute('SELECT c.*,t.peer_uid FROM xj2_command c JOIN xj2_thread t ON t.thread_id=c.thread_id WHERE t.owner_id=? AND c.request_id=?',(owner,request_id)).fetchone()
         if not old:return None
+        binding=self.repo.require_binding(tx,owner)
+        thread=self.repo._thread(tx,owner,old['thread_id'])
+        basis=json.loads(old['basis_json'])
+        if (not self.repo.thread_is_current(tx,thread) or self.repo.group_is_retired(tx,owner,old['group_id'])
+                or basis.get('binding_version',0)!=binding['version']):
+            raise InvalidFact('Manual request belongs to a retired account context; submit a new request id')
         body=json.loads(old['body_json'])
         if old['peer_uid']!=peer or body.get('kind')!='MANUAL' or body.get('text')!=text:
             raise InvalidFact('Manual request key conflicts with previous recipient or text')
@@ -421,7 +441,6 @@ class Inquiry:
     def conversations(self,owner):
         return [{'conversation_id':t['thread_id'],'peer_id':t['peer_uid'],**t} for t in self.repo.snapshot(owner)['threads']]
     def commands(self,owner):
-        with self.repo.db.transaction(write=False) as tx:
-            rows=tx.execute('SELECT c.*,t.peer_uid FROM xj2_command c JOIN xj2_thread t ON t.thread_id=c.thread_id WHERE t.owner_id=? AND (NOT EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=t.owner_id) OR EXISTS (SELECT 1 FROM xj2_binding b WHERE b.owner_id=t.owner_id AND b.account_uid=t.account_uid AND b.workbench_id=t.workbench_id)) ORDER BY c.created_at,c.command_id',(owner,)).fetchall()
+        rows=self.repo.command_rows(owner)
         return [{**dict(r),'status':r['state'].lower(),'peer_id':r['peer_uid'],'text':json.loads(r['body_json'])['text']} for r in rows]
     status_commands=commands

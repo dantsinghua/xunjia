@@ -96,7 +96,7 @@ def test_changed_binding_identity_or_version_never_inherits_old_preview(proposal
     with store.write(OWNER) as tx:
         tx.execute(f'UPDATE xj2_binding SET {field}=?,version=version+1 WHERE owner_id=?' if field != 'version'
             else 'UPDATE xj2_binding SET version=? WHERE owner_id=?', (value, OWNER))
-    with pytest.raises(InvalidFact, match='binding changed'):
+    with pytest.raises(InvalidFact, match='^Stored request belongs to a retired account context; submit a new request id$'):
         confirm(proposal)
     assert service.commands(OWNER) == []
     assert store.group_rows(OWNER) == []

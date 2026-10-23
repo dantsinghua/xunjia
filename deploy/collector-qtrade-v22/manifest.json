@@ -1,222 +1,93 @@
 {
-  "format_version": 1,
-  "delivery_kind": "new_sources_and_manual_integration_reference",
-  "business_version": "2.2",
-  "created_at": "2026-10-17T13:43:11.333840+00:00",
-  "qtrade_context": {
-    "head_commit": "f87304bfb1f63482e1d999f6b507a346537c28f7",
-    "branch": "claude/lucid-dijkstra-uu5max",
-    "worktree_was_dirty_before_implementation": true,
-    "head_is_not_an_exact_worktree_preimage": true
-  },
-  "preimage_available": false,
-  "patch_available": false,
+  "format_version": 2,
+  "delivery_kind": "current_collector_reference_sources",
+  "transport_contract": "https-mtls-accesstoken",
+  "collector_commit": "ae19b9d6d7df20c4c1bea44dba1a6ecf52a68750",
   "automatic_application_supported": false,
-  "preimage_limitation": "No original QTrade worktree backup was retained. Final verification snapshots contain hashes only. The wiring script has no backup step. Existing-file base_sha256 values are unknown, not equal to HEAD by assumption.",
   "files": [
+    {
+      "target_path": "src/qtrade_agent/adapters/qidian/org.py",
+      "delivery_path": "source/src/qtrade_agent/adapters/qidian/org.py",
+      "result_sha256": "363be71e4dda590c2dffad84c690eed212f47dc83a51fe3f9b8cb69120dd2197",
+      "size_bytes": 15758,
+      "source_kind": "exact_collector_reference"
+    },
+    {
+      "target_path": "src/qtrade_agent/app.py",
+      "delivery_path": "source/src/qtrade_agent/app.py",
+      "result_sha256": "652c2e1180b462059e1449eacbd78116c3c18b579e688358d2f8c4a29d330b36",
+      "size_bytes": 70457,
+      "source_kind": "exact_collector_reference"
+    },
     {
       "target_path": "src/qtrade_agent/bus/native_guard.py",
       "delivery_path": "source/src/qtrade_agent/bus/native_guard.py",
-      "role": "new_runtime_module",
-      "base_state": "created_in_this_batch",
-      "base_sha256": null,
       "result_sha256": "ee9e8983dbc236b4f3c3b86f79443867ef91786c4955b219ab25f69e46eafe3c",
       "size_bytes": 756,
-      "freeze_evidence": "collector-freeze.json"
+      "source_kind": "exact_collector_reference"
+    },
+    {
+      "target_path": "src/qtrade_agent/ossbox/collector_settings.py",
+      "delivery_path": "source/src/qtrade_agent/ossbox/collector_settings.py",
+      "source_kind": "exact_collector_reference",
+      "result_sha256": "f52f175d3e889df0af6c78c93c7253a2861e59f2becb1441bf3ea283a908827e",
+      "size_bytes": 11829
+    },
+    {
+      "target_path": "src/qtrade_agent/ossbox/institution.py",
+      "delivery_path": "source/src/qtrade_agent/ossbox/institution.py",
+      "result_sha256": "53e1f42c848e0c50177005f8d12dd156be4d993ec487bff36d22b1276fca0a47",
+      "size_bytes": 26295,
+      "source_kind": "exact_collector_reference"
     },
     {
       "target_path": "src/qtrade_agent/ossbox/xunjia_v22.py",
       "delivery_path": "source/src/qtrade_agent/ossbox/xunjia_v22.py",
-      "role": "new_runtime_module",
-      "base_state": "created_in_this_batch",
-      "base_sha256": null,
-      "result_sha256": "c4a63a5b2f28456cf45b58cdc4fd300f5967ce4997f2eab55ea6a9bb3acf2783",
-      "size_bytes": 22837,
-      "freeze_evidence": "2026-10-21 independent capability publication before contacts failure; delta acceptance required",
-      "previous_result_sha256": "c099ff80d447504fc84ee2787f6dc268f15c5fdadea0676a1b7ed5de7588412e"
+      "result_sha256": "1cc152df5373da657793953d4ef64b8657d7fd0223c26391919c7beb4072f502",
+      "size_bytes": 21249,
+      "source_kind": "exact_collector_reference"
     },
     {
-      "target_path": "tests/acceptance/test_xunjia_v22_native_guard.py",
-      "delivery_path": "source/tests/acceptance/test_xunjia_v22_native_guard.py",
-      "role": "independent_acceptance",
-      "base_state": "created_in_this_batch",
-      "base_sha256": null,
-      "result_sha256": "eecca27e773796515f3a37990da2251a50423173e04516f423cd557a79be3372",
-      "size_bytes": 5736,
-      "freeze_evidence": "collector-all-final-before.json"
-    },
-    {
-      "target_path": "tests/acceptance/test_xunjia_v22_host.py",
-      "delivery_path": "source/tests/acceptance/test_xunjia_v22_host.py",
-      "role": "independent_acceptance",
-      "base_state": "created_in_this_batch",
-      "base_sha256": null,
-      "result_sha256": "54434b6053ca5e0a6ad679f555d6c65ba9fdf55d6f72021f2dc78d40a66fe3ed",
-      "size_bytes": 12030,
-      "freeze_evidence": "2026-10-20 explicit user removal of extra native-send switch; independent acceptance in send-enable run",
-      "previous_result_sha256": "122d37326a3d249973699799c3d93d0094be102a0c65093aaa5fe72af8c01310"
-    },
-    {
-      "target_path": "tests/acceptance/test_xunjia_v22_app_wiring.py",
-      "delivery_path": "source/tests/acceptance/test_xunjia_v22_app_wiring.py",
-      "role": "independent_acceptance",
-      "base_state": "created_in_this_batch",
-      "base_sha256": null,
-      "result_sha256": "f5abb565041bb293dfc0b84c426ccb137e7446dda7febad1fe6ee7f4967efd40",
-      "size_bytes": 4308,
-      "freeze_evidence": "collector-all-final-before.json"
+      "target_path": "tests/acceptance/test_current_org_directory.py",
+      "delivery_path": "source/tests/acceptance/test_current_org_directory.py",
+      "result_sha256": "af254ba0decd4fa9a3355db6974dd06c1533253629948a7d0aef4380a0b627ea",
+      "size_bytes": 5791,
+      "source_kind": "exact_collector_reference"
     },
     {
       "target_path": "tests/acceptance/test_init_db_permissions.py",
       "delivery_path": "source/tests/acceptance/test_init_db_permissions.py",
-      "role": "independent_acceptance",
-      "base_state": "created_in_this_batch",
-      "base_sha256": null,
       "result_sha256": "4811a9cd805165668bc4f2d95494c24127afbad79917c467442b48146f560774",
       "size_bytes": 1953,
-      "freeze_evidence": "collector-all-final-before.json"
+      "source_kind": "exact_collector_reference"
     },
     {
-      "target_path": "src/qtrade_agent/adapters/qidian/org.py",
-      "delivery_path": "source/src/qtrade_agent/adapters/qidian/org.py",
-      "role": "existing_runtime_module_scoped_update",
-      "base_state": "existing_module_with_exact_preimage",
-      "base_sha256": "ca2e92d792bdfcbe800d6ffafece9cb4f40d314b87d1eaa852b25f7457b37606",
-      "result_sha256": "363be71e4dda590c2dffad84c690eed212f47dc83a51fe3f9b8cb69120dd2197",
-      "size_bytes": 15758,
-      "freeze_evidence": "2026-10-20 scoped organization source; original module retained in protected run preimage"
+      "target_path": "tests/acceptance/test_xunjia_v22_app_wiring.py",
+      "delivery_path": "source/tests/acceptance/test_xunjia_v22_app_wiring.py",
+      "result_sha256": "c0e1caac533ad8f6aad15f5929ff18e960a9baaecef5a524bc78a7ad6584b350",
+      "size_bytes": 4746,
+      "source_kind": "reference_contract_adaptation"
     },
     {
-      "target_path": "docs/integration/xunjia-org-provider.patch",
-      "delivery_path": "source/docs/integration/xunjia-org-provider.patch",
-      "role": "manual_integration_patch",
-      "base_state": "created_in_this_batch",
-      "base_sha256": null,
-      "result_sha256": "8c119c4c10813aee858d060b83ebb1789c290fe1e8e9695af8088008b847de34",
-      "size_bytes": 1059,
-      "freeze_evidence": "Exact AgentApp._xunjia_v22_contacts patch against protected current dirty worktree preimage; never replace whole app.py"
+      "target_path": "tests/acceptance/test_xunjia_v22_host.py",
+      "delivery_path": "source/tests/acceptance/test_xunjia_v22_host.py",
+      "result_sha256": "d8e8d42a766f568fafe73abf65dd71ac075e61616da925aa122bee64d6e7d75b",
+      "size_bytes": 15617,
+      "source_kind": "exact_collector_reference"
+    },
+    {
+      "target_path": "tests/acceptance/test_xunjia_v22_native_guard.py",
+      "delivery_path": "source/tests/acceptance/test_xunjia_v22_native_guard.py",
+      "result_sha256": "eecca27e773796515f3a37990da2251a50423173e04516f423cd557a79be3372",
+      "size_bytes": 5736,
+      "source_kind": "exact_collector_reference"
     }
   ],
-  "existing_file_integration": [
-    {
-      "target_path": "src/qtrade_agent/app.py",
-      "symbols": [
-        "AgentApp.open",
-        "AgentApp.xunjia_inbox_tick",
-        "AgentApp._fanout_webhooks",
-        "AgentApp.start",
-        "AgentApp._configure_saved_ossbox",
-        "AgentApp._xunjia_v22_contacts",
-        "AgentApp._configure_xunjia_v22",
-        "AgentApp.stop"
-      ],
-      "base_sha256": null,
-      "result_sha256": "c0c00d56702198db7f1b0dfafd4f3d069d87fe5dd4939aa26c1225b28d77e9d9",
-      "full_file_delivered": false,
-      "freeze_evidence": "collector-freeze.json",
-      "org_provider_revision": {
-        "base_sha256": "cef9e2f72921dfacb43e60d9682e45ee1d70a51b6c91bae7450e5b2a2897d183",
-        "result_sha256": "4039bb423cd870725c1e9f43bea255986d3fb2bbf6ab925a08845905231b2570",
-        "patch_delivery_path": "source/docs/integration/xunjia-org-provider.patch",
-        "patch_sha256": "8c119c4c10813aee858d060b83ebb1789c290fe1e8e9695af8088008b847de34",
-        "symbols": [
-          "AgentApp._xunjia_v22_contacts"
-        ],
-        "full_file_delivered": false,
-        "automatic_application_supported": false
-      }
-    },
-    {
-      "target_path": "src/qtrade_agent/bus/bus.py",
-      "symbols": [
-        "Bus.supports_xunjia_v22_guard",
-        "Bus._execute"
-      ],
-      "base_sha256": null,
-      "result_sha256": "9540d85beedaaa31c044e881c424fa7c7cbc35171a733268e3ea8258c5f1ade0",
-      "full_file_delivered": false,
-      "freeze_evidence": "collector-freeze.json"
-    },
-    {
-      "target_path": "src/qtrade_agent/adapters/qidian/ui.py",
-      "symbols": [
-        "QidianUi._tap_anchor"
-      ],
-      "base_sha256": null,
-      "result_sha256": "48a6b3279bcb8f7e98a6fe989f974397c4520b4979aecf79008109d19d0e43ce",
-      "full_file_delivered": false,
-      "freeze_evidence": "collector-freeze.json"
-    },
-    {
-      "target_path": "src/qtrade_agent/ossbox/routes.py",
-      "symbols": [
-        "register_ossbox_settings.view"
-      ],
-      "base_sha256": null,
-      "result_sha256": "bf9867fb7e054d98eaedd19d3c56e84b16af43d809e7f239c7fda7f5cc5b3cd0",
-      "full_file_delivered": false,
-      "freeze_evidence": "collector-freeze.json"
-    },
-    {
-      "target_path": "src/qtrade_agent/main.py",
-      "symbols": [
-        "init_db"
-      ],
-      "base_sha256": null,
-      "result_sha256": "2f757b49a9a2031300bba6f6d8e638f00b7a78069deb7aba66decbef18d78f85",
-      "full_file_delivered": false,
-      "freeze_evidence": "collector-freeze.json"
-    }
-  ],
-  "historical_validation": {
-    "qtrade_agent_full_suite": {
-      "passed": 3309,
-      "failed": 0,
-      "skipped": 0,
-      "seconds": 480.79,
-      "scope": "Exact final local QTrade worktree, including pre-existing changes; not this partial delivery in isolation"
-    },
-    "independent_collector_suite": {
-      "passed": 22,
-      "failed": 0
-    },
-    "independent_init_db_permissions": {
-      "passed": 4,
-      "failed": 0
-    },
-    "installed_protocol_wheel_joint_contracts": {
-      "passed": 3,
-      "failed": 0
-    },
-    "real_account_or_native_send_verified": false,
-    "qtrade_installer_verified": false
-  },
-  "file_gateway_revision": {
-    "protocol_package": "2.2.1",
-    "historical_validation_is_pre_file_gateway": true,
-    "real_mq_verified": false,
-    "real_native_verified": false
-  },
-  "organization_revision": {
-    "contract_fields": [
-      "org",
-      "org_state",
-      "org_updated_at",
-      "org_error"
-    ],
-    "states": [
-      "ready",
-      "empty",
-      "unreported",
-      "error"
-    ],
-    "real_decryption_verified": false,
-    "credential_reference_fields": [
-      "org_password_file",
-      "org_password_format"
-    ],
-    "private_values_included": false
-  },
-  "current_contract": "its-relay-path-v1",
-  "current_loader_note": "2026-10-22: institutional account loader; rejects retired owner/key/lane configuration and isolates old journals."
+  "collector_source_state": "frozen_worktree",
+  "collector_frozen_inputs_sha256": "8e62d4915adc701ef0960d2921cb8c88125407dc2070a232eba8d12db6e76937",
+  "organization_chain": [
+    "AgentApp._xunjia_v22_contacts",
+    "InstitutionCollectorHost.metadata_once",
+    "SnapshotPublisher.organization"
+  ]
 }

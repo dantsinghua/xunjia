@@ -91,14 +91,12 @@ class FileGatewayTransport(_Transport):
 
     def _poll_pending(self, limit, control_intake):
         if not control_intake:
-            rows=self._pending(self.stream, limit)
             if self.role == "service":
-                # A prefetched batch may complete in another HTTP order. Native
-                # source sequence, not thread completion, orders message facts.
-                def source_order(row):
-                    value=row['envelope']['payload'].get('source_seq')
-                    return row['kind']=='event',value if row['kind']=='event' and type(value) is int else 0
-                rows.sort(key=source_order)
+                rows = self.store.pending(self.stream, limit=limit, prioritize_control=True)
+                for row in rows:
+                    self.codec._validate(row['envelope'])
+            else:
+                rows = self._pending(self.stream, limit)
             return rows
         rows = self.store.pending(self.stream)
         rows.sort(key=lambda row: row['kind'] != 'session_reset')
@@ -125,16 +123,18 @@ class FileGatewayTransport(_Transport):
             db.execute("UPDATE fg_download SET state=?,name=?,blob=?,received_at=? WHERE seq=? AND scope=?", ("EMPTY" if value is None else "STORED", value.name if value else "", value.content if value else None, self.clock() if value else None, seq, self.store.scope))
         return value
 
-    def poll(self, limit=50, *, control_intake=False):
+    def poll(self, limit=50, *, control_intake=False, allow_pending_intake=False):
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError("Invalid file-gateway poll limit")
         if type(control_intake) is not bool or control_intake and self.role != 'collector':
             raise ValueError('Reset control intake requires the collector role')
+        if type(allow_pending_intake) is not bool or allow_pending_intake and self.role != 'service':
+            raise ValueError('Pending media intake requires the service role')
         # Separate from the publication lock: the native guard only reads local state.
         with account_lock(str(self.store.path) + ".download", self.binding):
             self._stage_downloads()
             pending = self._poll_pending(limit, control_intake)
-            if pending and not control_intake:
+            if pending and not control_intake and not allow_pending_intake:
                 return pending
             if self.role == "service" and limit >= 8:
                 available=self.inbound.pending()

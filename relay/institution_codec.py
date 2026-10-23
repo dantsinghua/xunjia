@@ -29,7 +29,7 @@ class InstitutionCodec(Codec):
         super().__init__(binding, **kwargs)
         if not isinstance(binding, Binding):
             raise ProtocolError("Institution codec requires a selected account")
-        self.wire_binding = Binding(institution_owner, binding.account_uid, binding.workbench_id, binding.seal_key, binding.sign_key)
+        self.wire_binding = Binding(institution_owner, binding.account_uid, binding.workbench_id, binding.seal_key, binding.sign_key, channel=binding.channel)
         self.wire = Codec(self.wire_binding, **kwargs)
 
     def pack(self, data):

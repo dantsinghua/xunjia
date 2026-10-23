@@ -6,6 +6,7 @@ Build dependencies must come from the explicitly supplied local wheelhouse.
 """
 from __future__ import annotations
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -32,6 +33,8 @@ def build(output, wheelhouse):
     output.mkdir(parents=True,exist_ok=True)
     if list(output.glob('xunjia_collector_runtime-*.whl')):
         raise ValueError('Collector wheel output already exists; choose a fresh release directory')
+    for name in FILES:
+        ast.parse((root/name).read_text(encoding='utf-8-sig'),filename=name)
     hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in FILES}
     with tempfile.TemporaryDirectory(prefix='xunjia-collector-wheel-') as folder:
         stage=Path(folder)
@@ -39,9 +42,9 @@ def build(output, wheelhouse):
             target=stage/name;target.parent.mkdir(exist_ok=True)
             shutil.copyfile(root/name,target)
         (stage/'server/_collector_build.py').write_text(
-            'VERSION = "2.2.9"\nSOURCE_HASHES = '+repr(hashes)+'\n',encoding='utf8')
+            'VERSION = "2.2.11"\nSOURCE_HASHES = '+repr(hashes)+'\n',encoding='utf8')
         (stage/'pyproject.toml').write_text('[build-system]\nrequires=["setuptools==80.9.0","wheel==0.45.1"]\nbuild-backend="setuptools.build_meta"\n')
-        (stage/'setup.py').write_text('from setuptools import setup\nsetup(name="xunjia-collector-runtime",version="2.2.9",packages=["relay","server"],python_requires=">=3.11",install_requires=["cryptography>=50.0.2","PyYAML>=6"])\n')
+        (stage/'setup.py').write_text('from setuptools import setup\nsetup(name="xunjia-collector-runtime",version="2.2.11",packages=["relay","server"],python_requires=">=3.11",install_requires=["cryptography>=50.0.2","PyYAML>=6"])\n')
         subprocess.run([sys.executable,'-m','pip','wheel','--no-deps','--no-index',
                         '--find-links',str(wheelhouse),'--wheel-dir',str(output),str(stage)],check=True,timeout=180)
     if hashes!={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in FILES}:

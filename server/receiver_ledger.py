@@ -24,7 +24,9 @@ def account_lock(path, binding: Binding, *, blocking=True):
     lock_dir = Path(path).with_name(Path(path).name + '.locks')
     lock_dir.mkdir(parents=True, exist_ok=True)
     # OS file locks are released on process death, unlike a guessed lease.
-    name = hashlib.sha256(f'{binding.workbench_id}|{binding.account_uid}'.encode()).hexdigest()
+    identity=f'{binding.workbench_id}|{binding.account_uid}'
+    if getattr(binding,'channel','qidian')!='qidian':identity+='|'+binding.channel
+    name = hashlib.sha256(identity.encode()).hexdigest()
     with (lock_dir / (name + '.lock')).open('a+b') as stream:
         if os.name == 'nt':
             import msvcrt
@@ -50,7 +52,9 @@ class ReceiverLedger:
     def __init__(self, path, binding: Binding, *, clock=time.time):
         self.path, self.binding, self.clock = Path(path), binding, clock
         self.instance_id = uuid.uuid4().hex
-        self.scope = 'xunjia:'+digest([binding.workbench_id,binding.account_uid])
+        identity=[binding.workbench_id,binding.account_uid]
+        if getattr(binding,'channel','qidian')!='qidian':identity.append(binding.channel)
+        self.scope = 'xunjia:'+digest(identity)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_dir = self.path.with_name(self.path.name + '.locks')
         self.lock_dir.mkdir(exist_ok=True)
@@ -99,6 +103,11 @@ class ReceiverLedger:
         return db.execute('SELECT * FROM rx_reset WHERE scope=? ORDER BY account_epoch DESC LIMIT 1',
                           (self.scope,)).fetchone()
 
+    def _reset_is_active(self, db, row):
+        if row is None:return False
+        context=db.execute('SELECT context_id FROM rx_context WHERE scope=?',(self.scope,)).fetchone()
+        return context is None or json.loads(row['request_json']).get('context_id')==context['context_id']
+
     def activate_context(self, context_id, version, *, published_source_highwater=0):
         from relay.protocol import token
         token(context_id)
@@ -113,12 +122,9 @@ class ReceiverLedger:
                        (self.scope,context_id,version))
             changed=old is None or old['context_id']!=context_id
             if changed:
-                # Only hashes survive as a rejection set; no old business content
-                # or UNKNOWN reconciliation is carried into the fresh context.
+                # Tombstones reject old execution while full command bodies,
+                # native outcomes and audit/reset history remain available.
                 db.execute('INSERT OR IGNORE INTO rx_tombstone SELECT scope,command_id,fingerprint,? FROM rx_command WHERE scope=?',(self.clock(),self.scope))
-                db.execute('DELETE FROM rx_command WHERE scope=?',(self.scope,))
-                db.execute('DELETE FROM rx_audit WHERE scope=?',(self.scope,))
-                db.execute('DELETE FROM rx_reset WHERE scope=?',(self.scope,))
             latest=self._latest_reset(db)
             epoch=latest['account_epoch'] if latest else 0
             snap=self._reset_snapshot(db,{'account_epoch':epoch},published_source_highwater,0)
@@ -135,7 +141,7 @@ class ReceiverLedger:
         if context and command.get("context_id") != context["context_id"]:return False
         row = self._latest_reset(db)
         epoch = row['account_epoch'] if row else 0
-        return command.get('account_epoch', 0) == epoch and (row is None or row['state'] == 'complete')
+        return command.get('account_epoch', 0) == epoch and (not self._reset_is_active(db,row) or row['state'] == 'complete')
 
     def reset_status(self, reset_id=None):
         with self._db() as db:
@@ -154,7 +160,7 @@ class ReceiverLedger:
         with self._db() as db:
             rows = db.execute("SELECT request_json FROM rx_reset WHERE scope=? AND state!='complete' ORDER BY account_epoch",
                               (self.scope,)).fetchall()
-        return [json.loads(row['request_json']) for row in rows]
+            return [json.loads(row['request_json']) for row in rows if self._reset_is_active(db,row)]
 
     @staticmethod
     def _reset_ack(request, phase, snapshot, code):
@@ -215,7 +221,7 @@ class ReceiverLedger:
                     return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_REQUEST_NOT_FOUND')
                 latest = self._latest_reset(db)
                 current = latest['account_epoch'] if latest else 0
-                if latest and latest['state'] != 'complete':
+                if self._reset_is_active(db,latest) and latest['state'] != 'complete':
                     return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_IN_PROGRESS')
                 if current != payload['expected_account_epoch']:
                     return self._reset_ack(request, 'blocked', None, 'SESSION_RESET_EPOCH_CONFLICT')
@@ -507,12 +513,28 @@ class ReceiverLedger:
                 if status=='sent' and isinstance(outcome,dict):self._native_mapping(db,command,outcome)
                 return self._record(db, command, fingerprint, status, evidence)
 
+    def _unclaimed_query(self, db, command, fingerprint):
+        """Observe undelivered commands without creating a native execution claim."""
+        tomb=db.execute('SELECT * FROM rx_tombstone WHERE scope=? AND command_id=?',(self.scope,command['command_id'])).fetchone()
+        self._check(tomb,fingerprint)
+        if not self._epoch_permitted(db,command):return result(command,'cancelled','account-epoch-not-active')
+        if tomb:return result(command,'cancelled','durable-cancellation-tombstone')
+        control=db.execute('SELECT min_version FROM rx_control WHERE scope=? AND peer_id=?',(self.scope,command['peer_id'])).fetchone()
+        if control and command['control_version']<control['min_version']:
+            return result(command,'cancelled','stale-control-version')
+        fence=db.execute('SELECT fence_id,version FROM rx_manual_fence WHERE scope=? AND peer_id=?',(self.scope,command['peer_id'])).fetchone()
+        if fence and (command.get('receiver_fence_id')!=fence['fence_id'] or command.get('receiver_fence_version')!=fence['version']):
+            return result(command,'cancelled','manual-fence-not-observed')
+        if command['expires_at']<=self.clock():return result(command,'failed','command-expired-before-execution')
+        return result(command,'pending','awaiting-command-delivery')
+
     def reconcile(self, command: dict, native_reconcile):
         fingerprint = self._fingerprint(command)
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM rx_command WHERE scope=? AND command_id=?',(self.scope,command['command_id'])).fetchone()
             self._check(row,fingerprint)
+            if row is None:return self._unclaimed_query(db,command,fingerprint)
             if row and row['status']=='held':
                 blocked=self._unexecuted_failure(db,command,fingerprint)
                 return blocked or result(command,'pending','native-echo-classification-held')
@@ -520,6 +542,7 @@ class ReceiverLedger:
             with self._db() as db:
                 row = db.execute('SELECT * FROM rx_command WHERE scope=? AND command_id=?', (self.scope, command['command_id'])).fetchone()
                 self._check(row, fingerprint)
+                if row is None:return self._unclaimed_query(db,command,fingerprint)
                 if row and row['status'] in ('sent', 'failed', 'cancelled'):
                     return self._result(db,command,row['status'],row['evidence'])
             try:

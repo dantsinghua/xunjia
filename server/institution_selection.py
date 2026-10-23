@@ -28,11 +28,13 @@ class InstitutionSelection:
         if not self.institution.configured:raise ValueError("请先保存本机构文件中转配置")
 
     def catalog(self, owner, *, refresh=False):
+        if refresh and self.institution.configured:self.institution.tick()
         current=self.repository.binding_for(owner)
         selected={k:current[k] for k in ("workbench_id","account_uid","version")} if current else None
         if not self.institution.configured:return {"workbenches":[],"selected":selected,"note":"请先保存机构文件中转连接"}
-        if refresh:self.institution.tick()
         result=self.institution.directory.catalog()
+        result={**result,'workbenches':[{**book,'accounts':[row for row in book['accounts'] if row.get('channel')=='qidian']}
+            for book in result['workbenches'] if any(row.get('channel')=='qidian' for row in book['accounts'])]}
         failures=sorted(set(str(value)[:120] for value in self.institution.errors.values()))
         return {**result,"selected":selected,"refresh_error":("文件中转接收未完成："+", ".join(failures)) if failures else "","note":"目录按10秒心跳更新，超过60秒标记心跳过期；企点登录状态以采集端原生界面核验为准"}
 
@@ -77,6 +79,7 @@ class InstitutionSelection:
         current=self.repository.binding_for(owner)
         if (current["version"] if current else 0)!=version:raise ValueError("当前选择已变化，请刷新后重试")
         row=self.institution.directory.account(wb,uid)
+        if row is not None and row.get('channel')!='qidian':raise ValueError('询价工作台只允许选择企点账号')
         channel=self.institution.availability(wb,uid)
         if not channel["ready"]:raise ValueError(channel["hint"])
         if "negotiation-v22-watermark" not in row.get("capabilities",[]):raise ValueError("采集端尚未就绪，不能创建发送通道")
@@ -107,25 +110,27 @@ class InstitutionSelection:
                 occupied=tx.execute("SELECT owner_id FROM xj2_binding WHERE account_uid=?",(uid,)).fetchone()
                 if occupied and occupied["owner_id"]!=owner:raise ValueError("该企点号正在另一个工作台使用")
                 if not self.institution.online(wb,uid):raise ValueError("采集端状态已变化，请刷新后重试")
-                removed=clear_workspace(tx,owner) if reset else {}
+                retained=clear_workspace(tx,owner,clock=self.repository.clock) if reset else {}
                 if old:
                     tx.execute("UPDATE xj2_binding SET account_uid=?,workbench_id=?,transport=?,version=version+?,config_json=? WHERE owner_id=?",
                         (uid,wb,"oss",1 if reset else 0,json.dumps(preferences,ensure_ascii=False),owner))
                 else:
-                    tx.execute("INSERT INTO xj2_binding(owner_id,account_uid,workbench_id,transport,version,config_json) VALUES(?,?,?,?,1,?)",
-                        (owner,uid,wb,"oss",json.dumps(preferences,ensure_ascii=False)))
+                    retired=tx.execute("SELECT data_json FROM xj2_audit WHERE owner_id=? AND kind='workspace_retired'",(owner,)).fetchall()
+                    next_version=max((json.loads(row['data_json']).get('binding_version',0) for row in retired),default=0)+1
+                    tx.execute("INSERT INTO xj2_binding(owner_id,account_uid,workbench_id,transport,version,config_json) VALUES(?,?,?,?,?,?)",
+                        (owner,uid,wb,"oss",next_version,json.dumps(preferences,ensure_ascii=False)))
                     tx.execute("UPDATE xj2_owner SET send_allowed=0 WHERE owner_id=?",(owner,))
                 current=self.repository.require_binding(tx,owner);self._record_check(tx,owner,current,book)
                 self.repository.audit(tx,owner,"workspace_reset" if reset else "institution_account_selected",uid,
-                    {"workbench_id":wb,"contract":CONTRACT,"removed_counts":removed})
+                    {"workbench_id":wb,"contract":CONTRACT,"retained_counts":retained})
             self.transport.adapters={k:v for k,v in self.transport.adapters.items() if k[0]!=owner or k[2]!="oss"} | {(owner,uid,"oss"):staged}
             if reset and old_adapter is not None:self.institution.retire_context(old_adapter,notify=not same)
             if fresh:self.institution.request_context(staged)
             binding=self.repository.binding_for(owner)
             binding={**binding,"context_id":preferences["context_id"]}
             return {"binding":binding,"selected":{k:binding[k] for k in ("workbench_id","account_uid","version")},
-                "contacts":book,"connected":True,"reset":reset,"removed_counts":removed,
-                "send_ready":bool(staged.context_ready),"note":"已清空旧业务并切换账号；原生历史按当前号读取" if reset else "已保存选择并读取通讯录"}
+                "contacts":book,"connected":True,"reset":reset,"retained_counts":retained,
+                "send_ready":bool(staged.context_ready),"note":"已归档旧工作区并切换账号；历史事实和待核对记录保留，不会重发旧任务" if reset else "已保存选择并读取通讯录"}
 
     def files(self, owner, *, before=None, limit=50):
         import hashlib

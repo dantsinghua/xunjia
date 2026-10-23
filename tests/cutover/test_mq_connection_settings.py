@@ -156,9 +156,13 @@ def test_paths_cannot_be_overridden_by_connection_form(mq):
         assert response.status_code==400 and files(mq)==before
 
 @pytest.mark.parametrize('change_key',[False,True])
-def test_existing_unknown_is_cleared_on_explicit_connection_replacement(mq,change_key):
+def test_existing_unknown_is_retained_and_adapter_retired_on_explicit_connection_replacement(mq,change_key):
     adapter=mq['app'].state.transport.adapters[(OWNER,'account-a','oss')]
-    with adapter.store.db() as db:seq=db.execute("INSERT INTO fg_download(scope,state) VALUES(?,'UNKNOWN')",(adapter.store.scope,)).lastrowid
+    old_context=adapter.context_id
+    blob=b'\x00synthetic-ambiguous-native-evidence\xff'
+    with adapter.store.db() as db:
+        seq=db.execute("INSERT INTO fg_download(scope,state,name,blob,code) VALUES(?,'UNKNOWN','original.bin',?,'FILE_GATEWAY_HTTP_ERROR')",(adapter.store.scope,blob)).lastrowid
+        before=tuple(db.execute('SELECT * FROM fg_download WHERE seq=?',(seq,)).fetchone())
     request=body(mq,base_url='https://new.invalid')
     if change_key:
         new=GatewayAuth('changed-synthetic-key',AUTH.sm4_key);mq['wire'].accepted_auth.append(new)
@@ -167,7 +171,12 @@ def test_existing_unknown_is_cleared_on_explicit_connection_replacement(mq,chang
     assert response.status_code==200,response.text
     assert response.json()['data']['reset'] and mq['repository'].binding_for(OWNER) is None
     assert mq['app'].state.transport.adapters=={}
-    with adapter.store.db() as db:assert db.execute('SELECT * FROM fg_download WHERE seq=?',(seq,)).fetchone() is None
+    assert not adapter.context_ready and not adapter.active_guard({'context_id':old_context})
+    with adapter.store.db() as db:
+        retained=db.execute('SELECT * FROM fg_download WHERE seq=?',(seq,)).fetchone()
+        assert tuple(retained)==before and bytes(retained['blob'])==blob
+    assert mq['runtime'].auth==(new if change_key else AUTH)
+    assert mq['runtime'].config['base_url']==(BASE if change_key else 'https://new.invalid')
 
 
 def test_sm4_rotation_starts_fresh_without_old_binding_or_credential_disclosure(mq):

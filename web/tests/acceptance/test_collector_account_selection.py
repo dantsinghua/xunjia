@@ -211,12 +211,12 @@ def test_mq_identity_summary_tracks_saved_pair_without_discarding_unsaved_connec
     panel = page.get_by_test_id('mq-config')
     expect(panel.locator('.summary')).to_contain_text('wb-a')
     page.locator('[name=mq-base-url]').fill('https://unsaved-draft.synthetic.invalid')
-    page.locator('[name=mq-config-yaml]').fill('key: synthetic-draft-retained\nsm4_key: 0123456789abcdef\n')
+    page.locator('[name=mq-client-cert]').fill('/synthetic/draft-retained.crt')
     pick_b(page);page.get_by_test_id('collector-connect').click()
     expect(page.get_by_test_id('collector-current')).to_contain_text('wb-b')
     expect(panel.locator('.summary')).to_contain_text('wb-b')
     expect(page.locator('[name=mq-base-url]')).to_have_value('https://unsaved-draft.synthetic.invalid')
-    expect(page.locator('[name=mq-config-yaml]')).to_have_value('key: synthetic-draft-retained\nsm4_key: 0123456789abcdef\n')
+    expect(page.locator('[name=mq-client-cert]')).to_have_value('/synthetic/draft-retained.crt')
     assert set(calls) == {'GET'}, 'Changing collector identity must not save or test the remote MQ connection'
 
 

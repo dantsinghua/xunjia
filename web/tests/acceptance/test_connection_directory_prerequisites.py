@@ -33,7 +33,7 @@ def unconfigured(ui):
                 {'name':'pending','ok':True,'detail':'合成pending通过'}]}});return
         fulfill(r,{'ok':True,'data':{'editable':True,'configured':state['configured'],'backend':'file_gateway',
             'base_url':'https://relay.synthetic.invalid' if state['configured'] else '',
-            'credentials_set':state['configured'],'revision':'saved-revision' if state['configured'] else '',
+            'credentials_set':True,'revision':'saved-revision' if state['configured'] else '',
             'applied':state['applied'],'account_uid':'','workbench_id':'','note':'合成配置状态'}})
     for pattern in ['/api/auth/me','/api/im/mq-config**','/api/im/catalog**']:
         page.route(base+pattern,route)
@@ -49,10 +49,10 @@ def open_config(s):
 
 def fill_draft(page):
     page.locator('[name=mq-base-url]').fill('https://relay.synthetic.invalid')
-    page.locator('[name=mq-config-yaml]').fill('key: synthetic-key\nsm4_key: 0123456789abcdef\n')
+    page.locator('[name=mq-client-cert]').fill('/synthetic/client.crt')
 
 
-def test_unsaved_two_field_draft_and_pending_test_never_visit_directory(unconfigured):
+def test_unsaved_connection_draft_and_pending_test_never_visit_directory(unconfigured):
     page,state=open_config(unconfigured)
     expect(page.get_by_test_id('collector-account-settings')).to_have_count(0)
     assert state['catalog_calls']==[]
@@ -82,7 +82,7 @@ def test_successfully_saved_and_loaded_connection_precedes_authenticated_directo
     assert state['catalog_calls']==[('POST','/api/im/catalog/refresh')]
     assert calls.index(state['catalog_calls'][0])>saved_index
     assert not any(path=='/api/im/binding/select' for _,path in calls)
-    expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
+    expect(page.locator('[name=mq-config-yaml]')).to_have_count(0)
     expect(panel).not_to_contain_text('固定账号')
 
 

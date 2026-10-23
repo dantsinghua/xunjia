@@ -498,10 +498,13 @@ def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native
     s['publish']('wb-a','account-a','catalog',online=False)
     s['seed']('wb-b','account-a');s['refresh']()
     selected=choose(s,'wb-b','account-a');assert selected.status_code==200,selected.text
-    # User explicitly selected destructive reset: no old task/history is migrated.
+    # Selection retires old execution; its financial facts remain in their original namespace.
     with store.db.transaction(write=False) as tx:
         for table in ('xj2_command','xj2_group','xj2_thread','xj2_message','xj2_peer'):
-            assert tx.execute('SELECT COUNT(*) AS n FROM '+table).fetchone()['n']==0
+            assert tx.execute('SELECT COUNT(*) AS n FROM '+table).fetchone()['n']>0
+        assert tx.execute('SELECT archived FROM xj2_group WHERE group_id=?',(command_a['group_id'],)).fetchone()['archived']==1
+        assert [dict(x) for x in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(thread_a,)).fetchall()]==original_messages
+    assert s['api'].get('/api/monitor/counterparties').json()['data']==[]
     binding_b=app.state.transport.adapters[(owner,'account-a','oss')].binding
     from relay.protocol import Codec,envelope
     from server.negotiation.prices import InvalidFact
@@ -519,12 +522,11 @@ def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native
             peer_id='same-peer',command_id=command_a['command_id'],control_version=1,
             content_hash=command_a['content_hash'] if kind=='receipt' else '',
             created_at=time.time(),expires_at=time.time()+120)))
-        if kind=='receipt':assert app.state.inbox.apply(binding_b,signed) is None
-        else:
-            with pytest.raises((InvalidFact,PermissionError)):app.state.inbox.apply(binding_b,signed)
+        with pytest.raises((InvalidFact,PermissionError)):app.state.inbox.apply(binding_b,signed)
         with store.db.transaction(write=False) as tx:
-            for table in ('xj2_command','xj2_group','xj2_thread','xj2_message'):
-                assert tx.execute('SELECT COUNT(*) AS n FROM '+table).fetchone()['n']==0
+            assert [dict(x) for x in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(thread_a,)).fetchall()]==original_messages
+            assert tx.execute('SELECT state FROM xj2_command WHERE command_id=?',(command_a['command_id'],)).fetchone()['state']=='CANCELLED'
+        assert s['api'].get('/api/monitor/counterparties').json()['data']==[]
     native_b=collector(s,'wb-b','account-a',filename='cross-native-b.sqlite3')
     rx_b=ReceiverLedger(s['tmp']/'cross-rx-b.sqlite3',native_b.binding)
     bridge_b=CollectorBridge(ledger=rx_b,adapters={'oss':native_b},native_send=lambda _:pytest.fail('No native send in reset'),
@@ -542,9 +544,11 @@ def test_same_uid_other_workbench_reset_isolated_from_original_thread_and_native
         time.sleep(.2)
     assert status['state']=='complete' and status['snapshot']['published_source_highwater']==0
     with store.db.transaction(write=False) as tx:
-        assert tx.execute('SELECT * FROM xj2_thread WHERE thread_id=?',(thread_a,)).fetchone() is None
-        assert tx.execute('SELECT * FROM xj2_group WHERE group_id=?',(command_a['group_id'],)).fetchone() is None
-        assert tx.execute('SELECT COUNT(*) AS n FROM xj2_message').fetchone()['n']==0
+        retained_thread=tx.execute('SELECT * FROM xj2_thread WHERE thread_id=?',(thread_a,)).fetchone()
+        assert retained_thread['workbench_id']==original_thread['workbench_id']=='wb-a'
+        assert retained_thread['source_watermark']==original_thread['source_watermark']
+        assert tx.execute('SELECT archived FROM xj2_group WHERE group_id=?',(original_group['group_id'],)).fetchone()['archived']==1
+        assert [dict(x) for x in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(thread_a,)).fetchall()]==original_messages
     preview_b=service.preview(owner,'wb-b-preview',[{**item,'code':'SYN-WORKBENCH-B'}])
     round_b=service.confirm(owner,preview_b['batch_id'],1,'wb-b-confirm')
     row_b=service.commands_core.get(owner,round_b['commands'][0]['command_id'])

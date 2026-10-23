@@ -11,6 +11,9 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 from server.quote_credentials import config_dir, public_view, merged, save_quote
 _REQUIRED=('QB_MYSQL_HOST','QB_MYSQL_USER','QB_MYSQL_PASSWORD','QB_MYSQL_DB')
+def _runtime_unavailable():
+    return {'ok':False,'code':'QUOTE_RUNTIME_UNAVAILABLE',
+            'note':'行情运行模块缺失或依赖未安装；请修复交付包中的 collector 及其依赖后重启服务'}
 def database_options():
     if not all(os.environ.get(k,'').strip() for k in _REQUIRED):
         raise ValueError('尚未配置行情数据库；请配置 QB_MYSQL_HOST、USER、PASSWORD、DB')
@@ -40,6 +43,8 @@ def check_database(options=None):
                 if c.fetchone() is None:
                     return {'ok':False,'code':'QUOTE_DICTIONARY_EMPTY','note':'债券代码／简称字典为空；须先导入真实字典，不能用虚构代码填充'}
         return {'ok':True,'code':'QUOTE_DATABASE_READY','note':'行情数据库、报价表和真实债券字典可用'}
+    except ImportError:
+        return _runtime_unavailable()
     except Exception as exc:
         code=getattr(exc,'args',(None,))[0] if getattr(exc,'args',()) else None
         if code==1146:
@@ -104,9 +109,12 @@ class QuoteControl:
             if self._probe:
                 result=await self._probe(values)
             else:
-                from server.quote_probe import probe_quote,market_connect
-                from collector.qb_gateway import authenticate,WS
-                from collector.qb_ws import ws_url
+                try:
+                    from server.quote_probe import probe_quote,market_connect
+                    from collector.qb_gateway import authenticate,WS
+                    from collector.qb_ws import ws_url
+                except ImportError:
+                    return {**_runtime_unavailable(),'wss_open':False,'saved':False}
                 result=await probe_quote(creds=lambda:(values['cookie'],values['device_id'],values['sid']),authenticate=authenticate,connect=market_connect,ws_url=ws_url,ws_base=WS)
             self._database=await asyncio.to_thread(self._db_check)
             self._last_probe={**result,'at':time.time()}
@@ -171,6 +179,10 @@ class QuoteControl:
                         await collect(values,self._update,self._database_options())
                     attempt=0
                 except asyncio.CancelledError:raise
+                except ImportError:
+                    result=_runtime_unavailable()
+                    self._state='error';self._code=result['code'];self._note=result['note']
+                    return
                 except Exception as exc:
                     import httpx
                     denied=isinstance(exc,httpx.HTTPStatusError) and exc.response.status_code in (401,403)

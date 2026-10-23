@@ -248,11 +248,15 @@ class Commands:
             message_id = "out_" + row["command_id"]
             revision = thread["ingest_revision"] + 1
             old_epoch=row['account_epoch']<self.store.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or '')
+            retired=self.store.group_is_retired(tx,owner,row['group_id'])
             tx.execute("INSERT INTO xj2_message(message_id,thread_id,event_id,content_hash,source_seq,ingest_revision,direction,kind,text,native_id,occurred_at,received_at,trade_day,historical) VALUES(?,?,?,?,?,?,'out','message',?,?,?,?,?,?)",
                        (message_id, row["thread_id"], "command:" + row["command_id"], row["content_hash"], -1, revision,
-                        body["text"], native_id, occurred_at, self.store.clock(), basis["trade_day"],int(old_epoch)))
-            first = thread["pending_since"] if thread["pending_since"] is not None else self.store.clock()
-            tx.execute("UPDATE xj2_thread SET ingest_revision=?,pending_since=?,last_ingest_at=? WHERE thread_id=?", (revision, first, self.store.clock(), row["thread_id"]))
+                        body["text"], native_id, occurred_at, self.store.clock(), basis["trade_day"],int(old_epoch or retired)))
+            if retired:
+                tx.execute('UPDATE xj2_thread SET ingest_revision=? WHERE thread_id=?',(revision,row['thread_id']))
+            else:
+                first = thread["pending_since"] if thread["pending_since"] is not None else self.store.clock()
+                tx.execute("UPDATE xj2_thread SET ingest_revision=?,pending_since=?,last_ingest_at=? WHERE thread_id=?", (revision, first, self.store.clock(), row["thread_id"]))
         for mid in set(body.get('scope_members',[]))|{row['member_id']}:
             member=self.store._member(tx,owner,mid)
             group=self.store._group(tx,owner,member['group_id'])

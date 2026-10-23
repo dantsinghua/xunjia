@@ -11,9 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from qtrade_agent.events import Events
+from qtrade_agent.events import Events, message_payload
+from qtrade_agent.models import Message, Session
 from qtrade_agent.store import Store
-from qtrade_agent.ossbox.xunjia_v22 import XunjiaV22Host, collector_version
+from qtrade_agent.ossbox.xunjia_v22 import XunjiaV22Host
+from qtrade_agent.ossbox.institution import InstitutionCollectorHost, InstitutionAccountHost
 
 
 class Ledger:
@@ -31,6 +33,7 @@ class Ledger:
 
 
 class Port:
+    channel = "qidian"
     def __init__(self, binding):
         self.binding = binding
         self.adapters = {}
@@ -41,7 +44,9 @@ class Port:
     def normalize_native_message(self, row, live=False):
         return {"event_id": "native-" + row["ext_msg_id"], "peer_id": row["session_id"].split(":", 1)[1],
                 "direction": row["dir"], "text": row["text"], "kind": "message", "ext_msg_id": row["ext_msg_id"],
-                "occurred_at": row["ts_ms"] / 1000, "historical": not live}
+                "occurred_at": row["ts_ms"] / 1000, "historical": not live,
+                "native_account_uid": row["native_account_uid"], "identity_epoch": row["identity_epoch"],
+                "channel": self.channel}
     def native_send(self, command):
         if not self.execution_permission(command):
             return {"status": "failed", "evidence": "synthetic permission blocked"}
@@ -57,12 +62,11 @@ class Bridge:
         self.binding = binding
         self.order, self.published = [], []
         self.ledger = Ledger(self.order)
-        # Existing directory publisher reads adapter codec limits, even for an
-        # empty synthetic book. No network adapter or thread is substituted.
-        self.adapters = {"oss": SimpleNamespace(codec=SimpleNamespace(max_bytes=4*1024*1024))}
         self.fail_publication = False
         self.runs = 0
         self.catalogs = 0
+        self.contacts = []
+        self.adapters = {"oss": SimpleNamespace(publish_contacts=self.publish_contacts)}
     def publish_native(self, data, historical=False):
         self.order.append(("publish", data["event_id"]))
         if self.fail_publication:
@@ -74,6 +78,8 @@ class Bridge:
         return {"processed": 0, "errors": []}
     def publish_capabilities(self):
         self.catalogs += 1
+    def publish_contacts(self, payload):
+        self.contacts.append(deepcopy(payload))
 
 
 def build(tmp_path, loop, *, legacy_disabled=lambda: True, bus_guard=True):
@@ -102,19 +108,43 @@ def test_host_rejects_legacy_overlap_and_missing_bus_guard(tmp_path):
     asyncio.run(run())
 
 
-def test_host_defaults_allow_authorized_native_send_only_while_single_worker_active(tmp_path):
+def test_host_defaults_to_guarded_native_send_and_start_is_single_worker(tmp_path):
     async def run():
         host, bridge, port = build(tmp_path, asyncio.get_running_loop())
-        assert not host.permission({}) and not hasattr(port,"allow_native_send")
+        command = {"business_version": "2.2"}
+        assert not host.permission(command)
+        assert bridge.native_send(command)["status"] == "failed"
+        assert port.calls == []
         await host.start()
         worker = host._worker
         await host.start()
         assert host._worker is worker
-        assert host.permission({}) and not hasattr(port,"allow_native_send")
-        assert bridge.native_send({"business_version": "2.2"})["status"] == "unknown"
-        assert len(port.calls) == 1
-        await host.stop()
-        assert not hasattr(port,"allow_native_send") and not host.permission({})
+        try:
+            assert host.permission(command)
+            assert bridge.native_send(command)["status"] == "unknown"
+            assert port.calls == [command]
+        finally:
+            await host.stop()
+        assert not host.permission(command)
+        assert bridge.native_send(command)["status"] == "failed"
+        assert port.calls == [command]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("barrier", ["intake", "legacy", "ledger"])
+def test_default_native_send_still_rechecks_execution_barriers(tmp_path, barrier):
+    async def run():
+        host, bridge, port = build(tmp_path, asyncio.get_running_loop())
+        host._active = True  # Exercise guards without starting a background worker.
+        if barrier == "intake":
+            host._intake_ok = False
+        elif barrier == "legacy":
+            host.legacy_inbox_disabled = lambda: False
+        else:
+            host.ledger.pending.add("synthetic-unpublished-inbound")
+        assert not host.permission({"business_version": "2.2"})
+        assert bridge.native_send({"business_version": "2.2"})["status"] == "failed"
+        assert port.calls == []
     asyncio.run(run())
 
 
@@ -177,6 +207,7 @@ def test_restart_replays_unpublished_native_events_without_resending(tmp_path):
 def test_host_never_accepts_old_business_commands_or_another_account_event(tmp_path):
     async def run():
         host, bridge, port = build(tmp_path, asyncio.get_running_loop())
+        host._active = True
         assert bridge.native_send({"business_version": "1"})["status"] == "failed"
         observe(host, account="qd91")
         await host.run_once()
@@ -184,27 +215,66 @@ def test_host_never_accepts_old_business_commands_or_another_account_event(tmp_p
     asyncio.run(run())
 
 
-def test_version_opt_in_is_explicit_and_has_no_unknown_version_fallback():
-    assert collector_version({}) == "1"
-    assert collector_version({"XUNJIA_COLLECTOR_VERSION": "2.2"}) == "2.2"
-    with pytest.raises(ValueError):
-        collector_version({"XUNJIA_COLLECTOR_VERSION": "future-version"})
+@pytest.mark.parametrize("version", ["1", "2.2", "future-version"])
+def test_current_institution_start_owns_real_native_core_for_any_retired_version(tmp_path, monkeypatch, version):
+    from relay.gateway_paths import InstitutionKeys, CONTRACT
+    from relay.file_gateway import GatewayAuth
+    monkeypatch.setenv("XUNJIA_COLLECTOR_VERSION", version)
+    async def run():
+        store = Store(str(tmp_path / "current-store.sqlite3")).open()
+        store.ensure_account("qd90", "qidian", state="running", self_uid="10001")
+        uploaded = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        class Client:
+            def __init__(self, path): self.queue_identity=("synthetic-relay",path)
+            def upload(self, name, blob):
+                loop.call_soon_threadsafe(uploaded.set)
+            def pending(self): return 0
+        settings = SimpleNamespace(workbench_id="synthetic-workbench", view=lambda: {"workbench_name":"desk"}, saved=lambda:None)
+        host = InstitutionCollectorHost(store=store, bus=SimpleNamespace(supports_xunjia_v22_guard=True),
+            loop=loop, keys=InstitutionKeys.from_auth(GatewayAuth("synthetic", b"0123456789abcdef")),
+            config={"workbench_name":"desk", "contract":CONTRACT}, settings=settings, data_dir=tmp_path,
+            legacy_inbox_disabled=lambda:True, friends_provider=lambda _:[],
+            organization_provider=lambda _:{"org_state":"empty", "org":{"departments":[],"members":[]}},
+            client_factory=Client)
+        try:
+            await host.start()
+            await asyncio.wait_for(uploaded.wait(), timeout=3)
+            assert len(host.hosts)==1, host.errors
+            core=host.hosts[("qd90","10001")]
+            assert isinstance(core,InstitutionAccountHost) and isinstance(core,XunjiaV22Host)
+            worker=core._worker
+            await host.start()
+            assert host.hosts[("qd90","10001")] is core and core._worker is worker
+            assert core.port._account()["self_uid"]=="10001"
+        finally:
+            await host.stop()
+            store.close()
+        assert not core._active and core._worker is None
+    asyncio.run(run())
 
 
 def test_live_edit_then_durable_outbox_replay_never_republishes_older_text(tmp_path):
     async def run():
         loop = asyncio.get_running_loop()
         store = Store(str(tmp_path / "qtrade-outbox.sqlite3")).open()
+        store.ensure_account("qd90","qidian",state="running",self_uid="synthetic-account")
         binding = SimpleNamespace(owner_user_id="synthetic-owner", account_uid="synthetic-account", workbench_id="synthetic-workbench")
         bridge, port = Bridge(binding), Port(binding)
         host = XunjiaV22Host(store=store, bus=SimpleNamespace(supports_xunjia_v22_guard=True), loop=loop,
             binding=binding, bridge=bridge, port=port, state_path=tmp_path / "host.sqlite3", legacy_inbox_disabled=lambda: True)
         events = Events(store, on_emit=host.observe)
-        body = {"account_id": "qd90", "session": {"id": "qd90:synthetic-peer", "kind": "private"},
-                "ext_msg_id": "synthetic-native-id", "dir": "in", "text": "first quotation",
-                "ts_ms": 1_792_202_400_000, "revoked": False}
+        original=Message(account_id="qd90",channel="qidian",session=Session("qd90","synthetic-peer","private"),
+            ext_msg_id="synthetic-native-id",dir="in",type="text",text="first quotation",
+            ts_ms=1_792_202_400_000,source="qidian_db",sender_id="synthetic-peer")
+        store.ingest(original)
+        body=message_payload(original,late_after_s=60)
         try:
             events.emit("message", payload=body, account_id="qd90", channel="qidian", now_ms=1_792_202_400_000)
+            corrected=Message(account_id="qd90",channel="qidian",session=original.session,
+                ext_msg_id=original.ext_msg_id,dir="in",type="text",text="corrected quotation",
+                ts_ms=original.ts_ms,source="qidian_db",sender_id="synthetic-peer")
+            store.ingest(corrected)
             events.emit("message", payload={**body, "text": "corrected quotation"}, account_id="qd90", channel="qidian", now_ms=1_792_202_401_000)
             await host.run_once()
             assert [row["text"] for row in bridge.published] == ["first quotation", "corrected quotation"], (
@@ -217,44 +287,48 @@ def test_live_edit_then_durable_outbox_replay_never_republishes_older_text(tmp_p
     asyncio.run(run())
 
 
-def test_capability_is_published_only_by_active_guarded_host(tmp_path):
+def test_active_native_core_runs_guarded_worker_without_owning_directory_publication(tmp_path):
     async def run():
         host, bridge, port = build(tmp_path, asyncio.get_running_loop())
-        announced = asyncio.Event()
+        processed = asyncio.Event()
         loop = asyncio.get_running_loop()
-        def publish():
-            bridge.catalogs += 1
-            loop.call_soon_threadsafe(announced.set)
-        bridge.publish_capabilities = publish
+        original = bridge.run_once
+        def tick():
+            result=original()
+            loop.call_soon_threadsafe(processed.set)
+            return result
+        bridge.run_once = tick
         await host.run_once()
         assert bridge.catalogs == 0
         assert callable(port.execution_permission)
+        processed.clear()
         await host.start()
         try:
-            await asyncio.wait_for(announced.wait(), timeout=2)
-            assert bridge.catalogs == 1
-            assert not hasattr(port,"allow_native_send")
-            assert callable(port.execution_permission) and host.permission({}), "Active host uses existing ledger permission without extra native flag"
+            await asyncio.wait_for(processed.wait(), timeout=2)
+            assert bridge.catalogs == 0 and bridge.runs >= 2
+            assert host.permission({"business_version": "2.2"})
+            host.ledger.pending.add("synthetic-unpublished-inbound")
+            assert not host.permission({"business_version": "2.2"})
+            assert port.calls == []
         finally:
             await host.stop()
         await host.run_once()
-        assert bridge.catalogs == 1
+        assert bridge.catalogs == 0
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("private_config", [False, True])
-def test_missing_private_config_or_key_reference_cannot_enable_host(tmp_path, monkeypatch, private_config):
-    monkeypatch.setenv("XUNJIA_COLLECTOR_VERSION", "2.2")
-    if private_config:
-        path = tmp_path / "private-config.json"
-        path.write_text(json.dumps({"owner_user_id": "synthetic-owner", "account_uid": "synthetic-account",
-            "workbench_id": "synthetic-workbench", "seal_key_file": "missing-seal.txt",
-            "sign_key_file": "missing-sign.txt"}))
-        monkeypatch.setenv("XUNJIA_COLLECTOR_CONFIG_FILE", str(path))
-    else:
-        monkeypatch.delenv("XUNJIA_COLLECTOR_CONFIG_FILE", raising=False)
+def test_reusable_receiver_core_has_no_retired_environment_factory():
+    assert not hasattr(XunjiaV22Host, "from_env")
+
+
+@pytest.mark.parametrize("field", ["owner_user_id", "account_uid", "workbench_id"])
+def test_receiver_state_cannot_be_rebound_to_another_identity(tmp_path, field):
     async def run():
-        with pytest.raises(ValueError, match="NOT_CONFIGURED"):
-            XunjiaV22Host.from_env(store=object(), bus=object(), loop=asyncio.get_running_loop(), box=object(),
-                data_dir=tmp_path, legacy_inbox_disabled=lambda: True)
+        host, _, _ = build(tmp_path, asyncio.get_running_loop())
+        binding = SimpleNamespace(**vars(host.binding))
+        setattr(binding, field, "another-synthetic-identity")
+        with pytest.raises(ValueError, match="collector_state_belongs_to_another_binding"):
+            XunjiaV22Host(store=host.store, bus=host.bus, loop=host.loop, binding=binding,
+                bridge=Bridge(binding), port=Port(binding), state_path=host.state_path,
+                legacy_inbox_disabled=lambda: True)
     asyncio.run(run())

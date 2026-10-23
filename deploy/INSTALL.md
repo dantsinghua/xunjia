@@ -1,11 +1,11 @@
 # Xunjia V2.2 独立离线应用包
 ## 本版边界
 本包包含现役 V2.2 询价核心、API、构建后的前端、A/B Chatflow 画布、采集端协议 wheel 与宿主接线资料、离线 Python 依赖及包内验收用例。完整 ARM 交付还包含独立 CPython 3.12 运行时；目标机不需要 Node、编译器或公网下载依赖。
-复用客户已有 OceanBase 和 Dify，仅需普通 App API Key，不捆绑或改造这两项服务。安装器不会执行客户数据库 DDL、创建数据库用户、修改 Nginx 或 njcb-all，也不会替运维自动创建服务。新包默认停用后台循环和真实发送。
+复用客户已有 OceanBase 和 Dify，仅需普通 App API Key，不捆绑或改造这两项服务。安装器不会执行客户数据库 DDL、创建数据库用户、修改 Nginx 或 njcb-all，也不会替运维自动创建服务。后台生命周期按模板开启；外发仍需选定企点账号、完成通道握手并获得业务授权。
 公开 Tool 继续免 Token；私有会话接口保留鉴权。部署成功不等于真实采集端、模型和对手外发链已验收。
 ## 目录结构
     PREFIX/                              默认 /home/xunjia
-      config/                            真实配置、transport.json、证书；更新/回滚不覆盖
+      config/                            机构连接 JSON、私有认证 YAML、证书；更新/回滚不覆盖
         xunjia.env                       600 或 400 权限
       state/                             原有业务状态；更新/回滚不清空
       current -> releases/<release-id>   单一原子切换点
@@ -30,9 +30,9 @@ x86_64 缺少 Python3.12 时会明确拒绝安装，不访问公网安装解释�
 config/xunjia.env.example、程序、依赖和建表 SQL 属于不可变内容，修改后仍会被完整性校验拒绝。
 打包程序只从经过空值检查的 xunjia.env.example 生成初始化文件，完全不读取本地已填好的 xunjia.env。
 字段格式为逐行 KEY='literal'，支持 UTF-8、注释和 export；不会执行 shell 命令、变量替换或命令替换。
-XUNJIA_WEB_DIST / XUNJIA_STATE_DIR 为空时，根据实际 PREFIX 派生，无须写死 /home/xunjia。
+标准安装入口将空的 XUNJIA_WEB_DIST / XUNJIA_STATE_DIR 按实际 PREFIX 派生。现场应明确记录 XUNJIA_STATE_DIR 和 XUNJIA_INSTITUTION_CONFIG；直接启动应用时必须显式提供状态目录，机构连接格式见 `config/institution-connection.example.json`。
 Dify 只使用客户已有 Chatflow URL 与 App API Key；不需要管理员权限。
-本版仍不支持任意 Workflow 输入输出协议，不把部署验收宣称为真实 Dify/OSS/IM 联调成功。
+本版仍不支持任意 Workflow 输入输出协议，不把部署验收宣称为真实 Dify、文件通道或原生 IM 联调成功。
 ## 预检、安装
 在解包根目录执行（默认只检查，不会更新）：
     bash deploy/00-preflight.sh
@@ -58,7 +58,7 @@ HTTP 接口：
 - /api/health/ready：检查 V2.2 的 15 张 `xj2_*` 表全部预期字段、类型、主键/唯一约束、13 个二级索引、登录配置及发布身份；不通过返回 503。
 - /api/health/automation：本轮未接入真实跨端能力验证，明确返回未验证，不把 configured 当成已验证。
 数据库诊断只返回安全错误码、缺失的表/列/索引名，不输出密码或底层异常原文。
-业务就绪并不证明真实 Dify、STS/OSS、企点收发通过；它们仍属于后续联调批次。
+业务就绪并不证明真实 Dify、正式文件通道、企点收发通过；它们仍须按对应版本单独验收。
 ## 回滚、中断恢复
     bash deploy/02-rollback.sh --apply
     bash deploy/03-recover.sh --apply
@@ -89,30 +89,35 @@ CREATE TABLE IF NOT EXISTS 不是旧表迁移，数据库升级另行审查。
 - `XUNJIA_DIFY_TIMEOUT_SECONDS` 为每次HTTP调用超时（模板90秒、范围1–300秒），`XUNJIA_DIFY_STAGE_BUDGET_SECONDS` 为包含工具/历史补取的阶段总预算（模板150秒、最大540秒）。实际HTTP超时还受当前剩余阶段预算限制；租约为阶段预算加30秒。部署时须显式沿用所选模型报告的HTTP/阶段预算，不能把默认值冒充已验证配置。
 - `config/aggregation-profile.measured.json` 提供本轮已测 qwen-max/shim 链路的四字段聚合配置：1463ms静默窗、4389ms累计上限；溯源及字节摘要位于 `config/aggregation-measurement.json`。应用的 `XUNJIA_AGGREGATION_PROFILE` 指向前者。首次安装带入配置目录；升级保留现场文件，运维可另存新测量配置并显式选择。该配置来自46对真实清洁实耗与固定合成到达实验；其他模型/运行环境按对应链路重新测量，累计上限不包含忙时排队。后台任务使用统一生命周期配置。
 - 标准部署默认 `XUNJIA_RUN_BACKGROUND=1`，启动入站、分析、派发和对账；有效授权指令通过用户暂停状态、有效期、水位和去重检查后派发，不另设真实发送开关。需要暂停时使用工作台现有暂停功能。
-- 构建包先执行 `scripts/build_collector_runtime.py --output <fresh-dir> --wheelhouse <local-build-wheels>`；主包构建增加 `--collector-wheel <fresh-dir>/xunjia_collector_runtime-2.2.0-py3-none-any.whl`。打包会核wheel代码与本版源码逐文件一致。
-- QTrade采集端需先部署本轮 `qtrade_agent/ossbox/xunjia_v22.py`、Bus/UI guard与app互斥接线，再在其**专用Python环境**离线安装包内 `collector-runtime/*.whl`。依赖cryptography与QTrade现有依赖一致；安装前检查 `pip show xunjia-collector-runtime`，安装后检查 `pip check` 和模块路径。不能在其他服务的共用Python环境中覆盖同名server/relay包。该wheel不含Web服务、现场密钥或运行数据。
-- QTrade以 `XUNJIA_COLLECTOR_VERSION=2.2` 和 `XUNJIA_COLLECTOR_CONFIG_FILE` 显式启用新宿主。私有JSON仅引用seal/sign key文件，有效授权指令默认交给绑定账号发送，不另设真实发送开关；旧XunjiaInbox必须互斥关闭，其他业务仍使用的旧CatalogPublisher保留。缺依赖不回退v1、不虚报V2能力。
-- V2通讯录路径为 `wb/{workbench}/out/xunjia/{account}/contacts.bin`；旧 `qidian/{account}/contacts.json` 属于共享历史协议，不能覆盖。
-- wheel真实安装及合成跨仓联合通过不等于完整QTrade安装EXE、真实OSS或IM已验收。上线前仍需在指定测试对手范围核真实native ACK；OSS accepted始终不算已发。
+- 构建共享包执行 `python3 scripts/build_collector_runtime.py --output <fresh-dir> --wheelhouse <local-build-wheels>`；主包使用 `deploy/build_offline.py` 的 `--collector-wheel <fresh-dir>/xunjia_collector_runtime-2.2.11-py3-none-any.whl`。输出目录必须为本次新目录，构建依赖来自指定本地 wheelhouse；打包会核 wheel 与本版15个共享源码逐文件一致。
+- QTrade必须部署匹配的完整冻结应用，在其**专用Python环境**离线安装精确版本 `xunjia_collector_runtime-2.2.11-py3-none-any.whl`；安装前检查 `pip show xunjia-collector-runtime`，安装后检查 `pip check` 和模块路径。不能在其他服务的共用Python环境中覆盖同名 server/relay 包。该 wheel 不含Web服务、现场密钥或运行数据。
+- 当前宿主由采集端自有 `CollectorReportingSettings` 自动装配唯一 `InstitutionCollectorHost`，有效授权指令经原生守卫交给绑定账号；不得以旧环境开关启用另一套 factory。参考闭包及精确文件 hash 见 `deploy/collector-qtrade-v22/README.md`、`deploy/collector-qtrade-v22/manifest.json`，其中 `deploy/collector-qtrade-v22/source/src/qtrade_agent/app.py`、`deploy/collector-qtrade-v22/source/src/qtrade_agent/ossbox/collector_settings.py`、`deploy/collector-qtrade-v22/source/src/qtrade_agent/ossbox/institution.py` 展示现役接线；该子集不能覆盖安装为完整应用。
+- 机构目录/组织及按工作台、channel、UID派生的账号队列 path 均内置；采集端和询价端不填写远端文件路径或两方向 URL。询价UI只选择企点，微信目录/消息交由南银采集消费。
+- wheel离线安装及合成跨仓通过不等于完整QTrade安装EXE、真实文件通道或IM已验收。上线前仍需在指定测试对手范围核真实native ACK；传输 accepted/pending 始终不算已发。
 
 ## 安装后统一现场检查
 见 `deploy/SITE-ACCEPTANCE.md` 与 `deploy/site_acceptance.py`。默认仅只读检查；`--probe-dify` 明确调用普通App API测试合成报价，不发送IM。完整放行条件未满足时返回2，不以HTTP200替代同版链路验收。
-# 页面配置采集端与企点号
+## 页面配置采集端与企点号
 
-普通安装保留 `XUNJIA_TRANSPORT_CONFIG` 与 `XUNJIA_MQ_CONNECTION_CONFIG` 为空时，
-服务复用现有 MQ 文件协调器，在实际 `XUNJIA_STATE_DIR` 下保存本人连接、目录账本与账号选择。
-登录工作台的“采集通道”页面，填写 `base_url` 和 `config.yaml` 内容，保存后刷新采集端目录，
-选择工作台及该台内企点号并读取对应通讯录。首次安装不预设账号、工作台或绑定记录。
-保存和测试连接只检查配置及 pending；目录刷新才取件，仍只有一个队列消费者。
+在现场 `xunjia.env` 明确设置实际 `XUNJIA_STATE_DIR` 和 `XUNJIA_INSTITUTION_CONFIG` 路径。
+按 `config/institution-connection.example.json` 创建私有连接 JSON（0600），正式地址为
+`https://its-relay.yingmi.cn`，不加旧服务前缀；配置 `client_cert_file`、`client_key_file` 路径，
+需要指定 CA 时再填 `ca_file`，不得关闭服务器证书链或主机名校验。
+`auth_file` 引用部署方另行提供的私有 YAML（0600），平铺 `key`、`sm4_key`，后者UTF-8编码恰为16字节；
+认证和证书路径相对连接 JSON 解析，凭据、证书与私钥不随离线包交付。
+客户端用机构凭据动态生成 HTTP 头 `accesstoken`，并内置 `/api/files/pending`、`upload`、`download`。
+签封密钥由机构凭据内部派生，不需要独立 seal/sign key。
 
-MQ 的 key/sm4_key 用于文件接口认证。已有采集端报文的 AES/HMAC 密钥仍需在受保护的
-共享 `xunjia.env` 中配置 `XUNJIA_SEAL_KEY`、`XUNJIA_SIGN_KEY`（base64，和采集端部署一致），
-不能拿 MQ 的 SM4 凭据代替。缺少这两项时页面允许保存 MQ 和测试 pending，
-会明确说明不能认证目录，不生成虚假可选账号。正式 runtime 只使用共享配置文件，
-不会继承外部 shell 临时导出的 `XUNJIA_*` 值。
-HTTPS为默认；现场明确使用内网HTTP网关时，在同一共享配置中设置 `XUNJIA_MQ_ALLOW_HTTP=1`。
-本机协调接口使用独立生成的受保护凭据，不复用远端MQ的key/sm4_key。
+登录“采集通道”页面，保存机构连接和认证配置，刷新目录后选择工作台及其企点号。
+首次安装不预设账号或工作台；保存、pending连接测试和目录刷新均不授权外发，连接成功也不代替原生 ACK。
+`applied` 只表示当前磁盘版本已由运行线程加载，不能当成真实账号业务验收。
+更换机构配置、账号或检测到原生换号会停发并归档旧执行投影，要求重新选择；历史消息、价量、回执、UNKNOWN及审计保留，不迁移或重发旧任务。
 
-显式设置两项现有外部连接配置路径的部署继续使用该既有协调器，不另启动托管取件器。
-切换账号保留暂停、版本和在途命令检查；目录刷新或配置保存不会授权发送。
+同机部署询价和南银时，两端连接 JSON 的 `directory_state_dir` 使用同一可读写绝对目录，
+共享 `<directory_state_dir>/<institution_id>/directory.db` 和同一 `.consume` 短锁来取机构目录/组织队列，
+避免两套私有缓存竞争破坏性下载。两端业务状态、账号执行及收发账本继续各自隔离；询价只消费企点，微信由南银消费。
+
+删除旧 `XUNJIA_TRANSPORT_CONFIG`、`XUNJIA_MQ_CONNECTION_CONFIG`（非空值启动会拒绝）、
+`XUNJIA_SEAL_KEY`、`XUNJIA_SIGN_KEY`、`XUNJIA_MQ_ALLOW_HTTP`，以及连接中的 `allow_http` 字段。
+旧采集启用开关和手工文件路径均已退役，不用于启用现役宿主或明文HTTP；正式 runtime 仍只读取共享配置文件，不继承外部 shell 的临时 `XUNJIA_*` 值。
 

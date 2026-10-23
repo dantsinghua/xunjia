@@ -117,89 +117,29 @@ def native_host_module():
     return module
 
 
-def test_unexpected_org_provider_failure_is_published_as_error_with_last_success_preserved(native_host_module,tmp_path):
-    import asyncio
-    from relay.protocol import Binding,Codec
-    from relay.collector_bridge import CollectorBridge
-    from relay.qtrade_native_port import QTradeNativePort
-    from server.receiver_ledger import ReceiverLedger
-    from tests.mq_fixtures import MQWire
-    from tests.cutover.file_gateway_fakes import NOW
-    pair=Binding('synthetic-org-host-owner','3000000001','synthetic-org-wb',b's'*32,b'h'*32)
-    now=[float(NOW)];wire=MQWire();channel=wire.transport(pair,tmp_path/'publications.db',role='collector',clock=lambda:now[0])
-    ledger=ReceiverLedger(tmp_path/'receiver.db',pair,clock=lambda:now[0])
-    account={'id':'synthetic-native','self_uid':pair.account_uid,'state':'running','channel':'qidian'}
-    store=SimpleNamespace(list_accounts=lambda **kwargs:[account],outbox_seq_bounds=lambda:(0,0))
-    bus=SimpleNamespace(supports_xunjia_v22_guard=True)
-    loop=asyncio.new_event_loop()
-    try:
-        port=QTradeNativePort(binding=pair,store=store,bus=bus,loop=loop,legacy_inbox_disabled=lambda:True)
-        bridge=CollectorBridge(ledger=ledger,adapters={'oss':channel},native_send=port.native_send,native_reconcile=port.native_reconcile)
-        old_org={'departments':[{'id':'desk','parent_id':'','name':'Synthetic desk','order':1}],
-                 'members':[{'uin':'peer-a','name':'Synthetic A','account':'a','department_id':'desk','order':1}]}
-        old_people=[{'uin':'peer-a','name':'Synthetic A'}]
-        provider=lambda a:{'contacts':old_people,'org':old_org,'org_state':'ready','org_updated_at':now[0]}
-        host=native_host_module.XunjiaV22Host(store=store,bus=bus,loop=loop,binding=pair,bridge=bridge,port=port,
-            state_path=tmp_path/'host.db',legacy_inbox_disabled=lambda:True,contacts_provider=provider)
-        host._publish_directory()
-        def contacts_packets():
-            return [env for _,_,blob in wire.uploaded for env in [Codec(pair,clock=lambda:now[0]).unpack(blob)] if env['kind']=='contacts']
-        first=contacts_packets()[-1]
-        with host._db() as db:first_pointer=db.execute("SELECT value FROM host_meta WHERE key='org_publication_id'").fetchone()[0]
-        now[0]+=60
-        def broken(_):raise RuntimeError('synthetic-private-provider-detail-not-for-output')
-        host.contacts_provider=broken;host._publish_directory()
-        observed=contacts_packets();assert len(observed)==2
-        error=observed[-1]['payload']
-        assert error['org_state']=='error' and error['org_error']=='ORG_PROVIDER_UNAVAILABLE'
-        assert error['org']==old_org and error['contacts']==old_people
-        assert error['org_updated_at']==first['payload']['org_updated_at']
-        assert 'synthetic-private-provider-detail' not in json.dumps(error)
-        with host._db() as db:
-            assert db.execute("SELECT value FROM host_meta WHERE key='org_publication_id'").fetchone()[0]==first_pointer
-        assert not hasattr(port,'allow_native_send')
-    finally:loop.close()
-
-
-def test_native_from_env_accepts_authorized_org_key_references_without_legacy_network_branch(native_host_module,tmp_path,monkeypatch):
-    import asyncio
-    from tests.institution_test_support import AUTH, BASE, YAML
-    from relay.gateway_paths import CONTRACT,InstitutionKeys,account_paths
-    auth=tmp_path/'auth.yaml';auth.write_text(YAML);auth.chmod(0o600)
-    cfg={'contract':CONTRACT,'workbench_id':'synthetic-wb','account_uid':'3000000001',
-         'org_password_file':'authorized-org.bin','org_password_format':'raw',
-         'file_gateway':{'base_url':BASE,'auth_file':'auth.yaml'}}
-    path=tmp_path/'collector.json';path.write_text(json.dumps(cfg));path.chmod(0o600)
-    monkeypatch.setenv('XUNJIA_COLLECTOR_VERSION','2.2');monkeypatch.setenv('XUNJIA_COLLECTOR_CONFIG_FILE',str(path))
-    loop=asyncio.new_event_loop()
-    try:
-        host=native_host_module.XunjiaV22Host.from_env(store=SimpleNamespace(),
-            bus=SimpleNamespace(supports_xunjia_v22_guard=True),loop=loop,box=None,data_dir=tmp_path/'runtime',
-            legacy_inbox_disabled=lambda:True,contacts_provider=lambda a:{'contacts':[]})
-        assert host.binding.account_uid==cfg['account_uid'] and not hasattr(host,'allow_native_send')
-        keys=InstitutionKeys.from_auth(AUTH);assert host.binding.owner_user_id==keys.owner_id
-        assert host.bridge.adapters['oss'].outbound.path==account_paths('synthetic-wb','3000000001')['uplink_path']
-    finally:loop.close()
+def test_current_bundle_has_no_environment_transport_factory(native_host_module):
+    """The installed collector owns configuration; no second factory may survive."""
+    assert not hasattr(native_host_module.XunjiaV22Host, 'from_env')
+    assert not hasattr(native_host_module.XunjiaV22Host, '_publish_directory')
+    manifest=json.loads((ROOT/'deploy/collector-qtrade-v22/manifest.json').read_text())
+    assert manifest['transport_contract']=='https-mtls-accesstoken'
+    for item in manifest['files']:
+        path=ROOT/'deploy/collector-qtrade-v22'/item['delivery_path']
+        assert hashlib.sha256(path.read_bytes()).hexdigest()==item['result_sha256']
 
 
 @pytest.mark.parametrize('field',['owner_user_id','seal_key_file','uplink_url','downlink_url'])
-def test_bundled_host_rejects_retired_queue_fields_without_opening_old_ledger(native_host_module,tmp_path,monkeypatch,field):
-    import asyncio
-    from relay.gateway_paths import CONTRACT
-    cfg={'contract':CONTRACT,'workbench_id':'synthetic-wb','account_uid':'3000000001',
-         'file_gateway':{'base_url':'https://synthetic.invalid','auth_file':'not-read.yaml'}}
-    if field.endswith('_url'):cfg['file_gateway'][field]='https://retired.invalid/queue'
-    else:cfg[field]='must-not-be-read'
-    path=tmp_path/'collector.json';path.write_text(json.dumps(cfg));path.chmod(0o600)
-    root=tmp_path/'runtime';legacy=root/'xunjia-v22';legacy.mkdir(parents=True)
-    marker=legacy/'unknown.evidence';marker.write_bytes(b'preserve-unknown')
-    monkeypatch.setenv('XUNJIA_COLLECTOR_VERSION','2.2')
-    monkeypatch.setenv('XUNJIA_COLLECTOR_CONFIG_FILE',str(path))
-    loop=asyncio.new_event_loop()
+def test_current_connection_rejects_retired_queue_fields_without_creating_binding(tmp_path,monkeypatch,field):
+    """Exercise the actual current configuration API, not a retired constructor."""
+    from tests.institution_test_support import build_harness,BASE,YAML,OWNER
+    from tests.tls_material import tls_config
+    s=build_harness(tmp_path,monkeypatch,configured=False,selected=False)
     try:
-        with pytest.raises(ValueError,match='invalid_institution_collector_configuration'):
-            native_host_module.XunjiaV22Host.from_env(store=SimpleNamespace(),bus=SimpleNamespace(),loop=loop,
-                box=None,data_dir=root,legacy_inbox_disabled=lambda:True)
-        assert marker.read_bytes()==b'preserve-unknown'
-        assert not (root/'institution-path-v1').exists()
-    finally:loop.close()
+        body={'base_url':BASE,'config_yaml':YAML,'expected_revision':'',**tls_config(),field:'retired-value'}
+        response=s['api'].put('/api/im/mq-config',json=body)
+        assert response.status_code==400, response.text
+        assert not s['runtime'].configured
+        assert s['repository'].binding_for(OWNER) is None
+        assert s['wire'].calls==[]
+        assert not s['connection'].exists()
+    finally:s['stack'].close()

@@ -1,8 +1,8 @@
 # 企点组织读取接线
 
-复用同账号既有 `adapters/qidian/org.py`，公共 `/accounts/{id}/contacts` 列表契约保持不变。仅 V2.2 私有 provider 返回 `contacts` 与组织状态，由既有文件中转发布。
+安琳，当前链路复用同账号的 `adapters/qidian/org.py`，由 `app.py` 的 `_xunjia_v22_contacts` 读取，再由 `InstitutionCollectorHost.metadata_once` 调用 `SnapshotPublisher.organization` 发布到机构组织路径。接收核心不再包含目录发布分支。
 
-受保护的当前 collector JSON 可增加以下**可选引用**，不把真实口令放入源码、报告或前端：
+组织凭据引用独立于文件通道认证，路径由 `_xunjia_org_config(uid)` 固定为采集端数据目录下的 `organization/<uid>.json`。示例仅说明格式：
 
 ```json
 {
@@ -12,8 +12,10 @@
 }
 ```
 
-`org_password_file` 相对路径按 collector JSON 所在目录解析，非 Windows 部署须为0600。`getPassword` 使用既有 `read_password_blob` 记录格式；`raw` 表示文件字节本身就是组织 SQLCipher 口令，不是登录密码。不得猜口令、读取其他账号或把缺口令当成真实空组织。
+相对口令文件路径以该组织配置所在目录解析；非 Windows 文件须为 0600。`getPassword` 使用已有 `read_password_blob` 记录格式；`raw` 表示文件字节本身是组织 SQLCipher 口令。源码、前端及报告不携带真实口令。读取范围始终绑定当前账号，缺凭据或读取错误不能冒充真实空组织。
 
-`org_state` 为 `ready/empty/unreported/error`。`org_updated_at` 是最后成功读取时间，源文件元数据未变时不抬新时间；读取错误保留上次已发布组织及其时间。host_meta 只保存 publication ID，正文沿用原持久发布记录。超出现有文件载荷限制时报 `ORG_DOCUMENT_TOO_LARGE`，不截断成员。
+reader 保留 `ready/empty/unreported/error` 语义与成功读取时间缓存；源文件未变时不抬高读取时间。只有成功得到完整 `departments/members` 的 `ready/empty` 才发布组织快照；真实 `empty` 才发布空组织。缺凭据、坏源、provider 异常及超出协议载荷限制时，不发布替代组织，不改变上次成功组织与发布记录时间，保留待同步请求，并记录固定错误码。好友快照走独立路径，组织失败不截断其已成功发布内容。
 
-交付包含精确 org reader 镜像、host 镜像以及 app.py 私有 provider 的定点补丁。`app.py` 不整文件覆盖，必须核前像SHA与实际源一致再应用，保留BOM/换行及其他未提交修改。现役进程由负责运行切换的任务统一启用；代码解析或合成用例通过不代表真实组织解密已验证。
+`source/tests/acceptance/test_current_org_directory.py` 的五例用临时 SQLite、真实当前 provider 与真实签名 Codec 验证上述链路及源文件原字节不变。仓库开发测试另保留组织过大时的旧组织和好友保留断言。它们是离线合成验证，真实加密源、账号、网络及现场权限仍需单独验收。
+
+本目录提供完整 `app.py`、`institution.py`、reader 和接收核心的精确参考文件及 manifest，不再交付 app 补丁，不自动应用此子集。实际部署使用完整采集应用及匹配的共享 runtime，保留既有 dirty、BOM/换行和所有现场数据。

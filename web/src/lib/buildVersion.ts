@@ -28,11 +28,11 @@ export function startBuildVersionWatch(currentVersion: string): () => void {
     button.setAttribute('aria-describedby', note.id)
     button.style.cssText = 'padding:8px 16px;min-height:40px;border:0;border-radius:8px;background:#b01c24;color:white;font:inherit;cursor:pointer;flex-shrink:0'
     button.addEventListener('click', () => {
-      const yaml = document.querySelector<HTMLTextAreaElement>('textarea[name="mq-config-yaml"]')
-      if (yaml && yaml.value.length > 0) {
-        note.textContent = '文件中转 config.yaml 仍有未保存内容，已阻止刷新。请先保存或自行保留草稿，再清空输入后更新。'
+      const unsaved = document.querySelector<HTMLElement>('[data-xunjia-unsaved="true"]')
+      if (unsaved) {
+        note.textContent = '连接配置仍有未保存内容，已阻止刷新。请先保存或自行保留草稿，再更新。'
         note.setAttribute('role', 'alert')
-        yaml.focus()
+        unsaved.querySelector<HTMLElement>('input,textarea,button')?.focus()
         return
       }
       window.location.reload()

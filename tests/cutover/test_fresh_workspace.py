@@ -1,4 +1,4 @@
-"""Destructive switch contract: real DB/routes/codecs, synthetic vendor only."""
+"""Workspace retirement: real DB/routes/codecs, synthetic vendor only."""
 import json
 from pathlib import Path
 import pytest
@@ -7,6 +7,7 @@ from tests.cutover.test_im_catalog_selection import seed_business, choose
 from server.receiver_ledger import ReceiverLedger
 from relay.gateway_paths import CONTRACT
 from relay.protocol import ProtocolError, digest
+from server.negotiation.prices import InvalidFact
 
 
 def seed_command(s, state='UNKNOWN'):
@@ -25,12 +26,25 @@ def counts(s):
 
 
 @pytest.mark.parametrize('state',['QUEUED','PENDING','UNKNOWN','FAILED','CANCELLED','SENT'])
-def test_switch_erases_all_old_business_states_instead_of_migrating(selection,state):
-    s=selection;seed_command(s,state)
+def test_switch_retains_old_business_states_and_isolates_new_context(selection,state):
+    s=selection;_,mid,tid=seed_command(s,state);before=counts(s)
+    with s['repository'].db.transaction(write=False) as tx:
+        command=dict(tx.execute('SELECT * FROM xj2_command WHERE command_id=?',('old-command',)).fetchone())
+        messages=[dict(r) for r in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(tid,)).fetchall()]
     old=s['repository'].binding_for(OWNER)
     result=choose(s).json()['data']
     assert result['reset'] is True and result['binding']['context_id']!=old['context_id']
-    assert all(v==0 for v in counts(s).values())
+    assert counts(s)==before
+    with s['repository'].db.transaction(write=False) as tx:
+        retained=dict(tx.execute('SELECT * FROM xj2_command WHERE command_id=?',('old-command',)).fetchone())
+        assert retained['state']==('CANCELLED' if state=='QUEUED' else state)
+        for key in ('content_hash','body_json','basis_json','member_id','thread_id'):
+            assert retained[key]==command[key]
+        if state!='QUEUED':assert retained['result_json']==command['result_json']
+        assert [dict(r) for r in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(tid,)).fetchall()]==messages
+    with pytest.raises(InvalidFact,match='selected collector/account'):
+        s['repository'].context(OWNER,mid)
+    assert s['app'].state.inquiry.commands_core.claim(OWNER,'old-command') is None
     assert s['repository'].binding_for(OWNER)['account_uid']=='account-c'
     assert not s['repository'].binding_for(OWNER)['bot_enabled']
     assert s['api'].get('/api/im/commands/unknown').json()['data']==[]
@@ -48,12 +62,14 @@ def test_same_pair_save_is_not_a_destructive_reset_even_with_unknown(selection):
 
 
 def test_old_unmarked_same_account_is_reset_not_migrated(selection):
-    s=selection;seed_command(s)
+    s=selection;_,mid,_=seed_command(s);before=counts(s)
     with s['repository'].write(OWNER) as tx:
         tx.execute('UPDATE xj2_binding SET config_json=? WHERE owner_id=?',('{}',OWNER))
     result=choose(s,'wb-a','account-a')
     assert result.status_code==200,result.text
-    assert result.json()['data']['reset'] and all(v==0 for v in counts(s).values())
+    assert result.json()['data']['reset'] and counts(s)==before
+    assert s['repository'].context(OWNER,mid)==[]
+    assert s['app'].state.inquiry.commands_core.claim(OWNER,'old-command') is None
 
 
 def test_context_handshake_roundtrip_and_restart_recovery(selection,tmp_path):
@@ -75,15 +91,15 @@ def test_context_handshake_roundtrip_and_restart_recovery(selection,tmp_path):
     assert counts(s)['xj2_command']==0
 
 
-def test_replacement_config_clears_binding_and_business_without_migration(selection):
-    s=selection;seed_command(s)
+def test_replacement_config_clears_binding_and_retains_isolated_business(selection):
+    s=selection;seed_command(s);before=counts(s)
     status=s['api'].get('/api/im/mq-config').json()['data']
     response=s['api'].put('/api/im/mq-config',json={'base_url':'https://replacement.invalid',
         'config_yaml':'','expected_revision':status['revision']})
     assert response.status_code==200,response.text
     assert response.json()['data']['reset']
     assert s['repository'].binding_for(OWNER) is None
-    assert all(v==0 for v in counts(s).values())
+    assert counts(s)==before
     assert s['app'].state.transport.adapters=={}
     assert json.loads(s['connection'].read_text())['base_url']=='https://replacement.invalid'
     assert s['api'].get('/api/im/catalog').json()['data']['selected'] is None
@@ -129,12 +145,17 @@ def test_stale_browser_cannot_submit_to_reselected_account(selection):
     assert response.json()['submitted'] is False and counts(s)['xj2_command']==0
 
 
-def test_late_receipt_of_deleted_command_does_not_recreate_business(selection):
-    s=selection;seed_command(s);assert choose(s).status_code==200
+def test_wrong_account_late_receipt_does_not_mutate_retained_unknown(selection):
+    s=selection;seed_command(s);before=counts(s);assert choose(s).status_code==200
+    with s['repository'].db.transaction(write=False) as tx:
+        retained=dict(tx.execute('SELECT * FROM xj2_command WHERE command_id=?',('old-command',)).fetchone())
     adapter=s['runtime'].current_adapter(OWNER)
-    outcome=s['app'].state.inbox.apply(adapter.binding,{'kind':'receipt','owner_user_id':OWNER,
-        'account_uid':'account-c','workbench_id':'wb-b','payload':{'command_id':'old-command'}})
-    assert outcome is None and all(v==0 for v in counts(s).values())
+    with pytest.raises(InvalidFact,match='another collector thread'):
+        s['app'].state.inbox.apply(adapter.binding,{'kind':'receipt','owner_user_id':OWNER,
+            'account_uid':'account-c','workbench_id':'wb-b','payload':{'command_id':'old-command'}})
+    assert counts(s)==before
+    with s['repository'].db.transaction(write=False) as tx:
+        assert dict(tx.execute('SELECT * FROM xj2_command WHERE command_id=?',('old-command',)).fetchone())==retained
 
 
 def test_receiver_context_retires_unknown_content_and_rejects_old_native_send(selection,tmp_path):
@@ -149,12 +170,16 @@ def test_receiver_context_retires_unknown_content_and_rejects_old_native_send(se
     ledger.activate_context('old-context',version)
     first=ledger.execute(base,lambda c:{'status':'unknown','evidence':'synthetic-unknown'})
     assert first['status']=='unknown'
+    with ledger._db() as db:
+        retained=dict(db.execute('SELECT * FROM rx_command WHERE command_id=?',('old-cmd',)).fetchone())
     ledger.activate_context('new-context',version+1)
     with ledger._db() as db:
-        assert db.execute('SELECT COUNT(*) FROM rx_command').fetchone()[0]==0
-        assert db.execute('SELECT COUNT(*) FROM rx_tombstone').fetchone()[0]==1
+        assert dict(db.execute('SELECT * FROM rx_command WHERE command_id=?',('old-cmd',)).fetchone())==retained
     calls=[]
-    assert ledger.execute(base,lambda c:calls.append(c))['status']=='cancelled'
+    assert ledger.execute(base,lambda c:calls.append(c))==first
+    assert calls==[]
+    with ledger._db() as db:
+        assert dict(db.execute('SELECT * FROM rx_command WHERE command_id=?',('old-cmd',)).fetchone())==retained
     new={**base,'command_id':'new-cmd','context_id':'new-context'}
     result=ledger.execute(new,lambda c:(calls.append(c) or {'status':'sent','evidence':'synthetic-native','native_id':'native-new'}))
     assert result['status']=='sent' and len(calls)==1

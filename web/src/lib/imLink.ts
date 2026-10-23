@@ -211,7 +211,13 @@ export const imBoundAccount = computed<BoundAccount | null>(() => {
 watch(imBoundAccount, value => setChannelContext(value?.context_id || ''), { immediate: true, flush: 'sync' })
 export function setImBinding(raw: unknown, accountUid: string | null): void {
   const b = raw && typeof raw === 'object' ? raw as Record<string,unknown> : {}
-  imBinding.value = accountUid ? { context_id:String(b.context_id || ''), account_uid:accountUid, workbench_id:String(b.workbench_id || ''), version:typeof b.version === 'number' ? b.version : undefined } : null
+  const next = accountUid ? { context_id:String(b.context_id || ''), account_uid:accountUid, workbench_id:String(b.workbench_id || ''), version:typeof b.version === 'number' ? b.version : undefined } : null
+  if (bindingIdentity(next) !== bindingIdentity()) {
+    linkGeneration++
+    imLinks.value = []
+    applyLinkBook(null)
+  }
+  imBinding.value = next
 }
 export const imCurrent = computed(() => imLinks.value.find(x => x.active && x.tested) || null)
 export const imReady = computed(() => imLinks.value.filter(x => x.tested))
@@ -269,8 +275,7 @@ export async function activateIm(id: string) {
   applyLinkBook(imLinks.value.find(x => x.active && x.tested))
 }
 
-function bindingIdentity(): string {
-  const selected = imBoundAccount.value
+function bindingIdentity(selected: BoundAccount | null = imBoundAccount.value): string {
   return JSON.stringify([selected?.workbench_id, selected?.account_uid, selected?.version, selected?.context_id])
 }
 

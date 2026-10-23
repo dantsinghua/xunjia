@@ -11,13 +11,17 @@ class Inbox:
     def __init__(self,service,transport):self.service,self.transport=service,transport
     def apply(self,binding,envelope):
         store=self.service.store;owner=binding.owner_user_id
-        current=store.binding_for(owner)
-        if not current or any(current[k]!=getattr(binding,k) or envelope.get(k)!=getattr(binding,k) for k in ('account_uid','workbench_id')):
-            raise PermissionError('Collector/account binding does not match V2 business state')
+        if getattr(binding,'channel','qidian')!='qidian' or envelope.get('channel','qidian')!='qidian':raise PermissionError('V2 negotiation only accepts Qidian accounts')
         if envelope.get('owner_user_id')!=owner:raise PermissionError('Wrong event owner')
+        if any(envelope.get(k)!=getattr(binding,k) for k in ('account_uid','workbench_id')):
+            raise PermissionError('Input envelope differs from authenticated collector/account')
         payload=envelope.get('payload')
         if not isinstance(payload,dict):raise InvalidFact('Invalid input envelope')
         kind=envelope.get('kind')
+        current=store.binding_for(owner)
+        selected=bool(current and all(current[k]==getattr(binding,k) for k in ('account_uid','workbench_id')))
+        if not selected and kind!='receipt':
+            raise PermissionError('Collector/account binding does not match V2 business state')
         if kind in ('receipt','session_reset_ack'):
             table,key=('xj2_command','command_id') if kind=='receipt' else ('xj2_session_reset','reset_id')
             value=payload.get(key)
@@ -28,10 +32,12 @@ class Inbox:
         if kind=='receipt':
             row=self.service.commands_core.get(owner,payload.get('command_id'))
             with store.db.transaction(write=False) as tx:thread=store._thread(tx,owner,row['thread_id'])
-            if thread.get('workbench_id')!=binding.workbench_id:raise InvalidFact('Receipt belongs to another collector thread')
+            if thread.get('workbench_id')!=binding.workbench_id or thread['account_uid']!=binding.account_uid:raise InvalidFact('Receipt belongs to another collector thread')
             for key,value in (('command_id',row['command_id']),('content_hash',row['content_hash']),('peer_id',thread['peer_uid']),('account_uid',thread['account_uid'])):
                 if payload.get(key)!=value or envelope.get(key)!=value:raise InvalidFact('Receipt identity/content mismatch')
-            return self.service.commands_core.receipt(owner,row['command_id'],account_uid=thread['account_uid'],peer_uid=thread['peer_uid'],content_hash=row['content_hash'],status=str(payload.get('status','')).upper(),evidence=payload.get('evidence'),native_id=payload.get('native_id'),occurred_at=payload.get('executed_at'))
+            status=str(payload.get('status','')).upper()
+            if status in ('PENDING','ACCEPTED'):return None
+            return self.service.commands_core.receipt(owner,row['command_id'],account_uid=thread['account_uid'],peer_uid=thread['peer_uid'],content_hash=row['content_hash'],status=status,evidence=payload.get('evidence'),native_id=payload.get('native_id'),occurred_at=payload.get('executed_at'))
         if kind in ('contacts','catalog'):return None
         if kind!='event':raise InvalidFact('Unsupported business input envelope')
         peer=payload.get('peer_id')
@@ -80,6 +86,7 @@ class Inbox:
         adapters=list({id(a):a for a in getattr(self.transport,'adapters',{}).values()}.values())
         done=0
         for adapter in adapters:
+            if getattr(adapter.binding,'channel','qidian')!='qidian':continue
             owner=adapter.binding.owner_user_id
             try:items=adapter.poll(limit=50)
             except Exception as exc:
@@ -161,6 +168,8 @@ class Dispatcher:
             pending=tx.execute("SELECT c.*,g.owner_id FROM xj2_command c JOIN xj2_group g ON g.group_id=c.group_id JOIN xj2_thread t ON t.thread_id=c.thread_id JOIN xj2_binding b ON b.owner_id=t.owner_id AND b.account_uid=t.account_uid AND b.workbench_id=t.workbench_id WHERE c.state IN ('PENDING','UNKNOWN') AND NOT EXISTS (SELECT 1 FROM xj2_session_reset r WHERE r.owner_id=g.owner_id AND r.account_uid=t.account_uid AND r.workbench_id=t.workbench_id AND r.state IN ('local_applied','complete') AND r.account_epoch>c.account_epoch) ORDER BY c.created_at LIMIT 20").fetchall()
         for row in pending:
             owner=row['owner_id'];cid=row['command_id']
+            with self.store.db.transaction(write=False) as tx:
+                if self.store.group_is_retired(tx,owner,row['group_id']):continue
             if self._last_check.get(cid,0)>self.store.clock():continue
             self._last_check[cid]=self.store.clock()+5
             wire=self._wire(owner,row)

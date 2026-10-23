@@ -228,6 +228,8 @@ def test_inherited_public_result_is_scoped_to_owner_thread_and_snapshot_member(d
     assert payload.get('public_tool_results'), 'An actual result is needed to make the nonleak check meaningful'
     store = case.app.state.repository
     owner = 'different-synthetic-owner' if scope == 'owner' else OWNER
+    if scope=='owner':
+        store.bind_account(owner,'other-account','different-synthetic-workbench',transport='oss')
     if scope == 'thread':
         member, thread = store.add_member(owner, case.peer['group_id'], account_uid='synthetic-account', peer_uid='peer-b')
     else:

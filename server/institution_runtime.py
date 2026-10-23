@@ -35,14 +35,18 @@ class InstitutionRuntime:
         if self.path.stat().st_mode & 0o077 or self.path.stat().st_size>65536:raise ValueError("机构连接配置权限或大小无效")
         raw=self.path.read_bytes();config=resolve_tls_files(json.loads(raw),self.path.parent)
         if not isinstance(config,dict) or config.get("contract")!=CONTRACT:raise ValueError("机构文件通道合同不匹配")
-        if set(config)-{"contract","base_url","auth_file","hostname","addresses",*TLS_FIELDS}:raise ValueError("机构配置含不允许字段；路径由系统内置")
+        if set(config)-{"contract","base_url","auth_file","hostname","addresses","directory_state_dir",*TLS_FIELDS}:raise ValueError("机构配置含不允许字段；路径由系统内置")
         auth=GatewayAuth.from_file(protected_auth_path(self.path,config["auth_file"]))
         keys=InstitutionKeys.from_auth(auth)
         if self.keys is not None and keys.institution_id!=self.keys.institution_id:raise ValueError("机构凭据已变化，请保存配置清空旧业务后重新选择账号")
         connection_client(config,auth,path=DIRECTORY_PATH)
         self.config,self.auth,self.keys=config,auth,keys
         self.state=self.root/keys.institution_id;self.state.mkdir(parents=True,exist_ok=True,mode=0o700)
-        self.directory=InstitutionDirectory(self.state/"directory.db",keys,clock=self.clock)
+        if 'directory_state_dir' in config and (not isinstance(config['directory_state_dir'],str) or not config['directory_state_dir'].strip()):
+            raise ValueError('共享机构目录状态路径无效')
+        directory_root=Path(config['directory_state_dir']).expanduser() if config.get('directory_state_dir') else self.root
+        if not directory_root.is_absolute():directory_root=self.path.parent/directory_root
+        self.directory=InstitutionDirectory(directory_root/keys.institution_id/"directory.db",keys,clock=self.clock)
         self.archive=InstitutionArchive(self.state/"archive",clock=self.clock)
         self.applied_revision=hashlib.sha256(raw).hexdigest()
 
@@ -53,6 +57,8 @@ class InstitutionRuntime:
     def availability(self, wb, uid):
         """A missing heartbeat cannot establish that the native app logged out."""
         row=self.directory.account(wb,uid) if self.directory else None
+        if row is not None and row.get('channel')!='qidian':
+            return {"ready":False,"code":"COLLECTOR_CHANNEL_UNSUPPORTED","hint":"询价工作台只允许选择企点账号"}
         if row is None:
             return {"ready":False,"code":"COLLECTOR_NOT_DISCOVERED","hint":"尚未收到当前企点号的采集目录"}
         if row.get("state")=="conflict":
@@ -69,10 +75,12 @@ class InstitutionRuntime:
 
     def adapter(self, owner, wb, uid, *, preferences=None):
         with self._lock:
+            account=self.directory.account(wb,uid)
+            if account is not None and account.get('channel')!='qidian':raise ValueError('询价工作台只允许选择企点账号')
             preferences=self.repository.preferences(owner) if preferences is None else preferences
             context=preferences.get("context_id")
             key=(owner,uid,"oss");old=self.transport.adapters.get(key)
-            if isinstance(old,InstitutionTransport) and old.binding.workbench_id==wb and old.context_id==context:return old
+            if isinstance(old,InstitutionTransport) and getattr(old.binding,'channel','qidian')=='qidian' and old.binding.workbench_id==wb and old.context_id==context:return old
             binding=self.keys.binding(wb,uid,owner);paths=account_paths(wb,uid)
             ident=hashlib.sha256(json.dumps([owner,wb,uid,context]).encode()).hexdigest()
             adapter=InstitutionTransport(binding,self.client(paths["uplink_path"]),self.client(paths["downlink_path"]),self.state/"accounts"/(ident+".db"),role="service",institution_owner=self.keys.owner_id,clock=self.clock)
@@ -91,7 +99,7 @@ class InstitutionRuntime:
         prefs=self.repository.preferences(owner)
         if prefs.get("relay_contract")!=CONTRACT or prefs.get("relay_institution_id")!=self.keys.institution_id:return None
         adapter=self.transport.adapters.get((owner,binding["account_uid"],"oss"))
-        if not isinstance(adapter,InstitutionTransport) or adapter.binding.workbench_id!=binding["workbench_id"]:return None
+        if not isinstance(adapter,InstitutionTransport) or getattr(adapter.binding,'channel','qidian')!='qidian' or adapter.binding.workbench_id!=binding["workbench_id"]:return None
         if adapter.context_id!=prefs.get("context_id"):return None
         return adapter
 
@@ -113,15 +121,9 @@ class InstitutionRuntime:
                     "context_version":max(int(self.clock()*1000000),adapter.context_version+1)})
         except Exception as exc:
             self.errors["retired_context"]=getattr(exc,"code",type(exc).__name__)
-        finally:
-            # This journal is private to one workspace/context. Do not keep an
-            # executable or uncertain old queue after an authorized destructive reset.
-            with adapter.store.db() as db:
-                names=[r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-                for name in names:
-                    if not name.replace('_','').isalnum():continue
-                    columns={r[1] for r in db.execute('PRAGMA table_info('+name+')')}
-                    if 'scope' in columns:db.execute('DELETE FROM '+name+' WHERE scope=?',(adapter.store.scope,))
+        # Retained journals are evidence, including ambiguous upload/download
+        # outcomes. Detaching the adapter and context guard retire execution;
+        # neither scope contents nor UNKNOWN may be erased as cleanup.
 
     def accept_manifest(self, owner, adapter, data):
         payload=data["payload"]
@@ -159,7 +161,7 @@ class InstitutionRuntime:
         """A signed fresh catalog proves a physical slot now uses another login.
 
         Expiry, missing heartbeats and an empty catalog are NOT account changes.
-        Do not retarget any old inquiry: clear it and require selecting the new UID.
+        Archive the old execution scope and require explicitly selecting the new UID.
         """
         from .fresh_state import clear_workspace
         books={row["workbench_id"]:row for row in self.directory.catalog()["workbenches"]}
@@ -169,17 +171,18 @@ class InstitutionRuntime:
             prefs=json.loads(binding['config_json']);slot=prefs.get('collector_account_id')
             book=books.get(binding['workbench_id'])
             if not slot or not book or book.get('stale'):continue
-            rows=[row for row in book['accounts'] if row['account_id']==slot and row.get('available')]
+            rows=[row for row in book['accounts'] if row.get('channel')=='qidian' and row['account_id']==slot and row.get('available')]
             if len(rows)!=1 or rows[0]['account_uid']==binding['account_uid']:continue
             owner=binding['owner_id'];old_adapter=self.current_adapter(owner)
             with self.repository.write(owner) as tx:
                 current=tx.execute("SELECT * FROM xj2_binding WHERE owner_id=?",(owner,)).fetchone()
                 if not current or any(current[key]!=binding[key] for key in ('account_uid','workbench_id','version','config_json')):continue
-                removed=clear_workspace(tx,owner)
+                retained=clear_workspace(tx,owner,clock=self.repository.clock)
                 tx.execute("DELETE FROM xj2_binding WHERE owner_id=?",(owner,))
                 tx.execute("UPDATE xj2_owner SET projection_version=projection_version+1 WHERE owner_id=?",(owner,))
                 self.repository.audit(tx,owner,'native_account_changed',rows[0]['account_uid'],
-                    {'workbench_id':binding['workbench_id'],'collector_account_id':slot,'removed_counts':removed})
+                    {'workbench_id':binding['workbench_id'],'previous_account_uid':binding['account_uid'],
+                     'collector_account_id':slot,'retained_counts':retained})
             self.transport.adapters={key:value for key,value in self.transport.adapters.items() if key[0]!=owner}
             if old_adapter is not None:self.retire_context(old_adapter,notify=False)
 
@@ -192,13 +195,16 @@ class InstitutionRuntime:
             cleaned=self.archive.prune();self._last_archive_prune=self.clock()-(3600 if cleaned.get("more_pending") else 0)
         # Institution lock covers consumption; per-account business adapters retain
         # their independent source journals and are consumed by the existing Inbox.
-        for path in (DIRECTORY_PATH,ORGANIZATION_PATH):
-            try:self.directory.consume(self.client(path),limit=100);self.errors.pop(path,None)
-            except Exception as exc:self.errors[path]=getattr(exc,"code",type(exc).__name__)
+        try:
+            with account_lock(str(self.directory.path)+'.consume',self.keys.binding('directory','directory'),blocking=False):
+                for path in (DIRECTORY_PATH,ORGANIZATION_PATH):
+                    try:self.directory.consume(self.client(path),limit=100);self.errors.pop(path,None)
+                    except Exception as exc:self.errors[path]=getattr(exc,"code",type(exc).__name__)
+        except BlockingIOError:pass # Another application owns this shared intake round.
         self._reset_changed_native_accounts()
         adapters=list(self.transport.adapters.values())
         for adapter in adapters:
-            if not isinstance(adapter,InstitutionTransport):continue
+            if not isinstance(adapter,InstitutionTransport) or getattr(adapter.binding,'channel','qidian')!='qidian':continue
             self.request_context(adapter)
             wb,uid=adapter.binding.workbench_id,adapter.binding.account_uid;pair=(wb,uid)
             if self.clock()-self._last_friends.get(pair,0)>=10:
@@ -231,7 +237,10 @@ class InstitutionRuntime:
 
     def settings_status(self, owner):
         binding=self.repository.binding_for(owner) or {}
-        return {**{k:self.config[k] for k in TLS_FIELDS if self.config and k in self.config},"configured":self.configured,"backend":"file_gateway","contract":CONTRACT,"base_url":self.config.get("base_url","") if self.config else "","credentials_set":self.auth is not None,"background_enabled":self.background_enabled,"revision":hashlib.sha256(self.path.read_bytes()).hexdigest() if self.path.is_file() else "","applied":bool(self.configured and self._thread and self._thread.is_alive()),"account_uid":binding.get("account_uid"),"workbench_id":binding.get("workbench_id"),"note":"配置已保存，但运行加载失败；请检查状态目录并重新保存重试。" if self.errors.get("configuration") else "机构目录共享；路径由系统内置，当前工作台一次选择一个企点号。"}
+        revision=hashlib.sha256(self.path.read_bytes()).hexdigest() if self.path.is_file() else ""
+        applied=bool(self.configured and self._thread and self._thread.is_alive()
+            and revision==self.applied_revision and not self.errors.get("configuration"))
+        return {**{k:self.config[k] for k in TLS_FIELDS if self.config and k in self.config},"configured":self.configured,"backend":"file_gateway","contract":CONTRACT,"base_url":self.config.get("base_url","") if self.config else "","credentials_set":self.auth is not None,"background_enabled":self.background_enabled,"revision":revision,"applied":applied,"account_uid":binding.get("account_uid"),"workbench_id":binding.get("workbench_id"),"note":"配置已保存，但运行加载失败；请检查状态目录并重新保存重试。" if self.errors.get("configuration") else "机构目录共享；路径由系统内置，当前工作台一次选择一个企点号。"}
 
     def _candidate(self, body):
         if not isinstance(body,dict) or set(body)-{"base_url","config_yaml","expected_revision",*TLS_FIELDS}:raise ValueError("只允许服务地址和机构凭据，不允许编辑路径")
@@ -312,7 +321,7 @@ class InstitutionRuntime:
                 with self.repository.db.transaction() as tx:
                     owners=[r['owner_id'] for r in tx.execute('SELECT owner_id FROM xj2_binding').fetchall()]
                     for who in owners:
-                        removed[who]=clear_workspace(tx,who)
+                        removed[who]=clear_workspace(tx,who,clock=self.repository.clock)
                         tx.execute('DELETE FROM xj2_binding WHERE owner_id=?',(who,))
                         tx.execute('UPDATE xj2_owner SET projection_version=projection_version+1 WHERE owner_id=?',(who,))
                     atomic_write(self.path,candidate_path.read_bytes())
@@ -320,7 +329,7 @@ class InstitutionRuntime:
                 for adapter in previous_adapters.values():
                     if isinstance(adapter,InstitutionTransport):
                         try:self.retire_context(adapter)
-                        except Exception:self.errors["retired_context"]="OLD_LOCAL_JOURNAL_CLEANUP_FAILED"
+                        except Exception:self.errors["retired_context"]="OLD_CONTEXT_RETIREMENT_FAILED"
                 self.transport.adapters={}
                 self.config,self.auth,self.keys=candidate.config,candidate.auth,candidate.keys
                 self.state,self.directory,self.archive=candidate.state,candidate.directory,candidate.archive
@@ -335,12 +344,12 @@ class InstitutionRuntime:
                     raise ValueError("文件中转配置保存失败，原配置与业务未改变") from None
                 self.transport.adapters={}
                 self.errors['configuration']='INSTITUTION_CONFIG_LOAD_FAILED'
-                raise ValueError("新配置已保存且旧业务已清空，运行加载失败，请重新读取配置后重试") from None
+                raise ValueError("新配置已保存且旧工作区已归档，运行加载失败，请重新读取配置后重试") from None
             finally:
                 self.changing=False
                 candidate_path.unlink(missing_ok=True)
         result=self._apply_saved_settings(owner)
-        return {**result,"reset":bool(removed),"note":"已更新配置并清空旧业务，请选择新工作台与企点号；不会迁移或重发旧任务。" if removed else result.get("note","")}
+        return {**result,"reset":bool(removed),"note":"已更新配置并归档旧工作区，请选择新工作台与企点号；历史事实和待核对记录保留，不会重发旧任务。" if removed else result.get("note","")}
 
 class InstitutionSettings:
     def __init__(self, runtime):self.runtime=runtime

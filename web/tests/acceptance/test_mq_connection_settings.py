@@ -1,13 +1,8 @@
-"""Two-field files MQ contract replacing the user-retired five-field OSS form.
-
-The original file is archived in this batch's retired-tests directory.
-"""
+"""Public connection/TLS fields reuse server-owned auth; no browser credential editor."""
 import json
 from urllib.parse import urlsplit
 import pytest
 from playwright.sync_api import expect
-
-YAML = 'auth:\n  key: synthetic-browser-mq-key\n  sm4_key: 0123456789abcdef\n'
 
 
 @pytest.fixture
@@ -47,31 +42,31 @@ def writes(mq):return [call for call in mq[3] if call[0]!='GET']
 
 
 def test_connection_and_tls_fields_no_sts_bucket_or_secret_readback(mq):
-    page=open_form(mq);expect(page.get_by_test_id('mq-config').locator('input,textarea,select')).to_have_count(5)
-    expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
+    page=open_form(mq);expect(page.get_by_test_id('mq-config').locator('input,textarea,select')).to_have_count(4)
+    expect(page.locator('[name=mq-config-yaml]')).to_have_count(0)
     for name in ('oss-sts-url','oss-endpoint','oss-bucket','oss-auth-key','oss-sm4-key'):
         assert page.locator('[name='+name+']').count()==0
 
 
-def test_save_two_fields_revision_clears_yaml_without_other_operations(mq):
-    page=open_form(mq);page.locator('[name=mq-config-yaml]').fill(YAML)
+def test_save_public_fields_revision_without_credentials_or_other_operations(mq):
+    page=open_form(mq)
     page.locator('[name=mq-base-url]').fill('https://new-mq.synthetic.invalid')
-    page.get_by_test_id('mq-save').click();expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
+    page.get_by_test_id('mq-save').click();expect(page.locator('[name=mq-config-yaml]')).to_have_count(0)
     values=writes(mq);assert len(values)==1 and values[0][:2]==('PUT','/api/im/mq-config')
-    assert set(values[0][2])=={'base_url','config_yaml','expected_revision'}
-    assert values[0][2]['config_yaml']==YAML and values[0][2]['expected_revision']=='synthetic-revision-one'
+    assert set(values[0][2])=={'base_url','expected_revision'}
+    assert values[0][2]['expected_revision']=='synthetic-revision-one'
     assert 'synthetic-browser-mq-key' not in page.evaluate('JSON.stringify({local:{...localStorage},session:{...sessionStorage}})')
 
 
-def test_blank_yaml_retains_and_public_status_survives_refresh(mq):
+def test_server_credentials_retained_and_public_status_survives_refresh(mq):
     page=open_form(mq);page.get_by_test_id('mq-save').click();expect(page.get_by_test_id('mq-save')).to_be_enabled()
     page.reload();expect(page.get_by_test_id('mq-config')).to_be_visible()
     expect(page.locator('[name=mq-base-url]')).to_have_value(mq[2]['base_url'])
-    expect(page.locator('[name=mq-config-yaml]')).to_have_value('');assert writes(mq)[0][2]['config_yaml']==''
+    expect(page.locator('[name=mq-config-yaml]')).to_have_count(0);assert 'config_yaml' not in writes(mq)[0][2]
 
 
 def test_pending_uses_unsaved_form_without_saving_or_claiming_full_send(mq):
-    page=open_form(mq);page.locator('[name=mq-config-yaml]').fill(YAML)
+    page=open_form(mq)
     page.locator('[name=mq-base-url]').fill('https://unsaved-mq.synthetic.invalid')
     page.get_by_test_id('mq-test').click();result=page.get_by_test_id('mq-test-result')
     expect(result).to_contain_text('待收文件 7 个');expect(result).to_contain_text('不代表')
@@ -122,7 +117,7 @@ def test_tls_paths_are_submitted_with_current_connection_only(mq, action):
     assert payload['client_cert_file'] == '/synthetic/tls/client.crt'
     assert payload['client_key_file'] == '/synthetic/tls/client.key'
     assert payload['ca_file'] == '/synthetic/tls/ca.crt'
-    assert 'path' not in payload and 'bucket' not in payload
+    assert 'path' not in payload and 'bucket' not in payload and 'config_yaml' not in payload
 
 
 def test_saved_certificate_paths_are_displayed_on_reload(mq):
@@ -130,4 +125,17 @@ def test_saved_certificate_paths_are_displayed_on_reload(mq):
     page = open_form(mq)
     expect(page.locator('[name=mq-client-cert]')).to_have_value('/saved/client.crt')
     expect(page.locator('[name=mq-client-key]')).to_have_value('/saved/client.key')
+    assert writes(mq) == []
+
+
+def test_missing_server_credentials_explains_operator_action_without_browser_secret_input_or_writes(mq):
+    mq[2].update(credentials_set=False, configured=False, applied=False)
+    page = open_form(mq)
+    expect(page.get_by_test_id('mq-config')).to_contain_text('服务端尚未配置认证信息，请联系运维完成配置')
+    expect(page.get_by_test_id('mq-save')).to_be_disabled()
+    expect(page.get_by_test_id('mq-test')).to_be_disabled()
+    expect(page.locator('[name=mq-config-yaml]')).to_have_count(0)
+    expect(page.get_by_role('button', name='重新读取配置', exact=True)).to_be_enabled()
+    page.get_by_role('button', name='重新读取配置', exact=True).click()
+    expect(page.get_by_test_id('mq-save')).to_be_disabled()
     assert writes(mq) == []

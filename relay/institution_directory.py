@@ -34,7 +34,7 @@ class InstitutionDirectory:
     def _decode(self, blob):
         value=self.codec._authenticated(blob)
         if value.get("owner_user_id")!=self.keys.owner_id:raise ProtocolError("INSTITUTION_DIRECTORY_OWNER_MISMATCH")
-        binding=self.keys.binding(token(value.get("workbench_id")),token(value.get("account_uid")))
+        binding=self.keys.binding(token(value.get("workbench_id")),token(value.get("account_uid")),channel=value.get("channel", "qidian"))
         Codec(binding,clock=self.clock)._validate(value,allow_expired=True)
         return value
 
@@ -43,6 +43,8 @@ class InstitutionDirectory:
         p=data["payload"]
         if p.get("contract")!=CONTRACT:raise ProtocolError("DIRECTORY_CONTRACT_UNSUPPORTED")
         kind=p.get("op");wb=token(data["workbench_id"]);uid=token(data["account_uid"])
+        channel=data.get("channel", "qidian")
+        if channel not in ("qidian", "wechat"):raise ProtocolError("DIRECTORY_CHANNEL_INVALID")
         stamp=p.get("updated_at");revision=p.get("revision")
         if type(stamp) not in (int,float) or not math.isfinite(stamp) or stamp>self.clock()+60 or type(revision) is not int or revision<1:raise ProtocolError("DIRECTORY_REVISION_INVALID")
         if kind=="directory":
@@ -51,15 +53,27 @@ class InstitutionDirectory:
             if not isinstance(accounts,list) or len(accounts)>100:raise ProtocolError("DIRECTORY_ACCOUNTS_INVALID")
             seen=set()
             for item in accounts:
-                if not isinstance(item,dict) or item.get("channel")!="qidian" or type(item.get("online")) is not bool:raise ProtocolError("DIRECTORY_ACCOUNT_INVALID")
+                if not isinstance(item,dict) or item.get("channel") not in ("qidian", "wechat") or type(item.get("online")) is not bool:raise ProtocolError("DIRECTORY_ACCOUNT_INVALID")
                 token(item.get("account_uid"));token(item.get("account_id"))
-                if item["account_uid"] in seen:raise ProtocolError("DIRECTORY_DUPLICATE_ACCOUNT")
-                seen.add(item["account_uid"])
+                identity=(item["channel"],item["account_uid"])
+                if identity in seen:raise ProtocolError("DIRECTORY_DUPLICATE_ACCOUNT")
+                seen.add(identity)
                 capabilities=item.get("capabilities",[])
                 if not isinstance(capabilities,list) or any(not isinstance(v,str) or len(v)>80 for v in capabilities):raise ProtocolError("DIRECTORY_CAPABILITIES_INVALID")
-                if item.get("paths")!=account_paths(wb,item["account_uid"]):raise ProtocolError("DIRECTORY_PATH_MISMATCH")
+                if item.get("paths")!=account_paths(wb,item["account_uid"],channel=item["channel"]):raise ProtocolError("DIRECTORY_PATH_MISMATCH")
         elif kind=="friends":
             if data["kind"]!="contacts" or not isinstance(p.get("contacts"),list):raise ProtocolError("FRIENDS_INVALID")
+            if channel == "wechat":
+                groups=p.get("groups",[])
+                if not isinstance(groups,list) or len(groups)>10000:raise ProtocolError("FRIENDS_GROUPS_INVALID")
+                for group in groups:
+                    if not isinstance(group,dict) or not isinstance(group.get("native_id"),str) or not group["native_id"] or len(group["native_id"])>512:raise ProtocolError("FRIENDS_GROUP_INVALID")
+                    token(group.get("peer_id"))
+                sessions=p.get("sessions",[])
+                if not isinstance(sessions,list) or len(sessions)>10000:raise ProtocolError("FRIENDS_SESSIONS_INVALID")
+                for session in sessions:
+                    if not isinstance(session,dict) or session.get("kind") not in ("private","group") or not isinstance(session.get("native_id"),str) or not session["native_id"] or len(session["native_id"])>512:raise ProtocolError("FRIENDS_SESSION_INVALID")
+                    token(session.get("peer_id"))
         elif kind=="organization":
             if data["kind"]!="manifest" or uid!="organization":raise ProtocolError("ORGANIZATION_IDENTITY_INVALID")
             state=p.get("state")
@@ -70,6 +84,7 @@ class InstitutionDirectory:
             if not isinstance(org,dict) or not isinstance(org.get("departments"),list) or not isinstance(org.get("members"),list):raise ProtocolError("ORGANIZATION_INVALID")
             wb="institution"
         else:raise ProtocolError("DIRECTORY_OPERATION_UNSUPPORTED")
+        if kind == "friends" and channel != "qidian":kind="friends:"+channel
         fp=digest(p)
         with self.lock,self.db() as db:
             old=db.execute("SELECT * FROM ip_snapshot WHERE kind=? AND workbench=? AND account=?",(kind,wb,uid)).fetchone()
@@ -86,7 +101,7 @@ class InstitutionDirectory:
     def _input(self, seq, path, blob):
         value=self._decode(blob)
         operation=value["payload"].get("op")
-        expected=(DIRECTORY_PATH if operation=="directory" else ORGANIZATION_PATH if operation=="organization" else account_paths(value["workbench_id"],value["account_uid"])["friends_path"])
+        expected=(DIRECTORY_PATH if operation=="directory" else ORGANIZATION_PATH if operation=="organization" else account_paths(value["workbench_id"],value["account_uid"],channel=value.get("channel", "qidian"))["friends_path"])
         if path!=expected:raise ProtocolError("DIRECTORY_PHYSICAL_PATH_MISMATCH")
         self.put(value)
         with self.db() as db:db.execute("UPDATE ip_input SET state=? WHERE seq=?",("APPLIED",seq))
@@ -127,26 +142,30 @@ class InstitutionDirectory:
                 online=not stale and item["online"]
                 value={**item,"available":online,"stale":not online,"updated_at":row["stamp"],"state":"online" if online else "offline","capabilities":item.get("capabilities",[]) if online else []}
                 accounts.append(value)
-                if online:online_pairs.setdefault(item["account_uid"],[]).append(value)
+                if online:online_pairs.setdefault((item["channel"],item["account_uid"]),[]).append(value)
             workbenches.append({"workbench_id":row["workbench"],"name":p.get("workbench_name") or row["workbench"],"updated_at":row["stamp"],"stale":stale,"accounts":accounts})
         for rows in online_pairs.values():
             if len(rows)>1:
                 for row in rows:row.update(available=False,stale=True,state="conflict")
         return {"workbenches":workbenches,"contract":CONTRACT,"offline_seconds":OFFLINE_SECONDS}
 
-    def account(self, wb, uid):
+    def account(self, wb, uid, channel="qidian"):
         for workbench in self.catalog()["workbenches"]:
             if workbench["workbench_id"]==wb:
                 for row in workbench["accounts"]:
-                    if row["account_uid"]==uid:return row
+                    if row["account_uid"]==uid and row["channel"]==channel:return row
         return None
 
-    def contacts(self, wb, uid, owner):
-        account=self.account(wb,uid)
+    def contacts(self, wb, uid, owner, channel="qidian"):
+        account=self.account(wb,uid,channel=channel)
         if account is None:raise ValueError("所选账号没有机构目录记录")
         with self.db() as db:
-            friend=db.execute("SELECT * FROM ip_snapshot WHERE kind=? AND workbench=? AND account=?",("friends",wb,uid)).fetchone()
+            friend=db.execute("SELECT * FROM ip_snapshot WHERE kind=? AND workbench=? AND account=?",("friends" if channel=="qidian" else "friends:"+channel,wb,uid)).fetchone()
             org=db.execute("SELECT * FROM ip_snapshot WHERE kind=?",("organization",)).fetchone()
             error=db.execute("SELECT * FROM ip_directory_error WHERE kind=?",("organization",)).fetchone()
         friends=json.loads(friend["body"]) if friend else {};organization=json.loads(org["body"]) if org else {}
-        return {"identity":{"owner_user_id":owner,"workbench_id":wb,"account_uid":uid},"source":"its-relay","channel":"qidian","workbench_id":wb,"account_uid":uid,"contacts":friends.get("contacts",[]),"org":organization.get("org",{}),"org_state":"error" if error else organization.get("state","unreported"),"org_error":error["code"] if error else None,"org_updated_at":org["stamp"] if org else None,"updated_at":account["updated_at"],"stale":not account["available"],"available":account["available"],"publication_id":"directory-"+str(account["updated_at"]),"publication_hash":digest([friends,organization]),"friends_updated_at":friend["stamp"] if friend else None}
+        result={"identity":{"owner_user_id":owner,"workbench_id":wb,"account_uid":uid},"source":"its-relay","channel":channel,"workbench_id":wb,"account_uid":uid,"contacts":friends.get("contacts",[]),"org":organization.get("org",{}),"org_state":"error" if error else organization.get("state","unreported"),"org_error":error["code"] if error else None,"org_updated_at":org["stamp"] if org else None,"updated_at":account["updated_at"],"stale":not account["available"],"available":account["available"],"publication_id":"directory-"+str(account["updated_at"]),"publication_hash":digest([friends,organization]),"friends_updated_at":friend["stamp"] if friend else None}
+        if channel=="wechat":
+            result["groups"]=friends.get("groups",[])
+            result["sessions"]=friends.get("sessions",[])
+        return result

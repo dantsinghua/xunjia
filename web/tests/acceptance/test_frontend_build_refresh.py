@@ -1,4 +1,5 @@
 """Two real production builds and one long-lived page; synthetic business APIs only."""
+import hashlib
 import json
 import re
 import shutil
@@ -22,6 +23,11 @@ def production_builds(tmp_path_factory):
     shutil.copytree(ROOT/'web',source,ignore=shutil.ignore_patterns('node_modules','dist','.vite'))
     (source/'node_modules').symlink_to(ROOT/'web/node_modules',target_is_directory=True)
     for label in ['A', 'B']:
+        if label == 'B':
+            with (source/'src/main.ts').open('a') as stream:
+                stream.write('\n// Synthetic second release changes build inputs.\n')
+        source_snapshot = folder / ('source-' + label)
+        shutil.copytree(source, source_snapshot, ignore=shutil.ignore_patterns('node_modules', 'dist', '.vite'))
         with (folder / ('build-' + label + '.log')).open('w') as log:
             result = subprocess.run(['npm', 'run', 'build'], cwd=source, stdout=log, stderr=subprocess.STDOUT, timeout=300)
         assert result.returncode == 0, 'Production build failed; inspect owned build log'
@@ -31,7 +37,7 @@ def production_builds(tmp_path_factory):
         html = (destination / 'index.html').read_text()
         asset = re.search(r'src="(/assets/[^\"]+\.js)"', html).group(1)
         assert manifest['version'] in (destination / asset.lstrip('/')).read_text()
-        builds.append({'root': destination, 'version': manifest['version'], 'asset': asset})
+        builds.append({'root': destination, 'source': source_snapshot, 'manifest': manifest, 'version': manifest['version'], 'asset': asset})
     assert builds[0]['version'] != builds[1]['version']
     return builds
 
@@ -118,25 +124,25 @@ def test_same_production_version_is_silent_and_uses_uncached_manifest(version_pa
 def test_later_build_only_prompts_without_reload_draft_loss_or_logout(version_page):
     page, state, a, b = version_page
     page.locator('[name=mq-base-url]').fill('https://unsaved.invalid')
-    page.locator('[name=mq-config-yaml]').fill('key: private-unsaved-draft\nsm4_key: 0123456789abcdef\n')
+    page.locator('[name=mq-client-cert]').fill('/synthetic/private-unsaved-draft.crt')
     documents = state['documents'];state['root'] = b['root'];focus_check(page)
     expect(page.get_by_test_id('app-update-banner')).to_be_visible()
     expect(page.get_by_test_id('app-update-banner')).to_contain_text('未提交')
     expect(page.locator('[name=mq-base-url]')).to_have_value('https://unsaved.invalid')
-    expect(page.locator('[name=mq-config-yaml]')).to_have_value('key: private-unsaved-draft\nsm4_key: 0123456789abcdef\n')
+    expect(page.locator('[name=mq-client-cert]')).to_have_value('/synthetic/private-unsaved-draft.crt')
     assert state['documents'] == documents and state['writes'] == []
     assert page.locator('script[type=module]').get_attribute('src') == a['asset']
     assert page.evaluate("localStorage.getItem('xj_auth_token')") == 'synthetic-build-token'
     assert 'private-unsaved-draft' not in page.evaluate('JSON.stringify({...localStorage,...sessionStorage})')
 
 
-def test_dirty_secret_blocks_manual_reload_until_user_clears_draft(version_page):
+def test_dirty_connection_blocks_manual_reload_until_user_clears_draft(version_page):
     page, state, _, b = version_page
-    page.locator('[name=mq-config-yaml]').fill('key: user-owned-unsaved-secret')
+    page.locator('[name=mq-client-cert]').fill('/synthetic/user-owned-unsaved.crt')
     documents = state['documents'];state['root'] = b['root'];focus_check(page)
     page.get_by_test_id('app-update-reload').click()
     expect(page.get_by_test_id('app-update-banner')).to_contain_text('已阻止刷新')
-    expect(page.locator('[name=mq-config-yaml]')).to_have_value('key: user-owned-unsaved-secret')
+    expect(page.locator('[name=mq-client-cert]')).to_have_value('/synthetic/user-owned-unsaved.crt')
     assert state['documents'] == documents and state['writes'] == []
 
 
@@ -165,11 +171,16 @@ def test_bad_manifest_is_not_evidence_of_new_build_or_auth_failure(version_page,
 from tests.cutover.test_production_mq_bootstrap import bootstrap, OWNER, BASE, YAML
 
 
-def test_unbound_user_completes_mtls_setup_discovery_selection_and_quote_bar_with_real_backend(bootstrap, browser, frontend_url):
+def test_unbound_user_reuses_server_auth_for_mtls_setup_discovery_selection_and_quote_bar_with_real_backend(bootstrap, browser, frontend_url):
     import socket
     import time
     import uvicorn
     s = bootstrap
+    from tests.tls_material import tls_config
+    provisioned = s['client'].put('/api/im/mq-config', json={
+        'base_url': BASE, 'config_yaml': YAML, 'expected_revision': '', **tls_config()})
+    assert provisioned.status_code == 200, provisioned.text
+    assert s['app'].state.repository.binding_for(OWNER) is None
     s['runtime'].background_enabled = True
     for wid,uids in [('wb-a',['account-a','account-b']),('wb-b',['account-c','account-d'])]:
         for uid in uids:
@@ -205,7 +216,7 @@ def test_unbound_user_completes_mtls_setup_discovery_selection_and_quote_bar_wit
         expect(page.get_by_test_id('mq-save')).to_be_enabled()
         expect(page.get_by_test_id('collector-current')).to_have_count(0)
         page.locator('[name=mq-base-url]').fill(BASE)
-        page.locator('[name=mq-config-yaml]').fill(YAML)
+        expect(page.locator('[name=mq-config-yaml]')).to_have_count(0)
         from tests.tls_material import tls_config
         certificate = tls_config()
         page.locator('[name=mq-client-cert]').fill(certificate['client_cert_file'])
@@ -213,7 +224,7 @@ def test_unbound_user_completes_mtls_setup_discovery_selection_and_quote_bar_wit
         page.locator('[name=mq-ca-file]').fill(certificate['ca_file'])
         assert not any(op == 'download' for _, op in s['vendor'].calls)
         page.get_by_test_id('mq-save').click()
-        expect(page.locator('[name=mq-config-yaml]')).to_have_value('')
+        expect(page.locator('[name=mq-config-yaml]')).to_have_count(0)
         expect(page.get_by_test_id('mq-config')).to_contain_text('已保存')
         assert s['app'].state.repository.binding_for(OWNER) is None
         # This user-initiated save now explicitly discovers the directory once.
@@ -250,3 +261,54 @@ def test_unbound_user_completes_mtls_setup_discovery_selection_and_quote_bar_wit
     finally:
         page.unroute_all(behavior='wait');context.close();server.should_exit=True;thread.join(10);listener.close()
         assert not thread.is_alive()
+
+
+def test_real_vite_public_logo_is_hashed_and_verified_with_exact_outputs(production_builds):
+    from deploy.frontend_build import verify_frontend_build
+    for build in production_builds:
+        manifest = verify_frontend_build(build['source'], build['root'])
+        assert manifest == build['manifest']
+        assert (build['root']/'logo.png').read_bytes() == (build['source']/'public/logo.png').read_bytes()
+        assert manifest['assets']['logo.png'] == hashlib.sha256((build['root']/'logo.png').read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize('mutation', ['modify', 'delete', 'extra'])
+def test_real_public_output_tampering_is_rejected(production_builds, tmp_path, mutation):
+    from deploy.common import DeployError
+    from deploy.frontend_build import verify_frontend_build
+    build = production_builds[0]
+    dist = tmp_path/'dist'
+    shutil.copytree(build['root'], dist)
+    if mutation == 'modify':
+        (dist/'logo.png').write_bytes(b'synthetic-tampered-logo')
+    elif mutation == 'delete':
+        (dist/'logo.png').unlink()
+    else:
+        (dist/'unlisted.png').write_bytes(b'synthetic-extra-output')
+    with pytest.raises(DeployError, match='FRONTEND_ASSET_MISMATCH'):
+        verify_frontend_build(build['source'], dist)
+
+
+def test_public_source_change_requires_rebuild_even_with_untouched_dist(production_builds, tmp_path):
+    from deploy.common import DeployError
+    from deploy.frontend_build import verify_frontend_build
+    build = production_builds[0]
+    source = tmp_path/'source'
+    shutil.copytree(build['source'], source)
+    (source/'public/logo.png').write_bytes(b'synthetic-updated-source-logo')
+    with pytest.raises(DeployError, match='FRONTEND_SOURCE_MISMATCH'):
+        verify_frontend_build(source, build['root'])
+
+
+def test_old_dist_cannot_pass_new_source_by_replacing_only_version_file(production_builds, tmp_path):
+    from deploy.common import DeployError
+    from deploy.frontend_build import verify_frontend_build
+    a, b = production_builds
+    assert a['manifest']['source_hash'] != b['manifest']['source_hash']
+    dist = tmp_path/'old-dist'
+    shutil.copytree(a['root'], dist)
+    with pytest.raises(DeployError, match='FRONTEND_SOURCE_MISMATCH'):
+        verify_frontend_build(b['source'], dist)
+    shutil.copyfile(b['root']/'assets/build-version.json', dist/'assets/build-version.json')
+    with pytest.raises(DeployError, match='FRONTEND_ASSET_MISMATCH'):
+        verify_frontend_build(b['source'], dist)

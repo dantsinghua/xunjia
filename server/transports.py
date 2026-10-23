@@ -27,7 +27,9 @@ class _Store:
     def __init__(self, path, binding):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.scope = 'xunjia:'+digest([binding.owner_user_id,binding.workbench_id,binding.account_uid])
+        identity=[binding.owner_user_id,binding.workbench_id,binding.account_uid]
+        if binding.channel != 'qidian':identity.append(binding.channel)
+        self.scope = 'xunjia:'+digest(identity)
         with self.db() as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS tx_packet(scope TEXT,id TEXT,fingerprint TEXT,blob BLOB,expires REAL,replay INTEGER DEFAULT 0,PRIMARY KEY(scope,id));
@@ -136,11 +138,22 @@ class _Store:
             self._advance(db,stream,epoch)
         return source
 
-    def pending(self, stream):
+    def pending(self, stream, *, limit=None, prioritize_control=False):
+        order = "s.position"
+        if prioritize_control:
+            # Controls must be selected before the batch bound: an uncommitted
+            # image can depend on a manifest received behind a full event batch.
+            order = "(m.kind='event'), CASE WHEN m.kind='event' THEN json_extract(m.data,'$.payload.source_seq') END, s.position"
+        query = f'''SELECT s.token,m.kind,m.id,m.data FROM tx_source s JOIN tx_message m
+            ON s.scope=m.scope AND s.kind=m.kind AND s.id=m.id
+            WHERE s.scope=? AND s.stream=? AND m.acked=0
+            GROUP BY m.kind,m.id ORDER BY {order}'''
+        parameters = [self.scope, stream]
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters.append(limit)
         with self.db() as db:
-            rows=db.execute('''SELECT s.token,m.kind,m.id,m.data FROM tx_source s JOIN tx_message m
-                ON s.scope=m.scope AND s.kind=m.kind AND s.id=m.id
-                WHERE s.scope=? AND s.stream=? AND m.acked=0 ORDER BY s.position''',(self.scope,stream)).fetchall()
+            rows=db.execute(query, parameters).fetchall()
         seen=set();out=[]
         for row in rows:
             key=(row['kind'],row['id'])

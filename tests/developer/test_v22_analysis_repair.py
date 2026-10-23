@@ -21,11 +21,12 @@ def desk(tmp_path):
     app = create_app(submission_guard=lambda _owner: None, database_url='sqlite:///' + str(tmp_path / 'repair.db'),
         enable_background=False, auth_config=AuthConfig(clock=lambda: clock[0]), chatflows=flows)
     store = app.state.repository
+    store.bind_account(OWNER,'synthetic-account','synthetic-repair-workbench',transport='oss')
     members = {}
     for code in ('SYN-A', 'SYN-B'):
         gid = store.create_group(OWNER, bond_code=code, our_side='BUY', target_volume='1000',
             trade_day=DAY, policy=LimitPolicy('ABSOLUTE', '3.12'))
-        mid, thread = store.add_member(OWNER, gid, account_uid='synthetic-account', peer_uid='synthetic-peer')
+        mid, thread = store.add_member(OWNER, gid, account_uid='synthetic-account', peer_uid='synthetic-peer',workbench_id='synthetic-repair-workbench')
         members[code] = mid
     store.set_sending(OWNER, False)
     def ingest(seq, text, **kw):

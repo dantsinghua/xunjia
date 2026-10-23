@@ -83,6 +83,8 @@ def prepare(directory):
     write(directory / 'clock.json', FixtureClock().anchor)
     store, _ = open_service(directory)
     owner = 'synthetic-recovery-owner'
+    store.bind_account(owner, 'synthetic-account', 'synthetic-workbench')
+    store.set_sending(owner, True)  # Synthetic local commands only; no sender is constructed.
     group = store.create_group(owner, bond_code='SYN-A', our_side='BUY', target_volume='2000',
                                trade_day='2026-10-17', policy=LimitPolicy('ABSOLUTE', '3.12'), send_allowed=True)
     member, thread = store.add_member(owner, group, account_uid='synthetic-account', peer_uid='synthetic-peer')

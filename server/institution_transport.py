@@ -13,7 +13,9 @@ from relay.protocol import Codec, ProtocolError, canonical, digest, envelope, re
 from .file_gateway_transport import FileGatewayTransport
 
 class InstitutionTransport(FileGatewayTransport):
-    def __init__(self, binding, inbound, outbound, path, *, role, institution_owner, clock=time.time):
+    def __init__(self, binding, inbound, outbound, path, *, role, institution_owner, clock=time.time, channel=None):
+        self.channel=binding.channel if channel is None else channel
+        if self.channel != binding.channel:raise ProtocolError("PATH_CHANNEL_BINDING_MISMATCH")
         super().__init__(binding, inbound, outbound, path, role=role, clock=clock)
         self.institution_owner = institution_owner
         if role == "service":
@@ -33,7 +35,7 @@ class InstitutionTransport(FileGatewayTransport):
             db.executescript("CREATE TABLE IF NOT EXISTS ip_delivery(scope TEXT,id TEXT,kind TEXT,fingerprint TEXT,blob BLOB,first_at REAL,last_at REAL,attempts INTEGER,acked INTEGER DEFAULT 0,PRIMARY KEY(scope,id)); CREATE TABLE IF NOT EXISTS ip_ack(scope TEXT,id TEXT,fingerprint TEXT,PRIMARY KEY(scope,id));")
 
     @classmethod
-    def from_institution_config(cls, binding, config, path, *, role, config_dir):
+    def from_institution_config(cls, binding, config, path, *, role, config_dir, channel=None):
         allowed = {"contract","base_url","auth_file","hostname","addresses",*TLS_FIELDS}
         if set(config) - allowed or config.get("contract") != CONTRACT:
             raise FileGatewayError("FILE_GATEWAY_CONFIG_INVALID")
@@ -44,10 +46,11 @@ class InstitutionTransport(FileGatewayTransport):
         if binding.seal_key != keys.seal_key or binding.sign_key != keys.sign_key:
             raise FileGatewayError("FILE_GATEWAY_INSTITUTION_KEYS_MISMATCH")
         config = resolve_tls_files(config, config_dir)
-        paths = account_paths(binding.workbench_id, binding.account_uid)
+        channel=binding.channel if channel is None else channel
+        paths = account_paths(binding.workbench_id, binding.account_uid, channel=channel)
         up = connection_client(config, auth, path=paths["uplink_path"])
         down = connection_client(config, auth, path=paths["downlink_path"])
-        return cls(binding, up if role == "service" else down, down if role == "service" else up, path, role=role, institution_owner=keys.owner_id)
+        return cls(binding, up if role == "service" else down, down if role == "service" else up, path, role=role, institution_owner=keys.owner_id, channel=channel)
 
     def _fingerprint(self, data):
         wire = retarget(data, self.institution_owner)
@@ -142,8 +145,8 @@ class InstitutionTransport(FileGatewayTransport):
             finally:
                 with self.store.db() as db:db.execute("UPDATE ip_delivery SET last_at=?,attempts=attempts+1 WHERE scope=? AND id=?",(self.clock(),self.store.scope,row["id"]))
 
-    def poll(self, limit=50, *, control_intake=False):
-        rows = super().poll(limit=limit,control_intake=control_intake)
+    def poll(self, limit=50, *, control_intake=False, allow_pending_intake=False):
+        rows = super().poll(limit=limit,control_intake=control_intake,allow_pending_intake=allow_pending_intake)
         business = []
         for row in rows:
             data = row["envelope"]
@@ -170,7 +173,7 @@ class InstitutionTransport(FileGatewayTransport):
             return result(command,"failed","account-context-changed-before-submission")
         if self.role=="service" and (self.online_guard is None or not self.online_guard()):
             return result(command,"failed","collector-offline-before-submission")
-        if str(command.get("peer_id","")).startswith("g_"):
+        if self.channel == "qidian" and str(command.get("peer_id","")).startswith("g_"):
             return result(command,"failed","group-auto-reply-not-supported")
         return super().send(command)
 

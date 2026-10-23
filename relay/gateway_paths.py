@@ -22,9 +22,10 @@ def validate_path(value):
         raise ValueError("FILE_GATEWAY_PATH_INVALID")
     return value
 
-def account_paths(workbench_id, account_uid):
+def account_paths(workbench_id, account_uid, channel="qidian"):
     token(workbench_id); token(account_uid)
-    raw = hashlib.sha256(canonical([CONTRACT, workbench_id, "qidian", account_uid])).digest()
+    if channel not in ("qidian", "wechat"):raise ValueError("FILE_GATEWAY_CHANNEL_INVALID")
+    raw = hashlib.sha256(canonical([CONTRACT, workbench_id, channel, account_uid])).digest()
     suffix = base64.b32encode(raw).decode("ascii").lower()[:18]
     return {"uplink_path": "xu" + suffix, "downlink_path": "xd" + suffix, "friends_path": "xf" + suffix}
 
@@ -45,5 +46,5 @@ class InstitutionKeys:
         identity = hashlib.sha256((CONTRACT + "/institution/" + auth.key).encode("utf8")).hexdigest()[:32]
         return cls(identity, "institution-" + identity, expand("seal"), expand("sign"))
 
-    def binding(self, workbench_id, account_uid, owner_id=None):
-        return Binding(owner_id or self.owner_id, account_uid, workbench_id, self.seal_key, self.sign_key)
+    def binding(self, workbench_id, account_uid, owner_id=None, *, channel="qidian"):
+        return Binding(owner_id or self.owner_id, account_uid, workbench_id, self.seal_key, self.sign_key, channel=channel)

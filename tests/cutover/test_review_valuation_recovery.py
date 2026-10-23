@@ -26,6 +26,7 @@ def setup(tmp_path):
     app=create_app(submission_guard=lambda _owner: None, database_url='sqlite:///'+str(tmp_path/'recovery.sqlite'),enable_background=False,
         auth_config=AuthConfig(clock=lambda:now[0]),reference_provider=ref,calendar=ref)
     store=app.state.repository
+    store.bind_account(OWNER,'synthetic-account','synthetic-valuation-workbench',transport='oss')
     group=store.create_group(OWNER,bond_code='SYN-A',our_side='BUY',target_volume='2000',trade_day='2026-10-16',
         policy=LimitPolicy('CHINABOND_BP','5'),valuation=Valuation('SYN-A',ref.day,ref.value,'initial'),
         expected_valuation_date=ref.day,send_allowed=True)

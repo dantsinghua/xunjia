@@ -1,16 +1,29 @@
 import { defineConfig } from 'vite'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import vue from '@vitejs/plugin-vue'
+// @ts-expect-error The build-only helper is plain ESM, not application TypeScript.
+import { publicAssets, sourceHash } from './build-source.mjs'
 
 const buildVersion = randomUUID()
+const webRoot = fileURLToPath(new URL('.', import.meta.url))
+let buildSourceHash = ''
 
 export default defineConfig(({ command }) => ({
   define: { __XUNJIA_BUILD_VERSION__: JSON.stringify(command === 'build' ? buildVersion : 'development') },
   plugins: [vue(), {
     name: 'xunjia-build-version',
     apply: 'build',
-    generateBundle() {
-      this.emitFile({ type: 'asset', fileName: 'assets/build-version.json', source: JSON.stringify({ version: buildVersion }) })
+    enforce: 'post',
+    buildStart() { buildSourceHash = sourceHash(webRoot) },
+    generateBundle(_options, bundle) {
+      const root = webRoot
+      if (sourceHash(root) !== buildSourceHash) throw new Error('FRONTEND_SOURCE_CHANGED_DURING_BUILD')
+      const assets = { ...publicAssets(root), ...Object.fromEntries(Object.entries(bundle).map(([name, item]) => [name,
+        createHash('sha256').update(item.type === 'chunk' ? item.code : item.source).digest('hex')])) }
+      this.emitFile({ type: 'asset', fileName: 'assets/build-version.json', source: JSON.stringify({
+        version: buildVersion, source_hash: buildSourceHash, assets,
+      }) })
     },
   }],
   server: {

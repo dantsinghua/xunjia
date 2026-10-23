@@ -112,22 +112,29 @@ def test_remaining_send_flags_are_cleared_on_explicit_switch(selection, guard):
     assert response.json()['data']['reset']
     with s['repository'].db.transaction(write=False) as tx:
         assert tx.execute('SELECT send_allowed FROM xj2_owner WHERE owner_id=?',(OWNER,)).fetchone()['send_allowed']==0
-        assert tx.execute('SELECT COUNT(*) AS n FROM xj2_group WHERE owner_id=?',(OWNER,)).fetchone()['n']==0
-        assert tx.execute('SELECT COUNT(*) AS n FROM xj2_peer WHERE member_id=?',(member,)).fetchone()['n']==0
+        retained=tx.execute('SELECT archived,send_allowed FROM xj2_group WHERE group_id=?',(group,)).fetchone()
+        assert retained['archived']==1 and retained['send_allowed']==0
+        assert tx.execute('SELECT send_allowed FROM xj2_peer WHERE member_id=?',(member,)).fetchone()['send_allowed']==0
+    assert s['api'].get('/api/monitor/counterparties').json()['data']==[]
 
 
 
 @pytest.mark.parametrize('state', ['QUEUED', 'PENDING', 'UNKNOWN'])
-def test_old_unsettled_commands_are_deleted_on_switch_without_replay(selection, state):
+def test_old_unsettled_commands_are_retained_on_switch_without_replay(selection, state):
     s=selection;group,member,thread=seed_business(s)
     with s['repository'].write(OWNER) as tx:
         tx.execute('INSERT INTO xj2_command(command_id,request_id,member_id,group_id,thread_id,state,content_hash,body_json,basis_json,result_json,cancel_requested,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
             ('old-command','old-request',member,group,thread,state,'a'*64,'{}','{}','{}',0,s['now'],s['now']+50))
     response=choose(s);assert response.status_code==200,response.text
-    assert response.json()['data']['removed_counts']['xj2_command']==1
+    assert response.json()['data']['retained_counts']['xj2_command']==1
     with s['repository'].db.transaction(write=False) as tx:
-        assert tx.execute('SELECT COUNT(*) AS n FROM xj2_command').fetchone()['n']==0
+        retained=tx.execute('SELECT * FROM xj2_command WHERE command_id=?',('old-command',)).fetchone()
+        assert retained['state']==('CANCELLED' if state=='QUEUED' else state)
+        assert retained['content_hash']=='a'*64 and retained['body_json']=='{}' and retained['basis_json']=='{}'
+        if state in ('PENDING','UNKNOWN'):
+            assert retained['result_json']=='{}' and retained['cancel_requested']==1
     assert s['api'].get('/api/im/commands/unknown').json()['data']==[]
+    assert s['app'].state.inquiry.commands_core.claim(OWNER,'old-command') is None
 
 
 
@@ -172,7 +179,7 @@ def test_offline_presence_rejects_selection_and_old_friends_keep_original_observ
     else:assert all(op=='upload' for _,op in s['wire'].calls[len(calls):])
 
 
-def test_old_transport_unknown_does_not_hide_catalog_and_is_deleted_on_switch(selection):
+def test_old_transport_unknown_does_not_hide_catalog_and_is_retained_on_switch(selection):
     s = selection
     adapter = s['app'].state.transport.adapters[(OWNER, 'account-a', 'oss')]
     with adapter.store.db() as db:
@@ -181,7 +188,7 @@ def test_old_transport_unknown_does_not_hide_catalog_and_is_deleted_on_switch(se
     assert len(s['api'].get('/api/im/catalog').json()['data']['workbenches']) == 2
     assert choose(s).status_code == 200
     with adapter.store.db() as db:
-        assert db.execute('SELECT * FROM fg_download WHERE seq=?', (seq,)).fetchone() is None
+        assert tuple(db.execute('SELECT * FROM fg_download WHERE seq=?', (seq,)).fetchone())==before
 
 
 def test_select_failure_before_database_commit_preserves_binding_config_and_router(selection,monkeypatch):
@@ -275,10 +282,16 @@ def test_selection_keeps_shared_connection_and_pending_test_is_path_scoped(selec
 def test_switch_starts_empty_business_and_uses_new_accounts_contacts(selection):
     s=selection;group,member,thread=seed_business(s)
     s['repository'].ingest(OWNER,thread,event_id='old-history',source_seq=1,text='old account private history',trade_day='2026-10-20',historical=True)
+    with s['repository'].db.transaction(write=False) as tx:
+        messages=[dict(r) for r in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(thread,)).fetchall()]
     assert choose(s,'wb-b','account-d').status_code==200
     with s['repository'].db.transaction(write=False) as tx:
-        for table in ('xj2_group','xj2_thread','xj2_peer','xj2_message'):
-            assert tx.execute('SELECT COUNT(*) AS n FROM '+table).fetchone()['n']==0
+        assert tx.execute('SELECT archived FROM xj2_group WHERE group_id=?',(group,)).fetchone()['archived']==1
+        assert [dict(r) for r in tx.execute('SELECT * FROM xj2_message WHERE thread_id=?',(thread,)).fetchall()]==messages
+    from server.negotiation.prices import InvalidFact
+    with pytest.raises(InvalidFact,match='selected collector/account'):
+        s['repository'].context(OWNER,member)
+    assert s['api'].get('/api/monitor/counterparties').json()['data']==[]
     assert s['api'].get('/api/im/contacts').json()['data']['contacts'][0]['uin']=='peer-wb-b-account-d'
 
 

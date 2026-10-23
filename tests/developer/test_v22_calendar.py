@@ -13,10 +13,11 @@ def test_no_calendar_still_requires_each_peer_to_reconfirm_after_midnight(tmp_pa
     app=create_app(submission_guard=lambda _owner: None, database_url='sqlite:///'+str(tmp_path/'calendar.db'),enable_background=False,
                    auth_config=AuthConfig(clock=lambda:now[0]))
     store=app.state.repository
+    store.bind_account('owner','synthetic-account','synthetic-calendar-workbench',transport='oss')
     group=store.create_group('owner',bond_code='SYN-A',our_side='BUY',target_volume='1000',
         trade_day='2026-10-16',policy=LimitPolicy('ABSOLUTE','3.12'))
-    store.add_member('owner',group,account_uid='synthetic-account',peer_uid='p1')
-    store.add_member('owner',group,account_uid='synthetic-account',peer_uid='p2')
+    store.add_member('owner',group,account_uid='synthetic-account',peer_uid='p1',workbench_id='synthetic-calendar-workbench')
+    store.add_member('owner',group,account_uid='synthetic-account',peer_uid='p2',workbench_id='synthetic-calendar-workbench')
     now[0]+=120
     app.state.rollover_once()
     value=store.group_rows('owner')[0]
@@ -43,9 +44,10 @@ def test_economic_send_is_blocked_at_midnight_before_rollover_poll_runs(tmp_path
     app=create_app(submission_guard=lambda _owner: None, database_url='sqlite:///'+str(tmp_path/'native-day.db'),enable_background=False,
                    auth_config=AuthConfig(clock=lambda:now[0]))
     store=app.state.repository;commands=app.state.inquiry.commands_core
+    store.bind_account('owner','synthetic-account','synthetic-calendar-workbench',transport='oss')
     group=store.create_group('owner',bond_code='SYN-A',our_side='BUY',target_volume='1000',
         trade_day='2026-10-16',policy=LimitPolicy('ABSOLUTE','3.12'),send_allowed=True)
-    member,_thread=store.add_member('owner',group,account_uid='synthetic-account',peer_uid='p1')
+    member,_thread=store.add_member('owner',group,account_uid='synthetic-account',peer_uid='p1',workbench_id='synthetic-calendar-workbench')
     basis=commands.basis('owner',member)
     now[0]+=120
     result=commands.propose('owner',member,basis=basis,request_id='midnight-test',

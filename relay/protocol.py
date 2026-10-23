@@ -39,10 +39,12 @@ class Binding:
     workbench_id: str
     seal_key: bytes = field(repr=False)
     sign_key: bytes = field(repr=False)
+    channel: str = "qidian"
 
     def __post_init__(self):
         if not isinstance(self.owner_user_id,str) or not self.owner_user_id or len(self.owner_user_id)>160 or not self.owner_user_id.isprintable():
             raise ProtocolError('业务用户身份无效')
+        if self.channel not in ("qidian", "wechat"):raise ProtocolError("Unsupported native channel")
         for value in (self.account_uid, self.workbench_id):token(value)
         if len(self.seal_key) not in (16, 24, 32) or len(self.sign_key) < 32:
             raise ProtocolError("协议密钥配置无效")
@@ -152,16 +154,19 @@ def validate_session_reset(payload: dict, binding: Binding, *, ack=False) -> Non
 def envelope(binding: Binding, kind: str, payload: dict, *, message_id: str,
              peer_id: str = "", command_id: str = "", content_hash: str = "",
              control_version: int = 0, created_at: float, expires_at: float) -> dict:
-    return dict(version=VERSION, namespace=NAMESPACE, kind=kind, message_id=message_id,
+    value = dict(version=VERSION, namespace=NAMESPACE, kind=kind, message_id=message_id,
                 owner_user_id=binding.owner_user_id, account_uid=binding.account_uid,
                 workbench_id=binding.workbench_id, peer_id=peer_id, command_id=command_id,
                 content_hash=content_hash or digest(payload), payload_hash=digest(payload), control_version=control_version,
                 created_at=created_at, expires_at=expires_at, payload=payload)
+    if binding.channel != "qidian":value["channel"] = binding.channel
+    return value
 
 
 def validate_command(command: dict, binding: Binding) -> None:
     if not isinstance(command, dict):
         raise ProtocolError("命令格式无效")
+    if command.get("channel", "qidian") != binding.channel:raise ProtocolError("Command native channel mismatch")
     for name in ("owner_user_id", "account_uid", "workbench_id"):
         if command.get(name) != getattr(binding, name):
             raise ProtocolError("命令身份与固定绑定不符")
@@ -215,9 +220,11 @@ class Codec:
         for key in ("owner_user_id", "account_uid", "workbench_id"):
             if data.get(key) != getattr(self.binding, key):
                 raise ProtocolError("信封身份不匹配")
+        if data.get("channel", "qidian") != self.binding.channel:raise ProtocolError("Envelope native channel mismatch")
         token(data.get("message_id"))
         if not isinstance(data.get("payload"), dict):
             raise ProtocolError("信封载荷无效")
+        if "channel" in data["payload"] and data["payload"]["channel"] != self.binding.channel:raise ProtocolError("Payload native channel mismatch")
         if data.get('payload_hash') != digest(data['payload']):
             raise ProtocolError('载荷摘要与正文不符')
         if not isinstance(data.get('content_hash'), str) or not re.fullmatch(r'[a-f0-9]{64}', data['content_hash']):
@@ -325,7 +332,7 @@ class Codec:
                 raise ProtocolError('信封所属用户不匹配')
             binding = Binding(self.binding.owner_user_id, token(data.get('account_uid')),
                               token(data.get('workbench_id')), self.binding.seal_key,
-                              self.binding.sign_key)
+                              self.binding.sign_key, channel=data.get("channel", "qidian"))
             Codec(binding, clock=self.clock, max_bytes=self.max_bytes,
                   clock_skew=self.clock_skew)._validate(
                       data, allow_expired=allow_expired and data.get('kind') in ('catalog', 'contacts'))

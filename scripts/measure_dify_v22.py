@@ -118,6 +118,8 @@ def run_case(case,config,timeout,*,stage_budget_seconds=150):
                           context_policy_revision=policy)
             record.update(stage_budget_seconds=engine.stage_budget_seconds,lease_seconds=engine.lease_seconds)
             owner='synthetic-measurement-owner';ids={};seed=snapshot(case);seq=0;scopes={};history_ids={};anchor_ids={}
+            store.bind_account(owner,'synthetic-account','synthetic-workbench')
+            store.set_sending(owner,True)  # Synthetic local commands only; no sender is constructed.
             opening='3.20' if case['our_side']=='BUY' else '3.00'
             for member in seed['members']:
                 suffix=member['member_id'];code=member['bond_code']

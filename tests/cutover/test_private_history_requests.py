@@ -114,6 +114,7 @@ def test_analysis_rejects_private_anchor_outside_member_or_without_native_eviden
     owner, mid, tid = OWNER, peer["member_id"], peer["thread_id"]
     if scope == "owner":
         owner = "another-synthetic-owner"
+        store.bind_account(owner,"another-synthetic-account","another-synthetic-workbench",transport="oss")
         gid = store.create_group(owner, bond_code="SYN-A", our_side="BUY", target_volume="1000", trade_day="2026-10-17", policy=LimitPolicy("ABSOLUTE", "3.12"))
         mid, tid = store.add_member(owner, gid, account_uid="another-synthetic-account", peer_uid="peer-a")
     elif scope == "thread":

@@ -120,7 +120,7 @@ export interface MqConfig {
 }
 export interface MqConfigInput {
   client_cert_file?: string; client_key_file?: string; ca_file?: string
-  base_url: string; config_yaml: string; expected_revision?: string
+  base_url: string; expected_revision?: string
 }
 export interface MqConnectionTest {
   passed: boolean; connected: boolean; saved: false; steps: {name: string; ok: boolean; detail: string}[]

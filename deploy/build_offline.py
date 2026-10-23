@@ -78,24 +78,36 @@ def input_files(root):
     for source in sorted((root/'web/dist').rglob('*')):
         if source.is_file():files['frontend/dist/'+source.relative_to(root/'web/dist').as_posix()]=source
     # The deployable regression suite intentionally does NOT need web/src, Node or esbuild.
-    files['tests/conftest.py']=root/'tests/conftest.py'
+    for name in ('conftest.py','institution_test_support.py','tls_material.py'):
+        files['tests/'+name]=root/'tests'/name
     for source in sorted((root/'tests/release').glob('*.py')):
         files['tests/release/'+source.name]=source
     for folder in ('cutover','negotiation','benchmarks'):
         for source in sorted((root/'tests'/folder).glob('*.py')):
             files['tests/'+folder+'/'+source.name]=source
     for name in ('test_oceanbase_schema_sql_20261015.py',
-                 'test_public_market_tools_20261016.py','test_sts_bucket_decoupling_20261015.py'):
+                 'test_public_market_tools_20261016.py'):
         files['tests/acceptance/'+name]=root/'tests/acceptance'/name
     return files
+def validate_quote_runtime(files):
+    # Validate the payload itself; imports from the build checkout can hide omissions.
+    required=('__init__.py','managed_session.py','qb_gateway.py','qb_sign.py',
+              'qb_ws.py','qb_apollo.py','pb_raw.py','store.py')
+    for name in required:
+        path=files.get('app/collector/'+name)
+        if path is None or not path.is_file() or path.is_symlink():
+            raise DeployError('QUOTE_RUNTIME_MISSING','app/collector/'+name)
 def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_wheel:Path|None=None):
     if output.exists() or output.with_name(output.name+'.sha256').exists():raise DeployError('OUTPUT_ALREADY_EXISTS')
     template_is_clean(ROOT/'config/xunjia.env.example')
     if not (ROOT/'web/dist/index.html').is_file():raise DeployError('FRONTEND_BUILD_MISSING')
     sys.path.insert(0,str(ROOT))
+    from deploy.frontend_build import verify_frontend_build
     from scripts.export_oceanbase_schema import render,SQL_FILE
     if SQL_FILE.read_text(encoding='utf8')!=render():raise DeployError('SQL_SOURCE_DRIFT')
     files=input_files(ROOT)
+    validate_quote_runtime(files)
+    frontend=verify_frontend_build(ROOT/'web')
     if collector_wheel is None or not collector_wheel.is_file():raise DeployError('COLLECTOR_RUNTIME_WHEEL_MISSING')
     collector_manifest=collector_wheel.parent/'collector-runtime-manifest.json'
     evidence=json.loads(collector_manifest.read_text(encoding='utf8'))
@@ -118,12 +130,13 @@ def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_
     snapshot={}
     for rel,source in files.items():
         if source.is_symlink() or not source.is_file():raise DeployError('INPUT_FILE_INVALID',rel)
-        if rel.endswith('.py'):ast.parse(source.read_text(encoding='utf8'),filename=rel)
+        if rel.endswith('.py'):ast.parse(source.read_text(encoding='utf-8-sig'),filename=rel)
         snapshot[rel]=sha256(source)
     build_id=hashlib.sha256(canonical(snapshot)).hexdigest()
     git_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
     name='xunjia-agent-batch1-'+build_id[:16]
     version={'deployment_layout':2,'build_id':build_id,'source_commit':git_commit,
+             'frontend_build':{'version':frontend['version'],'source_hash':frontend['source_hash']},
              'source_worktree_included':True,'created_utc':datetime.now(timezone.utc).isoformat(),
              'mutable_config':'config/xunjia.env (excluded from immutable checksum)',
              'shared_site_config':'PREFIX/config','shared_state':'PREFIX/state',
@@ -141,6 +154,8 @@ def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_
             shutil.copyfile(source,target)
             target.chmod(0o755 if source.suffix=='.sh' else 0o644)
             if sha256(target)!=snapshot[rel]:raise DeployError('SOURCE_CHANGED_DURING_BUILD',rel)
+        if verify_frontend_build(ROOT/'web',stage/'frontend/dist')!=frontend:
+            raise DeployError('FRONTEND_CHANGED_DURING_BUILD')
         # Never read, change, or upload root/config/xunjia.env. It may contain real secrets.
         shutil.copyfile(stage/'config/xunjia.env.example',stage/'config/xunjia.env')
         (stage/'config/xunjia.env').chmod(0o600)
@@ -152,6 +167,7 @@ def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_
                     stream.write(sha256(p)+'  '+p.relative_to(stage).as_posix()+'\n')
         for rel,source in files.items():
             if sha256(source)!=snapshot[rel]:raise DeployError('SOURCE_CHANGED_DURING_BUILD',rel)
+        if verify_frontend_build(ROOT/'web')!=frontend:raise DeployError('FRONTEND_CHANGED_DURING_BUILD')
         for p in stage.rglob('*'):
             if p.is_file() and ('__pycache__' in p.parts or p.suffix in ('.pyc','.pyo','.db','.sqlite','.log','.key','.pem')):
                 raise DeployError('DIRTY_BUILD_PAYLOAD',p.name)

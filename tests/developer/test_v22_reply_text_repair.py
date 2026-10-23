@@ -18,10 +18,12 @@ def desk(tmp_path):
     store = ApplicationStore('sqlite:///' + str(tmp_path / 'text-repair.db'),
                              initialize=True, clock=lambda: 1792202400.0)
     service = Inquiry(store)
+    store.bind_account(OWNER,'synthetic-account','synthetic-text-repair-workbench',transport='oss')
     day = service.trade_day()
     group = store.create_group(OWNER, bond_code='SYN-A', our_side='BUY', target_volume='1000',
         trade_day=day, policy=LimitPolicy('ABSOLUTE', '3.12'), send_allowed=True)
-    member, thread = store.add_member(OWNER, group, account_uid='synthetic-account', peer_uid='synthetic-peer')
+    member, thread = store.add_member(OWNER, group, account_uid='synthetic-account', peer_uid='synthetic-peer',workbench_id='synthetic-text-repair-workbench')
+    store.set_sending(OWNER,True)
     with store.write(OWNER) as tx:
         tx.execute('UPDATE xj2_group SET plan_json=? WHERE group_id=?',
                    (encoded({'opening_yield_pct': '3.20', 'step_bp': '2', 'volume_wan': '1000'}), group))

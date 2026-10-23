@@ -11,12 +11,31 @@
 
 可选：
 - V2.2 不读取 XUNJIA_AGENT_SERVICE_TOKEN；解析/回复只使用两份普通 App Key，旧内部回调已退出。
-- XUNJIA_MQ_CONNECTION_CONFIG：MQ 连接配置文件绝对路径（0600），格式见 `mq-connection.example.json`。用户在采集通道填写一处远端 `base_url` 和认证 YAML 即可；远端地址填写至 `/its-relay/v1`，客户端拼接 `/api/files/pending`、`upload` 和 `download`。认证 YAML 使用 `auth.key`、`auth.sm4_key` 动态生成 `access_token`，仅部署用户可读（0600），凭据不可放入报告或版本库。明文 HTTP 仅在指定环境明确开启 `allow_http` 时使用。
-- XUNJIA_TRANSPORT_CONFIG：应用内部通道档案文件绝对路径（0600），与 XUNJIA_STATE_DIR 配套，格式见 `transport.example.json`。`file_gateway.uplink_url/downlink_url` 是现役协调器的两个独立内部方向地址，由部署接入，两者不能填写相同 URL 混用队列；这不是要求用户再填写两个远端 MQ 地址。MQ 连接配置的本人身份和内部路由须与此档案一致，协议绑定与密钥继续保留。更换远端连接前须停止发送并保留在途状态；保存连接不改变业务外发授权或启用原生发送。验收区分文件传输成功、应用入站和原生发送回执。
+- XUNJIA_STATE_DIR：询价服务自己的持久状态根目录。现场配置应明确填写实际路径；标准安装入口会将空值派生为实际 `PREFIX/state`，直接启动应用时须显式提供。
+- XUNJIA_INSTITUTION_CONFIG：唯一现役机构连接 JSON 的路径（0600），结构见 `config/institution-connection.example.json`。现场应明确指定；`auth_file` 指向包含平铺 `key`、`sm4_key` 的私有 YAML（0600），`sm4_key` 的 UTF-8 编码必须恰为16字节。凭据文件、客户端证书及私钥由部署方提供，不随交付包分发。
 - XUNJIA_QUOTE_SOURCE：可保持空，不从客户其他存款业务数据库猜行情数据源。
 - XUNJIA_ALLOWED_ORIGINS：同源前端正常不需要额外指定，跨域使用时由部署者填写。
 
 永远不要让升级包覆盖现场已经填过的 xunjia.env；安装器在检测到现场原文件时会保留。
+
+## 唯一现役文件通道
+
+正式 `base_url` 为 `https://its-relay.yingmi.cn`，不附加旧服务前缀；客户端内置 `/api/files/pending`、`upload`、`download`，以机构 `key` 与 `sm4_key` 动态生成 HTTP 头 `accesstoken`。必须设置 `client_cert_file`、`client_key_file`；`ca_file` 仅在需要指定 CA 时填写，服务器证书链与主机名校验始终保留。连接 JSON 中的凭据、证书路径相对该 JSON 解析。
+
+私有 `auth_file` 使用以下平铺结构，示例占位值需全部替换：
+
+```yaml
+key: REPLACE_INSTITUTION_KEY
+sm4_key: REPLACE_WITH_16B
+```
+
+签封密钥由机构凭据内部派生，目录、组织和账号队列 path 由系统内置。删除旧 `XUNJIA_TRANSPORT_CONFIG`、`XUNJIA_MQ_CONNECTION_CONFIG`（启动会拒绝非空值），以及独立 `XUNJIA_SEAL_KEY`、`XUNJIA_SIGN_KEY` 配置；不要再部署两方向 URL 档案。删除 `XUNJIA_MQ_ALLOW_HTTP`，连接 JSON 的 `allow_http` 字段会被拒绝，不能用旧开关启用明文 HTTP。
+
+采集端由自有 `CollectorReportingSettings` 自动装配唯一 `InstitutionCollectorHost`，使用匹配的 `xunjia_collector_runtime-2.2.11-py3-none-any.whl` 和完整冻结采集应用；参考闭包见 `deploy/collector-qtrade-v22/README.md` 及 `deploy/collector-qtrade-v22/manifest.json`，不以旧启用开关另起宿主，也不将参考子集覆盖安装为完整程序。
+
+询价工作台只选择企点账号；微信由同一采集宿主发布，交由南银消费。若询价与南银在同一主机运行，两端机构连接 JSON 的 `directory_state_dir` 必须指向同一可读写的绝对目录：共享 `<directory_state_dir>/<institution_id>/directory.db`，并通过同一 `.consume` 短锁串行取目录/组织文件，避免破坏性下载争抢。两端业务状态和账号收发账本仍使用各自独立目录。
+
+保存配置、连接测试和目录刷新不授予外发权限；更换机构配置或账号会归档旧执行工作区并要求重新选择，原消息、价量、回执、UNKNOWN 和审计保留，旧任务不迁移、不重发。文件接口 accepted 或 pending 不能当成原生已发回执。
 
 ## V2.2 双阶段配置
 
