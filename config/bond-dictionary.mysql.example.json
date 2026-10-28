@@ -1,0 +1,17 @@
+{
+  "source": "mysql",
+  "connection": {
+    "host": "REPLACE_DICTIONARY_HOST",
+    "port": 3306,
+    "database": "REPLACE_DICTIONARY_DATABASE",
+    "user": "REPLACE_READONLY_USER",
+    "password_file": "dictionary-password.txt"
+  },
+  "table": "REPLACE_DICTIONARY_VIEW",
+  "columns": {
+    "bond_uni_code": "bond_uni_code",
+    "bond_code": "bond_code",
+    "bond_short_name": "bond_short_name",
+    "com_short_name": "com_short_name"
+  }
+}

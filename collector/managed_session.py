@@ -14,8 +14,11 @@ async def _join_io(call,*args):
         # Finish an already-issued database write before closing its connection.
         with suppress(Exception):await task
         raise
-async def collect(values,update,database):
+async def collect(values,update,database,*,dictionary_resolver=None):
     cookie=merge_sid(values['cookie'],values['sid'])
+    if dictionary_resolver is None:
+        from collector.bond_dictionary import resolver_from_env
+        dictionary_resolver=resolver_from_env(cookie,values['device_id'])
     tok=await _join_io(authenticate,cookie,values['device_id'])
     token=tok.get('t') or tok.get('token')
     if not isinstance(token,str) or not token:raise QuoteAuthenticationError('QUOTE_TOKEN_MISSING')
@@ -30,9 +33,13 @@ async def collect(values,update,database):
         holder.append(store)
         return store
     stats={'quotes_received':0,'quotes_written':0,'trades_written':0,'decode_errors':0,'last_quote_at':None,'last_frame_at':None}
-    heartbeat=None
+    heartbeat=None;dictionary_worker=None
     try:
         store=await _join_io(open_store)
+        if dictionary_resolver is not None:
+            from collector.bond_dictionary import DictionaryWorker
+            dictionary_worker=DictionaryWorker(dictionary_resolver,store,update=update)
+            dictionary_worker.start()
         async with market_connect(qb_ws.ws_url(WS,token),cookie,token,15) as ws:
             groups=[f'{kind}_{broker}' for kind in (1,5) for broker in (1,2,3,6,7,8,9)]
             await ws.send(qb_ws.encode_packet(qb_ws.PT_EVENT,qb_ws.EV_JOIN_GROUP,qb_ws.encode_join_group(groups),ack_id=1))
@@ -60,6 +67,7 @@ async def collect(values,update,database):
                     stats['decode_errors']+=1;update(**stats);continue
                 if kind==1:stats['quotes_received']+=1
                 written=await _join_io(store.save,qb_apollo.BEST_QUOTES if kind==1 else qb_apollo.TRADES,[row])
+                if dictionary_worker is not None:dictionary_worker.enqueue(row.get('bond_uni_code'))
                 if kind==1:
                     stats['quotes_written']+=written
                     stats['last_quote_at']=time.time()
@@ -69,6 +77,7 @@ async def collect(values,update,database):
         if heartbeat:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError,Exception):await heartbeat
+        if dictionary_worker is not None:await dictionary_worker.close()
         for store in holder:
             def close():
                 with store._lock:

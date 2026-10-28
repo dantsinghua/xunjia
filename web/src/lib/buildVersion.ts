@@ -1,3 +1,4 @@
+import { appPath } from './appBase'
 /** Detect later deployments without reloading or persisting an unfinished form. */
 export function startBuildVersionWatch(currentVersion: string): () => void {
   let stopped = false, checking = false
@@ -47,7 +48,7 @@ export function startBuildVersionWatch(currentVersion: string): () => void {
     controller = new AbortController()
     const timeout = window.setTimeout(() => controller?.abort(), 6000)
     try {
-      const url = new URL('assets/build-version.json', document.baseURI)
+      const url = new URL(appPath('/assets/build-version.json'), document.baseURI)
       url.searchParams.set('_check', String(Date.now()))
       const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin', signal: controller.signal })
       if (!response.ok) return

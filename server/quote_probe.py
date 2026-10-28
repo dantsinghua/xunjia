@@ -22,6 +22,7 @@ def _auth_note(exc: BaseException) -> str:
 
 
 from collector.qb_gateway import merge_sid as _merge_sid
+from server.quote_credentials import resolve_device_id
 
 async def probe_quote(
     *,
@@ -35,6 +36,10 @@ async def probe_quote(
     """creds 返回 cookie、device_id、sid。connect 是 websockets.connect。"""
     cookie, device_id, sid = creds()
     cookie = _merge_sid(cookie.strip(), sid.strip())
+    try:
+        device_id = resolve_device_id(cookie, device_id)
+    except ValueError as exc:
+        return {"ok": False, "wss_open": False, "note": str(exc)}
     if not cookie or not device_id.strip():
         return {"ok": False, "wss_open": False, "note": "请先填写 Cookie 和设备标识"}
     try:
@@ -68,6 +73,7 @@ def market_connect(url: str, cookie: str, token: str, open_timeout: float):
     import urllib.parse
 
     import websockets
+    from relay.site_egress import websocket_options
 
     subproto = urllib.parse.quote(token, safe="")
     options = dict(
@@ -86,6 +92,5 @@ def market_connect(url: str, cookie: str, token: str, open_timeout: float):
         },
     )
     proxy = os.environ.get("QB_WS_PROXY")
-    if proxy:
-        options["proxy"] = proxy
+    options.update(websocket_options(url, proxy))
     return websockets.connect(url, **options)

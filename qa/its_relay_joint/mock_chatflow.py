@@ -1,5 +1,6 @@
 """Synthetic Dify HTTP edge. Exercises the production ChatflowClient, not a model."""
 import json,threading,uuid
+from server.negotiation.reply_render import render_reply_plan
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -27,8 +28,10 @@ class MockChatflow:
                             observations.append({'member_id':p['member_id'],'side':'ofr','changes':data,'evidence':{k:[msg['message_id']] for k in data}})
                     value={'schema_version':'2.2','scopes':scopes,'observations':observations,'unresolved':{}}
                 else:
-                    text='3.99%\u6536\uff0c500\u4e07' if edge.bad_reply else '3.19%\u6536\uff0c500\u4e07'
-                    value={'schema_version':'2.2','action':'SEND','proposal':{'kind':'REPLY','text':text,'our_price':{'kind':'YIELD','value':'3.19'}},'trader_view':{'reason':'synthetic HTTP model response'}}
+                    # Emulate the current Dify contract Code node, not the retired raw SEND body.
+                    value=render_reply_plan(ctx,{'kind':'REPLY','quote_value':'3.19','text':'{own_quote}，你再看看？'})
+                    value.update(schema_version='2.2',action='SEND',trader_view={})
+                    if edge.bad_reply:value['proposal']['text']='3.99%收，500万'
                 data=json.dumps({'answer':json.dumps(value,ensure_ascii=False),'message_id':str(uuid.uuid4()),'conversation_id':'mock-conversation','workflow_run_id':'mock-run'},ensure_ascii=False).encode()
                 self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
         self.server=ThreadingHTTPServer(('127.0.0.1',0),H);self.server.daemon_threads=True

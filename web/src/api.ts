@@ -1,3 +1,4 @@
+import { newRequestId } from './lib/requestId'
 /** 现券询价谈价机器人 · 前端接口封装(正式服务 8120)。
  *  约定:后端一律 { ok, data } 形状(见 docs/02-frontend-contract.md)。
  *  后端字段口径与前端模型不同(如 cp_id / spread_bp / my_yield / value+unit),
@@ -49,6 +50,7 @@ type Resp<T> = { ok: boolean; data: T; hint?: string; revision?:number }
 /** 批量操作的选择口径:枚举 或 谓词,二选一 */
 export type Selection =
   | { windcodes: string[] }
+  | { rowIds: string[]; filter: FilterSpec }
   | { selectAll: true; groups?: string[]; filter: FilterSpec; except?: string[] }
 export interface RfqPolicy {
   strict_match?:boolean
@@ -126,7 +128,16 @@ export interface MqConnectionTest {
   passed: boolean; connected: boolean; saved: false; steps: {name: string; ok: boolean; detail: string}[]
 }
 
-export type BondsResp = Resp<BondRow[]> & { total: number; hasMore: boolean; nextBefore: number; nextUni?: number; source?: string; emptyReason?: string | null }
+export interface QtSourceState {
+  revision:string; mode:string; shared:boolean; enabled:boolean; configured:boolean; mapped:boolean
+  host:string; port:number; username:string; password_set:boolean; sender_comp_id:string; target_comp_id:string
+  transport:'tls'|'tcp'; plaintext_confirmed:boolean; server_name:string; ca_file:string; client_cert_file:string; client_key_file:string
+  heartbeat_seconds:number; connect_timeout_seconds:number; encoding:string; sending_timezone:string; timezone:string
+  qt_account_ids:string[]; mapped_account_count:number; collector_active:boolean; collector_state:string; code:string; note:string
+  fix_session_connected:boolean; stats:{quotes_received:number;quotes_written:number;duplicate_quotes:number;rejected_quotes:number;reconnects:number;last_error_code?:string|null}
+}
+export type QtSourceInput = Pick<QtSourceState,'host'|'port'|'username'|'sender_comp_id'|'target_comp_id'|'transport'|'plaintext_confirmed'|'server_name'|'ca_file'|'client_cert_file'|'client_key_file'|'heartbeat_seconds'|'connect_timeout_seconds'|'encoding'|'sending_timezone'|'timezone'|'qt_account_ids'> & {password:string;expected_revision:string}
+export type BondsResp = Resp<BondRow[]> & { total: number; hasMore: boolean; nextBefore: number; nextUni?: number | string; source?: string; emptyReason?: string | null; qtColumns?: import('./lib/types').QtColumn[]; privateCombined?: boolean; sourceNotice?: string; qtStatus?: {configured:boolean; state?:string; mapped?:boolean} }
 
 function jget<T>(url: string): Promise<T> { return requestJson<T>(url) }
 function jpost<T>(url: string, body: unknown): Promise<T> {
@@ -181,6 +192,10 @@ const STAGE_STEP: Record<string, number> = { 待询价: 0, 询价中: 1, 还价�
 function normBond(r: Dict): BondRow {
   return {
     i: Number(r.i ?? 0),
+    rowId: optText(r.rowId),
+    qtFields: r.qt_fields && typeof r.qt_fields === 'object' && !Array.isArray(r.qt_fields)
+      ? Object.fromEntries(Object.entries(r.qt_fields as Dict).filter(([, v]) => typeof v === 'string')) as Record<string,string> : undefined,
+    qtStatus: optText(r.qt_status),
     name: s(r.name), code: s(r.code), term: s(r.term), val: s(r.val),
     dur: num2(r.dur), coupon: typeof r.coupon === 'number' ? pctStr(r.coupon) : s(r.coupon),
     ibv: num2(r.ibv), ib: y4(r.ib), io: y4(r.io), iov: num2(r.iov),
@@ -399,7 +414,7 @@ export const api = {
   /** 行情分页:keyset 游标。before=0 取最新一页,之后传上一页的 nextBefore。
    *  不用 offset —— WS 往头部灌新券会让 offset 整体右移,翻页重复取行。
    *  失败不回退示例券:列表只接受 innodealing 实时源,接口不通就空表。 */
-  async bonds(before = 0, limit = 0, groups: string[] = [], channel = 'best', broker = '', beforeUni = 0, filter?: FilterSpec): Promise<BondsResp> {
+  async bonds(before = 0, limit = 0, groups: string[] = [], channel = 'best', broker = '', beforeUni: number | string = 0, filter?: FilterSpec): Promise<BondsResp> {
     const empty = (hint: string): BondsResp => ({ ok: false, data: [], total: 0, hasMore: false, nextBefore: 0, hint })
     try {
       const p = new URLSearchParams()
@@ -410,11 +425,11 @@ export const api = {
       if (channel && channel !== 'best') p.set('channel', channel)
       if (broker) p.set('broker', broker)
       const qs = p.toString() ? `?${p}` : ''
-      const r = await jget<Resp<Dict[]> & { total?: number; hasMore?: boolean; nextBefore?: number; nextUni?: number; source?: string; emptyReason?: string | null }>(`/api/bonds${qs}`)
+      const r = await jget<Resp<Dict[]> & { total?: number; hasMore?: boolean; nextBefore?: number; nextUni?: number | string; source?: string; emptyReason?: string | null; qtColumns?: import('./lib/types').QtColumn[]; privateCombined?: boolean; sourceNotice?: string; qtStatus?: {configured:boolean; state?:string; mapped?:boolean} }>(`/api/bonds${qs}`)
       if (r?.ok === true && r.data != null) {
-        if (r.source && !['innodealing', 'public', 'not_configured'].includes(r.source)) return empty('后端未返回正式公共行情来源')
+        if (r.source && !['innodealing', 'public', 'not_configured', 'qt_private', 'public_with_private_qt'].includes(r.source)) return empty('后端未返回正式公共行情来源')
         const data = normBonds(r.data)
-        return { ok: true, data, total: r.total ?? data.length, hasMore: r.hasMore ?? false, nextBefore: r.nextBefore ?? 0, nextUni: r.nextUni ?? 0, source: r.source, emptyReason: r.emptyReason }
+        return { ok: true, data, total: r.total ?? data.length, hasMore: r.hasMore ?? false, nextBefore: r.nextBefore ?? 0, nextUni: r.nextUni ?? 0, source: r.source, emptyReason: r.emptyReason, qtColumns:r.qtColumns, privateCombined:r.privateCombined, sourceNotice:r.sourceNotice, qtStatus:r.qtStatus }
       }
       return empty('行情接口没有返回报价')
     } catch {
@@ -494,7 +509,7 @@ export const api = {
       return { ok: false, data: [], hint: '消息拉取失败' }
     }
   },
-  async monitorSend(cp: string, bond: string, text: string, requestId: string = crypto.randomUUID()): Promise<{
+  async monitorSend(cp: string, bond: string, text: string, requestId: string = newRequestId()): Promise<{
     ok: boolean
     blocked?: boolean
     hint?: string
@@ -562,7 +577,7 @@ export const api = {
   imTest: (id: string, accountId?: string) => jpost('/api/im/links/' + id + '/test', accountId ? { account_id: accountId } : {}),
   imActivate: (id: string, version?:number) => jpost('/api/im/links/' + id + '/activate', {expected_version:version}),
   imContacts: (refresh = false) => jget<{ ok: boolean; hint?: string; data: Dict }>('/api/im/contacts' + (refresh ? '?refresh=1' : '')),
-  imSend: (uin: string, text: string, requestId: string = crypto.randomUUID()) => jpost<{ ok: boolean; blocked?: boolean; hint?: string; data: Dict }>('/api/im/send', { uin, text, idempotency_key: requestId, request_id:requestId }),
+  imSend: (uin: string, text: string, requestId: string = newRequestId()) => jpost<{ ok: boolean; blocked?: boolean; hint?: string; data: Dict }>('/api/im/send', { uin, text, idempotency_key: requestId, request_id:requestId }),
   negotiationCapacity: () => jget<Resp<CounterpartyCapacity>>('/api/negotiation/capacity'),
   imRfqPreview: (items: (RfqPolicy & {peer_ids:string[]})[], requestId: string) =>
     jpost<Resp<RfqPreview>>('/api/im/rfq/preview', {request_id:requestId, items}),
@@ -579,6 +594,11 @@ export const api = {
   }),
   startQuoteSource: () => jpost('/api/im/quote/start', {}),
   stopQuoteSource: () => jpost('/api/im/quote/stop', {}),
+  qtSource: () => jget<Resp<QtSourceState>>('/api/im/qt-quote'),
+  saveQtSource: (body:QtSourceInput) => requestJson<Resp<QtSourceState>>('/api/im/qt-quote', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),
+  startQtSource: (revision:string) => jpost<Resp<QtSourceState>>('/api/im/qt-quote/start',{expected_revision:revision}),
+  stopQtSource: (revision:string) => jpost<Resp<QtSourceState>>('/api/im/qt-quote/stop',{expected_revision:revision}),
+  testQtSource: (revision:string) => jpost<Resp<{ok:boolean;note:string;saved:boolean;reused?:boolean;code?:string}>>('/api/im/qt-quote/test',{expected_revision:revision}),
   quoteSource: () => jget<{ ok: boolean; hint?: string; data: { account: string; sid_set: boolean; cookie_set: boolean; device_id_set: boolean } }>('/api/im/quote'),
   saveQuoteSource: (body: { account: string; sid: string; cookie: string; device_id: string }) =>
     requestJson('/api/im/quote', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),

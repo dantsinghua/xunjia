@@ -70,7 +70,8 @@ def receipt(case, command_id, status):
 def ask(case, state='SENT'):
     case.flows.decide = lambda context: {'schema_version': '2.2', 'action': 'SEND',
         'proposal': render_reply_plan(context,
-            {'kind': 'CLARIFY', 'question': 'ASK_SETTLEMENT', 'tone': 'NEUTRAL', 'information_ids': []})['proposal']}
+            {'kind': 'CLARIFY', 'question': 'ASK_SETTLEMENT',
+             'text': '{bond} 你刚才{peer_quote}，结算是{settlement_options}？'})['proposal']}
     result = case.engine.decide_member(OWNER, case.member)
     assert result['state'] == 'QUEUED', result
     command_id = result['command_id']

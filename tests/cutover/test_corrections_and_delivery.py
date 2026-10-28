@@ -1,6 +1,7 @@
 """Independent corrections, actual-entry delivery and lifecycle acceptance."""
 import json
 from types import SimpleNamespace
+from server.negotiation.reply_render import render_reply_plan
 
 import pytest
 
@@ -187,8 +188,8 @@ def test_unresolved_fragment_allows_one_actual_clarification_without_changing_kn
     def decide(context):
         decisions.append(context["member_id"])
         if context["member_id"] == b["member_id"]:
-            return {"schema_version": "2.2", "action": "SEND", "proposal": {
-                "kind": "CLARIFY", "text": "请确认另一只是哪个券？"}}
+            return {"schema_version": "2.2", "action": "SEND", "proposal": render_reply_plan(context,{
+                "kind": "CLARIFY", "question":"NONE", "text": "请确认另一只是哪个券？"})['proposal']}
         return {"schema_version": "2.2", "action": "WAIT", "proposal": None}
     flows.analyze, flows.decide = analyze, decide
     app.state.negotiation_engine.run_once()

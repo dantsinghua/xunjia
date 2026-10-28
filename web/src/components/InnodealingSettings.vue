@@ -57,7 +57,7 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);clearSecrets()}
 <template>
   <section class="quote-source" aria-labelledby="inno-title" data-testid="inno-config">
     <h3 id="inno-title">Innodealing 实时报价数据源</h3>
-    <p>沿用原行情账号、SID、Cookie 和设备标识。此处管理公共行情，与企点／QQ／微信收发通道、工作台登录密钥无关。</p>
+    <p>沿用原行情账号、SID、Cookie 和设备标识。此处管理公共行情，与企点／QQ／微信收发通道、工作台登录密钥无关。配置和启停状态由登录用户共用，开启后关页或退出登录不停止后台采集。</p>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <p v-if="notice" role="status">{{ notice }}</p>
     <template v-if="state">

@@ -1,0 +1,23 @@
+{
+  "mode": "fix",
+  "enabled": false,
+  "host": "",
+  "port": 0,
+  "username": "",
+  "password": "",
+  "sender_comp_id": "",
+  "target_comp_id": "",
+  "transport": "tls",
+  "plaintext_confirmed": false,
+  "server_name": "",
+  "ca_file": "",
+  "client_cert_file": "",
+  "client_key_file": "",
+  "heartbeat_seconds": 60,
+  "connect_timeout_seconds": 10,
+  "encoding": "utf-8",
+  "sending_timezone": "Asia/Shanghai",
+  "timezone": "Asia/Shanghai",
+  "account_owners": {},
+  "source_id": "qtrade"
+}

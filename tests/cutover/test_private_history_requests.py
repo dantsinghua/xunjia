@@ -4,6 +4,7 @@ from copy import deepcopy
 import pytest
 
 from server.negotiation.prices import LimitPolicy
+from server.negotiation.reply_render import render_reply_plan
 from test_production_flow import OWNER, desk, raw
 from test_acceptance_contract import current, observation, setup_groups
 
@@ -87,8 +88,8 @@ def test_reply_stage_fetches_old_anchor_and_preserves_its_default_context(desk):
         assert {m["message_id"] for m in seen[0]["context"]} <= {m["message_id"] for m in context["context"]}
         assert len(context["context"]) == 21
         assert [m["message_id"] for m in context["history_results"][0]["messages"]] == [anchor["message_id"]]
-        return {"schema_version": "2.2", "action": "SEND", "proposal": {
-            "kind": "REPLY", "text": "3.19%收500万", "our_price": {"kind": "YIELD", "value": "3.19"}}}
+        return {"schema_version": "2.2", "action": "SEND", "proposal": render_reply_plan(context,{
+            "kind": "REPLY", "text": "{own_quote}{peer_volume}", "quote_value":"3.19"})['proposal']}
     flows.decide = decide
     result = app.state.negotiation_engine.decide_member(OWNER, peer["member_id"])
     assert result["state"] == "QUEUED" and len(seen) == 2, result

@@ -1,7 +1,12 @@
 """Loopback-only its-relay contract server; test credentials, no external services.
 This is a destructive FIFO, not an object-store emulator or a business ACK API.
 """
-import base64,collections,contextlib,hashlib,json,re,socket,sqlite3,threading,uuid
+import base64,collections,contextlib,hashlib,json,re,socket,sqlite3,threading,uuid,ssl,ipaddress
+from datetime import datetime,timedelta,timezone
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes,serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID,ExtendedKeyUsageOID
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -69,9 +74,9 @@ class MockPathGateway:
             def handle_api(self):
                 u=urlsplit(self.path);q=parse_qs(u.query,keep_blank_values=True)
                 op=u.path.rsplit('/',1)[-1]
-                if u.path!='/its-relay/v1/api/files/'+op or op not in ('pending','upload','download'):
+                if u.path!='/api/files/'+op or op not in ('pending','upload','download'):
                     return self.answer(404,{'message':'not found'})
-                try:key=outer.authenticate(self.headers.get('access_token'))
+                try:key=outer.authenticate(self.headers.get('accesstoken'))
                 except ValueError:return self.answer(401,{'message':'invalid or expired token'})
                 values=q.get('path',[])
                 if len(values)!=1 or re.fullmatch('[A-Za-z0-9_-]{1,20}',values[0]) is None:
@@ -111,7 +116,27 @@ class MockPathGateway:
                 name=row['n'];ascii_name=name.encode('ascii','ignore').decode() or 'file'
                 return self.answer(200,bytes(row['b']),{'Content-Type':'application/octet-stream','X-Content-Type-Options':'nosniff','Content-Disposition':"attachment; filename=\""+ascii_name+"\"; filename*=UTF-8''"+quote(name,safe='')})
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.daemon_threads=True
-        self.base='http://127.0.0.1:'+str(self.server.server_port)+'/its-relay/v1'
+        # Local ephemeral identity only; exercise the production mutual-TLS boundary.
+        key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+        subject=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'synthetic-joint-loopback')])
+        now=datetime.now(timezone.utc)
+        cert=(x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+              .public_key(key.public_key()).serial_number(x509.random_serial_number())
+              .not_valid_before(now-timedelta(minutes=1)).not_valid_after(now+timedelta(days=1))
+              .add_extension(x509.BasicConstraints(ca=True,path_length=None),critical=True)
+              .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]),critical=False)
+              .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH,ExtendedKeyUsageOID.CLIENT_AUTH]),critical=False)
+              .sign(key,hashes.SHA256()))
+        cp=self.root/'synthetic.crt';kp=self.root/'synthetic.key'
+        cp.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        kp.write_bytes(key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()));kp.chmod(0o600)
+        self.tls_files={'client_cert_file':str(cp),'client_key_file':str(kp),'ca_file':str(cp)}
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(cp,kp);server_context.load_verify_locations(cafile=str(cp))
+        server_context.verify_mode=ssl.CERT_REQUIRED
+        self.server.socket=server_context.wrap_socket(self.server.socket,server_side=True)
+        self.client_context=ssl.create_default_context(cafile=str(cp));self.client_context.load_cert_chain(cp,kp)
+        self.base='https://127.0.0.1:'+str(self.server.server_port)
         self.thread=threading.Thread(target=self.server.serve_forever,kwargs={'poll_interval':.02},daemon=True);self.thread.start();return self
     def close(self):
         if self.server:self.server.shutdown();self.server.server_close()

@@ -1,4 +1,5 @@
 import { channelContext } from './channelContext'
+import { appPath } from './appBase'
 /** 询价应用独立登录态；所有业务 HTTP 共用认证与错误语义。 */
 let currentUserId = ''
 export function authUserId(): string { return currentUserId }
@@ -36,7 +37,7 @@ export async function authFetch(url: string, init: RequestInit = {}): Promise<Re
   const context = channelContext()
   if (context) headers.set('X-Xunjia-Context', context)
   if (token) { headers.set('Authorization', `Bearer ${token}`); headers.set('X-Auth-Token', token) }
-  const r = await fetch(url, { ...init, headers })
+  const r = await fetch(appPath(url), { ...init, headers })
   if (token !== authToken()) throw new Error('登录身份已变化，请重新读取')
   if (!r.ok) {
     if (r.status === 401 && typeof window !== 'undefined') {

@@ -1,15 +1,199 @@
 """Dependency-free Dify Code node: validate, never repair or erase model facts."""
 import json
 import re
+import hashlib
 from server.negotiation.slots import collect_candidates, literal_member_hints, window_reference_gaps
 from dify.negotiation_v22.slot_wire import decode_slot_observation
-from server.negotiation.reply_render import public_information, render_reply_plan, reply_requirements, quote_grid
+from server.negotiation.reply_render import public_information, render_reply_plan, reply_requirements, requested_volume_signature
+
+
+OUTPUT_CONTRACT_MARKER='XUNJIA_OUTPUT_CONTRACT_V1:'
+
+
+class AnalysisAssociationError(ValueError):
+    """Only the strict top-level analysis membership gate emits this type."""
+
+
+def validate_analysis_association_feedback(feedback):
+    if (not isinstance(feedback,dict) or set(feedback)!={'mode','attempt','max_attempts','reason_code'}
+            or feedback.get('mode')!='OUTPUT_CONTRACT'
+            or type(feedback.get('attempt')) is not int or feedback['attempt']!=1
+            or type(feedback.get('max_attempts')) is not int or feedback['max_attempts']!=1
+            or feedback.get('reason_code')!='DIFY_MODEL_CONTRACT_ANALYSIS_ASSOCIATION'):
+        raise ValueError('Invalid analysis-association correction feedback')
+
+
+def analysis_reference_maps(context):
+    """Snapshot-local metadata only; never infer ownership or load a fact."""
+    members=context.get('members',[]);member_ids=[row['member_id'] for row in members]
+    if len(set(member_ids))!=len(member_ids):raise ValueError('Duplicate canonical member identity')
+    rows=list(context.get('messages',[]))+list(context.get('correction_context',[]))
+    for member in members:rows.extend(member.get('context',[]))
+    for history in context.get('history_results',[]):rows.extend(history.get('messages',[]))
+    records={};message_ids=[]
+    def add(identity):
+        if isinstance(identity,str) and identity and identity not in message_ids:message_ids.append(identity)
+    for row in rows:
+        identity=row['message_id'];add(identity)
+        if identity in records:
+            for field in ('text','direction','ingest_revision','kind','target_id','trade_day'):
+                if field in row and field in records[identity] and row[field]!=records[identity][field]:
+                    raise ValueError('Conflicting canonical message metadata')
+        else:records[identity]=row
+        add(row.get('target_id'))
+    for member in members:
+        for quote in member.get('quotes',{}).values():
+            for refs in quote.get('evidence',{}).values():
+                for identity in refs:add(identity)
+        own=member.get('our_quote_json') or {}
+        if isinstance(own,str):
+            try:own=json.loads(own)
+            except (ValueError,TypeError):own={}
+        if isinstance(own,dict):add(own.get('message_id'))
+    gaps=window_reference_gaps(context)
+    for gap in gaps.values():
+        for identity in gap.get('missing_ids',[]):add(identity)
+    identity={'thread':context.get('thread_id'),'epoch':context.get('account_epoch'),
+              'from':context.get('from_revision'),'through':context.get('through_revision'),
+              'members':[{key:row.get(key) for key in ('member_id','bond_code','our_side','trade_day','version','control_version')} for row in members],
+              'messages':[{key:row.get(key) for key in ('message_id','ingest_revision','text','direction','kind','target_id','trade_day')} for row in records.values()],
+              'references':message_ids}
+    namespace=hashlib.sha256(json.dumps(identity,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:10]
+    reserved=set(message_ids)|set(member_ids)
+    def assign(values,prefix):
+        table={};number=1
+        for value in values:
+            while prefix+namespace+'_'+str(number) in reserved:number+=1
+            table[value]=prefix+namespace+'_'+str(number);number+=1
+        return table
+    return {'m':assign(message_ids,'m'),'p':assign(member_ids,'p')}
+
+
+def analysis_reference_metadata(value,context,*,encode,kind='result'):
+    """Transform only enumerated analysis reference fields, never free data."""
+    maps=analysis_reference_maps(context);reverse={key:{v:k for k,v in table.items()} for key,table in maps.items()}
+    result=json.loads(json.dumps(value,ensure_ascii=False,allow_nan=False))
+    def one(item,domain):
+        if not isinstance(item,str):raise ValueError('Invalid structured analysis reference')
+        if encode:return maps[domain].get(item,item)
+        if item in maps[domain]:return item
+        if item in reverse[domain]:return reverse[domain][item]
+        if re.fullmatch(r'[mp][a-f0-9]{10}_[0-9]+|[mp][0-9]+',item):
+            raise ValueError('Unknown snapshot or wrong-kind analysis reference')
+        return item  # Canonical identifiers retain their original strict domain.
+    def many(items,domain):
+        if not isinstance(items,list):raise ValueError('Invalid structured analysis reference list')
+        mapped=[one(item,domain) for item in items]
+        if not encode and len(set(mapped))!=len(mapped):raise ValueError('Duplicate canonical analysis reference')
+        return mapped
+    def refs(row,key,domain):
+        if key in row:row[key]=one(row[key],domain)
+    def lists(row,key,domain):
+        if key in row:row[key]=many(row[key],domain)
+    def evidence(row,key):
+        if key in row:
+            if not isinstance(row[key],dict):raise ValueError('Invalid structured analysis evidence')
+            row[key]={field:many(ids,'m') for field,ids in row[key].items()}
+    def associations(items,key_domain,value_domain):
+        if not isinstance(items,dict):raise ValueError('Invalid analysis association dictionary')
+        mapped={}
+        for key,ids in items.items():
+            target=one(key,key_domain)
+            if target in mapped:raise ValueError('Duplicate canonical analysis association')
+            mapped[target]=many(ids,value_domain)
+        return mapped
+    if kind=='message_ids':return many(result,'m')
+    if kind=='gaps':
+        mapped={}
+        for identity,row in result.items():
+            lists(row,'source_ids','m');lists(row,'missing_ids','m');mapped[one(identity,'p')]=row
+        return mapped
+    if kind=='view':
+        original_texts=[row.get('text','') for row in context.get('messages',[])+context.get('correction_context',[])]
+        for member in context.get('members',[]):original_texts.extend(row.get('text','') for row in member.get('context',[]))
+        mentioned={identity for identity in maps['m'] if any(identity in text for text in original_texts)}
+        def message(row):
+            original=row.get('message_id');refs(row,'message_id','m');refs(row,'target_id','m') if row.get('target_id') else None
+            if original in mentioned:row['original_reference_id']=original
+        for key in ('messages','correction_context','context'):
+            for row in result.get(key,[]):message(row)
+        for member in result.get('members',[]):
+            refs(member,'member_id','p')
+            for row in member.get('context',[]):message(row)
+        for row in result.get('evidence_index',[]):
+            refs(row,'member_id','p');lists(row,'loaded_message_ids','m');lists(row,'unloaded_reference_ids','m')
+            if row.get('our_quote_message_id'):refs(row,'our_quote_message_id','m')
+        for row in result.get('current_member_candidates',[]):refs(row,'member_id','p')
+        for row in result.get('slot_candidates',[]):
+            refs(row,'message_id','m');lists(row,'explicit_bond_members','p')
+        if 'known_outbound_scopes' in result:result['known_outbound_scopes']=associations(result['known_outbound_scopes'],'m','p')
+        if 'reference_gaps' in result:result['reference_gaps']=analysis_reference_metadata(result['reference_gaps'],context,encode=encode,kind='gaps')
+        for row in result.get('history_results',[]):
+            refs(row,'member_id','p');lists(row,'message_ids','m')
+            for msg in row.get('messages',[]):message(msg)
+        return result
+    for key in ('scopes','unresolved'):
+        if key in result:result[key]=associations(result[key],'m','p')
+    for row in result.get('observations',[]):
+        refs(row,'member_id','p');lists(row,'source_ids','m');evidence(row,'evidence')
+        for segment in row.get('segments',[]):refs(segment,'message_id','m')
+        for field in row.get('fields',[]):lists(field,'evidence','m')
+    for row in result.get('confirmation_requests',[]):
+        refs(row,'member_id','p');lists(row,'source_ids','m')
+    for row in result.get('corrections',[]):
+        refs(row,'message_id','m');lists(row,'member_ids','p');lists(row,'evidence','m')
+    for row in result.get('history_requests',[]):
+        refs(row,'member_id','p');lists(row,'message_ids','m')
+    return result
+
+
+def validate_output_contract_feedback(feedback):
+    """Validate private rejected-model syntax only, never facts or permission."""
+    if (not isinstance(feedback,dict) or set(feedback)!={'mode','attempt','max_attempts','reason_code','previous_output'}
+            or feedback.get('mode')!='OUTPUT_CONTRACT'
+            or type(feedback.get('attempt')) is not int or feedback['attempt']!=1
+            or type(feedback.get('max_attempts')) is not int or feedback['max_attempts']!=1
+            or feedback.get('reason_code') not in (
+                'DIFY_MODEL_CONTRACT_SLOTS','DIFY_MODEL_CONTRACT_BOUNDARY','DIFY_MODEL_CONTRACT_OWN_QUOTE',
+                'DIFY_MODEL_CONTRACT_PUBLIC_SCOPE','DIFY_MODEL_CONTRACT_UNAVAILABLE_FACT_SLOT')):
+        raise ValueError('Invalid output-contract correction feedback')
+    previous=feedback['previous_output']
+    if not isinstance(previous,dict) or set(previous)!={'schema_version','reply_plan'} or previous.get('schema_version')!='2.2':
+        raise ValueError('Invalid previous model output')
+    plan=previous['reply_plan']
+    if (not isinstance(plan,dict) or not {'kind','text'}<=set(plan)
+            or set(plan)-{'kind','text','quote_value','question','context_ref','acceptance'}
+            or plan.get('kind') not in ('REPLY','RECONFIRM','ASK_VOLUME','CLARIFY','SOCIAL','HANDOFF_NOTICE')
+            or not isinstance(plan.get('text'),str) or not 1<=len(plan['text'].strip())<=1500):
+        raise ValueError('Invalid previous model output')
+    if plan['kind']=='REPLY' and 'quote_value' not in plan:raise ValueError('Invalid previous model output')
+    if plan['kind']=='HANDOFF_NOTICE':
+        if plan.get('acceptance')!={'meaning':'ACCEPTED_CURRENT_QUOTE','source':'LATEST_INBOUND'} or 'quote_value' in plan:raise ValueError('Invalid previous model output')
+    elif 'acceptance' in plan:raise ValueError('Invalid previous model output')
+    if 'quote_value' in plan and (not isinstance(plan['quote_value'],str)
+            or not re.fullmatch(r'-?\d{1,12}(?:\.\d{1,8})?',plan['quote_value'])):
+        raise ValueError('Invalid previous model output')
+    if ('question' in plan and plan['question'] not in ('NONE','NEGOTIATE','ASK_SETTLEMENT','ASK_CURRENT_QUOTE','ASK_MORE_VOLUME')
+            or 'context_ref' in plan and (not isinstance(plan['context_ref'],str) or not re.fullmatch(r'[a-f0-9]{64}',plan['context_ref']))):
+        raise ValueError('Invalid previous model output')
+    try:size=len(json.dumps(previous,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode('utf8'))
+    except (TypeError,ValueError,UnicodeError):raise ValueError('Invalid previous model output') from None
+    if size>6144:raise ValueError('Previous model output exceeds correction limit')
 
 
 def compact_context(context):
-    """Remove mechanical repetitions, never trim text, context rows or facts."""
+    """Project model metadata; retain all business text, context rows and facts."""
+    feedback=context.get('validation_feedback')
+    ordinary_analysis_recovery=(context.get('stage')=='analysis' and isinstance(feedback,dict)
+                                and feedback.get('mode')=='OUTPUT_CONTRACT')
+    if ordinary_analysis_recovery:validate_analysis_association_feedback(feedback)
+    text_only=isinstance(feedback,dict) and feedback.get('mode')=='TEXT_ONLY'
+    production_reply=(context.get('stage')=='reply'
+                      and context.get('context_policy_revision')=='latest_quote_confirmation_v1')
     def message(row):
-        return {key:value for key,value in row.items() if key not in ('content_hash','thread_id','event_id')}
+        omitted={'content_hash','thread_id','event_id'}
+        if production_reply:omitted.update(('message_id','native_id','target_id','source_seq'))
+        return {key:value for key,value in row.items() if key not in omitted}
     def evidence_index(member, rows, our_quote):
         loaded = list(dict.fromkeys(row['message_id'] for row in rows))
         if isinstance(our_quote, str):
@@ -33,9 +217,8 @@ def compact_context(context):
     # all source facts below so the model and the independent validator can
     # inspect the same complete raw messages and authoritative comparison.
     result = {}
-    if context.get('stage') == 'reply' and not context.get('validation_feedback'):
+    if context.get('stage') == 'reply' and not text_only:
         result['reply_requirements']=reply_requirements(context)
-        result['quote_grid']=quote_grid(context)
         result['public_information_candidates']=public_information(context)
     if context.get('stage') == 'analysis' and 'messages' in context:
         result['messages'] = context['messages']
@@ -55,25 +238,45 @@ def compact_context(context):
         result['current_counterparty_quote'] = dict(peer_quote) if isinstance(peer_quote, dict) else peer_quote
         result['current_member_lots'] = [lot for lot in context.get('group_summary', {}).get('whole_lots', [])
                                          if lot.get('member_id') == context.get('member_id')]
-        result['evidence_index'] = [evidence_index(context, context.get('context', []), context.get('our_quote'))]
+        if not production_reply:
+            result['evidence_index'] = [evidence_index(context, context.get('context', []), context.get('our_quote'))]
     elif 'members' in context:
         common = context.get('messages', []) + context.get('correction_context', [])
         result['evidence_index'] = [evidence_index(member, common + member.get('context', []), member.get('our_quote_json'))
                                     for member in context['members']]
     result.update({key:value for key,value in context.items() if key != 'basis'})
+    if (context.get('stage')=='reply' and isinstance(feedback,dict)
+            and feedback.get('mode')=='OUTPUT_CONTRACT'):
+        validate_output_contract_feedback(feedback)
+        previous=feedback['previous_output']
+        # Hide rejected prose only in this model view. Code and audit still
+        # receive the full original feedback/context for every rejection.
+        model_plan=dict(previous['reply_plan']);model_plan.pop('text')
+        result['validation_feedback']={**feedback,'previous_output':{
+            **previous,'reply_plan':model_plan}}
     if 'messages' in context:
         result['messages'] = [message(row) for row in context['messages']]
     if 'correction_context' in context:
         result['correction_context'] = [message(row) for row in context['correction_context']]
     if 'context' in context:
         result['context'] = [message(row) for row in context['context']]
+    if production_reply:
+        for key in ('evidence_index','member_id','thread_id','reconfirm_command_id','analysis_tool_source','handoff_evidence'):
+            result.pop(key,None)
+        if isinstance(result.get('current_inbound_message'),dict):
+            result['current_inbound_message']=message(result['current_inbound_message'])
+        if isinstance(result.get('unresolved_messages'),list):
+            result['unresolved_messages']=[message(row) for row in result['unresolved_messages']]
+        if isinstance(result.get('our_quote'),dict):
+            result['our_quote']={key:value for key,value in result['our_quote'].items()
+                                 if key not in ('command_id','message_id','native_id')}
     if 'members' in context:
         result['members'] = []
         for member in context['members']:
             copy = {key:value for key,value in member.items() if key not in ('group_id','thread_id','version','control_version')}
             copy['context'] = [message(row) for row in member.get('context',[])]
             result['members'].append(copy)
-    if context.get('stage') == 'analysis' and not context.get('validation_feedback'):
+    if context.get('stage') == 'analysis' and (not context.get('validation_feedback') or ordinary_analysis_recovery):
         if context.get('context_policy_revision')=='latest_quote_confirmation_v1':
             result['reference_gaps']=window_reference_gaps(context)
         current_ids={row['message_id'] for row in context.get('messages',[])}
@@ -85,7 +288,7 @@ def compact_context(context):
         candidates.sort(key=lambda span:span['message_id'] not in current_ids)
         hints=literal_member_hints(context,candidates)
         result['current_member_candidates']=[{'member_id':member['member_id'], 'bond_code':member.get('bond_code'),
-            'candidate_ids':[span['id'] for span in candidates if span['message_id'] in current_ids
+            'candidate_ids':[span['id'] for span in candidates if span['message_id'] in {row['message_id'] for row in context.get('messages',[]) if row.get('direction')=='in'}
                              and hints.get(span['id'])==[member['member_id']]]}
             for member in context.get('members',[])]
         result['slot_candidates'] = [{**{key:value for key,value in span.items() if key not in ('lexical','value')},
@@ -93,10 +296,11 @@ def compact_context(context):
                                       **({'explicit_bond_members':hints[span['id']]} if span['id'] in hints else {})}
                                      for span in candidates
                                      if span['message_id'] in current_ids or numeric_roles.intersection(span['roles'])]
-    if context.get('stage') == 'reply' and not context.get('validation_feedback'):
+    if context.get('stage') == 'reply' and not text_only:
         result['reply_requirements']=reply_requirements(context)
-        result['quote_grid']=quote_grid(context)
         result['public_information_candidates']=public_information(context)
+    if context.get('stage')=='analysis' and ('validation_feedback' not in context or ordinary_analysis_recovery):
+        result=analysis_reference_metadata(result,context,encode=True,kind='view')
     return result
 
 
@@ -181,7 +385,7 @@ def _validate_result_strict(result, context, stage):
         for mid, scope in scopes.items():
             unclear = unresolved.get(mid, [])
             if not isinstance(scope, list) or not isinstance(unclear, list) or any(m not in members for m in scope + unclear) or set(scope) & set(unclear):
-                raise ValueError('Invalid member association')
+                raise AnalysisAssociationError('Invalid member association')
         if not isinstance(observations, list) or len(observations) > 100:
             raise ValueError('Invalid observations')
         fields = {'price', 'volume_wan', 'assertion', 'validity', 'finality', 'confirmed_day'}
@@ -239,7 +443,7 @@ def _validate_result_strict(result, context, stage):
         else:
             if not isinstance(proposal, dict) or set(proposal) - {'kind', 'text', 'our_price', 'render_plan'}:
                 raise ValueError('Invalid proposal')
-            if proposal.get('kind') not in ('REPLY', 'RECONFIRM', 'ASK_VOLUME', 'CLARIFY', 'SOCIAL'):
+            if proposal.get('kind') not in ('REPLY', 'RECONFIRM', 'ASK_VOLUME', 'CLARIFY', 'SOCIAL', 'HANDOFF_NOTICE'):
                 raise ValueError('Invalid proposal kind')
             if not isinstance(proposal.get('text'), str) or not 1 <= len(proposal['text']) <= 1500:
                 raise ValueError('Missing bounded public text')
@@ -387,14 +591,28 @@ def _decode_text_repair(result, context, stage):
         raise ValueError('Text patch cannot contain other response fields')
     feedback, original = _repair_original(context, 'reply', 'TEXT_ONLY')
     if feedback.get('reason') not in ('Public yield text differs from validated quote',
-                                      'Reply direction differs from our authorized side'):
+                                      'Reply direction differs from our authorized side',
+                                      'Reply repeats the last verified native quotation'):
         raise ValueError('Text patch requires a permitted public-text rejection')
     proposal, patch = original.get('proposal'), result['text_repair']
     if original.get('action') != 'SEND' or not isinstance(proposal, dict) or proposal.get('kind') != 'REPLY':
         raise ValueError('Text patch requires the original SEND/REPLY candidate')
     if not isinstance(patch, dict) or set(patch) != {'text'}:
         raise ValueError('Text patch only permits text')
-    proposal['text'] = patch['text']
+    if not isinstance(proposal.get('render_plan'),dict):
+        raise ValueError('Text patch requires a source-bound natural reply plan')
+    # Only the literal-slot template changes. Rebind against the frozen
+    # application context; no naked-text compatibility branch remains.
+    rebuilt=render_reply_plan(context,{**proposal['render_plan'],'text':patch['text']})['proposal']
+    def nontext(value):
+        value=dict(value);value.pop('text',None)
+        if isinstance(value.get('render_plan'),dict):
+            value['render_plan']={k:v for k,v in value['render_plan'].items() if k!='text'}
+        return value
+    if (nontext(rebuilt)!=nontext(proposal)
+            or requested_volume_signature(rebuilt)!=requested_volume_signature(proposal)):
+        raise ValueError('Text patch changed frozen economic fields')
+    original['proposal']=rebuilt
     return validate_result(original, context, 'reply')
 
 
@@ -439,19 +657,6 @@ def _has_price_expression(result):
                     and {'basis', 'operation', 'bp'} & set(field['value'])):
                 return True
     return False
-
-
-def _reply_parts(result):
-    proposal = result['proposal']
-    if (result.get('action') != 'SEND' or set(proposal) - {'kind', 'information_text', 'negotiation_text', 'our_price'}
-            or not {'information_text', 'negotiation_text'} <= set(proposal)):
-        raise ValueError('Reply parts require an ordinary SEND proposal without mixed text')
-    parts = [proposal['information_text'], proposal['negotiation_text']]
-    if any(not isinstance(part, str) for part in parts):
-        raise ValueError('Reply parts must be strings')
-    decoded = {key: value for key, value in proposal.items() if key not in ('information_text', 'negotiation_text')}
-    decoded['text'] = '\n'.join(part for part in parts if part != '')
-    return {**result, 'proposal': decoded}
 
 
 class WireFieldError(ValueError):
@@ -513,12 +718,25 @@ def decode_stage_result(result, context, stage):
         raise ValueError('Expected V2.2 result')
     if not isinstance(context, dict) or context.get('schema_version') != '2.2' or context.get('stage') != stage:
         raise ValueError('Wrong stage context')
+    feedback=context.get('validation_feedback')
+    output_correction=isinstance(feedback,dict) and feedback.get('mode')=='OUTPUT_CONTRACT'
+    ordinary_analysis_recovery=stage=='analysis' and output_correction
+    if output_correction:
+        if ordinary_analysis_recovery:validate_analysis_association_feedback(feedback)
+        elif stage=='reply':validate_output_contract_feedback(feedback)
+        else:raise ValueError('Invalid output-contract correction stage')
+    ordinary_reply=stage=='reply' and ('validation_feedback' not in context or output_correction)
+    if ordinary_analysis_recovery and not result.get('tool_requests') and not result.get('history_requests'):
+        _validate_result_strict({**result,'observations':[]},context,stage)
+        # Complete coverage is already required. Validate known native scopes
+        # without adopting the helper's filled/reordered copy as a repair.
+        _complete_known_outbound_scopes(result,context)
     if (stage=='analysis' and 'validation_feedback' not in context
             and not result.get('tool_requests') and not result.get('history_requests')):
         result=_complete_known_outbound_scopes(result,context)
     confirmations=result.get('confirmation_requests',[])
     if confirmations:
-        if stage!='analysis' or 'validation_feedback' in context or result.get('tool_requests') or result.get('history_requests'):
+        if stage!='analysis' or ('validation_feedback' in context and not ordinary_analysis_recovery) or result.get('tool_requests') or result.get('history_requests'):
             raise ValueError('Reference confirmation requires an ordinary final analysis')
         if not isinstance(confirmations,list) or len(confirmations)>100:raise ValueError('Unbounded reference confirmations')
         _validate_result_strict({**result,'observations':[]},context,stage)
@@ -528,9 +746,9 @@ def decode_stage_result(result, context, stage):
         for item in confirmations:
             if isinstance(item,dict):
                 item=dict(item)
-                if 'member_id' not in item and len(members)==1:item['member_id']=next(iter(members))
+                if not ordinary_analysis_recovery and 'member_id' not in item and len(members)==1:item['member_id']=next(iter(members))
                 inbound=[ref for ref,m in messages.items() if m.get('direction')=='in' and not m.get('historical')]
-                if 'source_ids' not in item and len(inbound)==1:item['source_ids']=inbound
+                if not ordinary_analysis_recovery and 'source_ids' not in item and len(inbound)==1:item['source_ids']=inbound
             if (not isinstance(item,dict) or set(item)!={'member_id','side','source_ids'}
                     or item['member_id'] not in members or item['side'] not in ('bid','ofr')
                     or not isinstance(item['source_ids'],list) or not item['source_ids']
@@ -550,26 +768,33 @@ def decode_stage_result(result, context, stage):
     if 'text_repair' in result:
         return _decode_text_repair(result, context, stage)
     if 'reply_plan' in result:
-        if (stage!='reply' or 'validation_feedback' in context or result.get('action') not in (None,'SEND')
+        if (not ordinary_reply or result.get('action') not in (None,'SEND')
                 or set(result)-{'schema_version','action','reply_plan','trader_view'}):
             raise ValueError('Reply plan requires an ordinary SEND response without mixed fields')
+        if output_correction:
+            previous=feedback['previous_output']['reply_plan']
+            current=result['reply_plan']
+            if (isinstance(current,dict) and (current.get('kind')=='HANDOFF_NOTICE' or previous.get('kind')=='HANDOFF_NOTICE')
+                    and {key:value for key,value in current.items() if key!='text'}!={key:value for key,value in previous.items() if key!='text'}):
+                raise ValueError('Output-contract correction changed frozen reply fields')
+            if (not isinstance(current,dict)
+                    or ('context_ref' in current)!=('context_ref' in previous)
+                    or current.get('context_ref')!=previous.get('context_ref')
+                    or current.get('kind')=='REPLY' and (previous['kind']!='REPLY'
+                       or current.get('question','NONE')!=previous.get('question','NONE')
+                       or feedback['reason_code']!='DIFY_MODEL_CONTRACT_BOUNDARY'
+                          and current.get('quote_value')!=previous['quote_value'])):
+                raise ValueError('Output-contract correction changed frozen reply fields')
         proposal=render_reply_plan(context,result['reply_plan'])['proposal']
         return validate_result({**{k:v for k,v in result.items() if k!='reply_plan'},'action':'SEND','proposal':proposal},context,stage)
-    if (stage=='reply' and context.get('context_policy_revision')=='latest_quote_confirmation_v1'
-            and not context.get('validation_feedback') and result.get('action')=='SEND'):
+    if ordinary_reply and result.get('action')=='SEND':
         raise ValueError('Current reply flow requires a source-bound reply_plan')
-    if _has_price_expression(result) and (stage != 'analysis' or 'validation_feedback' in context
+    if _has_price_expression(result) and (stage != 'analysis' or ('validation_feedback' in context and not ordinary_analysis_recovery)
             or result.get('tool_requests') or result.get('history_requests')):
         raise ValueError('Price expressions require an ordinary final analysis response')
-    proposal = result.get('proposal')
-    if isinstance(proposal, dict) and {'information_text', 'negotiation_text'} & set(proposal):
-        if (stage != 'reply' or 'validation_feedback' in context
-                or result.get('tool_requests') or result.get('history_requests')):
-            raise ValueError('Reply parts require an ordinary final reply response')
-        return validate_result(_reply_parts(result), context, stage)
     # Full repair responses retain their old path, including backend frozen-
     # field rejection. Never extract a benign patch from an overreaching reply.
-    if (context.get('validation_feedback') or stage != 'analysis' or result.get('tool_requests')
+    if (context.get('validation_feedback') and not ordinary_analysis_recovery or stage != 'analysis' or result.get('tool_requests')
             or result.get('history_requests') or not isinstance(result.get('observations'), list)):
         return validate_result(result, context, stage)
     _validate_result_strict({**result, 'observations': []}, context, 'analysis')
@@ -579,6 +804,8 @@ def decode_stage_result(result, context, stage):
     for index, observation in enumerate(result['observations']):
         try:
             slot_wire = isinstance(observation,dict) and 'slots' in observation
+            if ordinary_analysis_recovery and slot_wire and not {'member_id','source_ids'}<=set(observation):
+                raise ValueError('Association correction needs explicit member and source IDs')
             decoded = decode_slot_observation(observation,context) if slot_wire else _paired_observation(observation)
             if slot_wire:
                 _validate_result_strict({**result, 'observations':[decoded]}, context, stage)
@@ -595,3 +822,63 @@ def decode_stage_result(result, context, stage):
                     validation_path='observations['+str(index)+'].'+(exc.path if isinstance(exc,WireFieldError) else 'slots'))
             checked.append(rejection)
     return {**result, 'observations': checked}
+
+
+def decode_model_output(result,context,stage):
+    """Carry authentic bounded Code rejections to the matching stage client."""
+    feedback=context.get('validation_feedback') if isinstance(context,dict) else None
+    ordinary_analysis_recovery=(stage=='analysis' and isinstance(feedback,dict)
+                                and feedback.get('mode')=='OUTPUT_CONTRACT')
+    if ordinary_analysis_recovery:validate_analysis_association_feedback(feedback)
+    if stage=='analysis' and isinstance(context,dict) and ('validation_feedback' not in context or ordinary_analysis_recovery):
+        result=analysis_reference_metadata(result,context,encode=False)
+    previous=None
+    if isinstance(result,dict) and result.get('schema_version')=='2.2' and isinstance(result.get('reply_plan'),dict):
+        try:
+            candidate=json.dumps({'schema_version':'2.2','reply_plan':result['reply_plan']},
+                ensure_ascii=False,allow_nan=False,separators=(',',':'))
+            if len(candidate.encode('utf8'))<=6144:previous=json.loads(candidate)
+        except (ValueError,TypeError,UnicodeError):pass
+    try:return decode_stage_result(result,context,stage)
+    except AnalysisAssociationError as exc:
+        if stage!='analysis' or feedback is not None and not ordinary_analysis_recovery:raise
+        payload={'version':1,'origin':'analysis_associations',
+                 'reason_code':'DIFY_MODEL_CONTRACT_ANALYSIS_ASSOCIATION'}
+        raise ValueError(OUTPUT_CONTRACT_MARKER+json.dumps(payload,separators=(',',':'))) from exc
+    except ValueError as exc:
+        reasons={
+            'Economic numbers and facts must use verified slots':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Settlement clarification must actually ask for settlement':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Cash quote basis prefix conflicts with verified field':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Ambiguous adjacent quote direction word':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Quote percent suffix conflicts with verified price kind':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Own quote slot repeats or conflicts with an adjacent direction':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Quote direction suffix conflicts with verified field':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Ambiguous adjacent quote percent component':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Ambiguous adjacent quantity unit word':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Quantity unit suffix conflicts with verified whole lot':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Equivalent fact-macro text exceeds 1500 characters':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Public reference is attributed to the wrong speaker':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Current quotation cannot be described as historical':'DIFY_MODEL_CONTRACT_SLOTS',
+            'Selected quote is outside the authorized final boundary':'DIFY_MODEL_CONTRACT_BOUNDARY',
+            'A quote reply must bind its own structured quotation':'DIFY_MODEL_CONTRACT_OWN_QUOTE',
+            'Nonquote plan cannot insert an own price':'DIFY_MODEL_CONTRACT_OWN_QUOTE',
+            'Public reply exposes private policy or internal context':'DIFY_MODEL_CONTRACT_PUBLIC_SCOPE',
+            'Quantity confirmation must explicitly refer to a quotation, not execution':'DIFY_MODEL_CONTRACT_PUBLIC_SCOPE',
+            'Reply promises execution or reserves a counterparty lot':'DIFY_MODEL_CONTRACT_PUBLIC_SCOPE',
+            'Counterparty reference is not an actual quotation':'DIFY_MODEL_CONTRACT_UNAVAILABLE_FACT_SLOT',
+            'Unknown or unavailable public fact slot':'DIFY_MODEL_CONTRACT_UNAVAILABLE_FACT_SLOT',
+        }
+        feedback=context.get('validation_feedback') if isinstance(context,dict) else None
+        if (stage!='reply' or str(exc) not in reasons or previous is None
+                or feedback is not None and (not isinstance(feedback,dict) or feedback.get('mode')!='OUTPUT_CONTRACT')):
+            raise
+        correction={'mode':'OUTPUT_CONTRACT','attempt':1,'max_attempts':1,
+                    'reason_code':reasons[str(exc)],'previous_output':previous}
+        try:validate_output_contract_feedback(correction)
+        except ValueError:raise exc
+        payload={'version':1,'origin':'render_reply_plan','reason_code':correction['reason_code'],
+                 'previous_output':previous}
+        encoded=json.dumps(payload,ensure_ascii=False,allow_nan=False,separators=(',',':'))
+        if len(encoded.encode('utf8'))>8192:raise exc
+        raise ValueError(OUTPUT_CONTRACT_MARKER+encoded) from exc

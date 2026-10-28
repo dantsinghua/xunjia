@@ -600,16 +600,18 @@ class Store:
                     for part in re.split(r'[,，;；。\n]',message['text'])):
                 raise InvalidFact('Multiple named bonds require an unambiguous settlement clause for this member')
 
-    @staticmethod
-    def _known_outbound_scopes(tx, thread_id, messages, members):
+    def _known_outbound_scopes(self, tx, thread_id, messages, members):
         """Snapshot native-send associations, not current permission to send or confirm."""
         current={member['member_id'] for member in members}
         known={}
+        thread=tx.execute('SELECT owner_id,account_uid,workbench_id FROM xj2_thread WHERE thread_id=?',(thread_id,)).fetchone()
+        if not thread:return known
+        epoch=self.account_epoch(tx,thread['owner_id'],thread['account_uid'],workbench_id=thread['workbench_id'] or '')
         for message in messages:
-            if message['direction']!='out' or message['historical'] or not message['native_id']:
+            if message['kind']!='message' or message['direction']!='out' or message['historical'] or not message['native_id']:
                 continue
-            commands=tx.execute("SELECT command_id,body_json,content_hash,native_id FROM xj2_command WHERE thread_id=? AND native_id=? AND state='SENT'",
-                                (thread_id,message['native_id'])).fetchall()
+            commands=tx.execute("SELECT command_id,body_json,content_hash,native_id FROM xj2_command WHERE thread_id=? AND native_id=? AND state='SENT' AND account_epoch=?",
+                                (thread_id,message['native_id'],epoch)).fetchall()
             if len(commands)!=1:continue
             command=commands[0];body=json.loads(command['body_json'])
             if (body['kind']=='MANUAL' or body['text']!=message['text'] or command['native_id']!=message['native_id']

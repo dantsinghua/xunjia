@@ -10,6 +10,7 @@
  *
  * 本文件禁止碰 window / document —— 它会被 Vite 打进 worker bundle。
  */
+import { appPath } from './appBase'
 import type {
   BondStatic, QuoteDelta, GatewayInMsg, GatewayOutMsg,
   MainToWorkerMsg, WorkerToMainMsg, WorkerStat, ConnectionIdentifiers,
@@ -63,7 +64,7 @@ export class QuoteCore {
   private ws: WebSocket | null = null
   private wsState: WorkerStat['wsState'] = 'idle'
   private wsUrl: string | null = null
-  private staticBase = '/api/bond-static'
+  private staticBase = appPath('/api/bond-static')
   private authToken = ''
   private userScope = ''
   private authenticated = false
@@ -168,7 +169,7 @@ export class QuoteCore {
     this.userScope = ids.userScope
     if (!this.wsUrl) {
       this.wsUrl = ids.wsUrl || defaultWsUrl()
-      if (ids.staticBase) this.staticBase = ids.staticBase
+      if (ids.staticBase) this.staticBase = appPath(ids.staticBase)
     }
     this.ensureSocket()
     this.ensureStatic()
@@ -520,5 +521,5 @@ function defaultWsUrl(): string {
   const loc = (globalThis as { location?: { protocol: string; host: string } }).location
   if (!loc) return 'ws://127.0.0.1:8120/ws/quote'
   const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${loc.host}/ws/quote`
+  return `${proto}//${loc.host}${appPath('/ws/quote')}`
 }

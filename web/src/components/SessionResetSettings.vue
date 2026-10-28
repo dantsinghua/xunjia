@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { newRequestId } from '../lib/requestId'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { api, type SessionResetStatus } from '../api'
 import { imBoundAccount } from '../lib/imLink'
@@ -65,9 +66,14 @@ async function refresh() {
 }
 function prepare() {
   if (props.offline || !imBoundAccount.value || pending.value || submitting.value) return
-  armed.value = true
   error.value = ''
-  if (!requestId) requestId = crypto.randomUUID()
+  try {
+    if (!requestId) requestId = newRequestId()
+    armed.value = true
+  } catch (e) {
+    armed.value = false
+    error.value = e instanceof Error ? e.message : '请求编号生成失败，未提交请求'
+  }
 }
 async function confirm() {
   const b = imBoundAccount.value

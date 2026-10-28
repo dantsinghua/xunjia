@@ -11,7 +11,7 @@ def status_label(group, peer=None):
     if peer is None:
         values={status_label(group,p) for p in group.get('peers',[])}
         return next((value for value in ('待核对','待回执','发送失败','询价中','待人工确认','已暂停','已放弃') if value in values),'待询价')
-    if not peer['send_allowed']:return '已暂停'
+    if not peer['send_allowed']:return '待人工确认' if peer.get('member_handoff_pending') else '已暂停'
     state=peer.get('command_state')
     if state=='UNKNOWN':return '待核对'
     if state in ('QUEUED','PENDING'):return '待回执'
@@ -20,6 +20,20 @@ def status_label(group, peer=None):
     return '询价中'
 
 class ApplicationStore(Store):
+    @staticmethod
+    def _member_handoff_pending(tx,peer):
+        if peer['send_allowed']:return False
+        # HANDOFF atomically stores the pre-control basis and increments only
+        # this member's control version once. Any later manual control change
+        # invalidates that handoff, without mutating audit records or facts.
+        for row in tx.execute("SELECT basis_json FROM xj2_decision WHERE member_id=? AND state='HANDOFF'",(peer['member_id'],)).fetchall():
+            try:basis=json.loads(row['basis_json'])
+            except (TypeError,ValueError):continue
+            if (isinstance(basis,dict) and basis.get('member_id')==peer['member_id']
+                    and type(basis.get('member_control')) is int
+                    and basis['member_control']+1==peer['control_version']):return True
+        return False
+
     @staticmethod
     def thread_is_current(tx,thread):
         binding=tx.execute('SELECT account_uid,workbench_id FROM xj2_binding WHERE owner_id=?',(thread['owner_id'],)).fetchone()
@@ -84,6 +98,7 @@ class ApplicationStore(Store):
             g['peers']=[]
             for peer in peers:
                 item=dict(peer)
+                item['member_handoff_pending']=self._member_handoff_pending(tx,item)
                 item['our_quote']=json.loads(item.pop('our_quote_json'))
                 item['quotes']={side:self._quote(tx,item['member_id'],side).dump() for side in ('bid','ofr')}
                 item['analysis_pending']=self._analysis_pending(tx,{'owner_id':owner,**item})

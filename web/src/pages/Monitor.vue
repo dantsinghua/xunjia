@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { newRequestId } from '../lib/requestId'
 /** 屏2 · 机器人监控:开关+统计条 / 左对手×券卡片(同对手多券标「同一线程⚠」) /
  *  中聊天流(bot·对方·人工·系统气泡,券锚高亮,意图标签,点消息看链路追踪) /
  *  同页人工发送框 / 右侧在聊债券(三步进度+价格+操作) / 询价明细·导出弹窗。
@@ -373,12 +374,12 @@ async function sendChat() {
   const origin = { cp:selCp.value.id, bond:activeBond.value, account:accountScope(), draft:chatInput.value, revision:draftRevision, requestId:'' }
   const stillCurrent = () => origin.cp === selCp.value?.id && origin.account === accountScope()
   const fingerprint = JSON.stringify([origin.cp, origin.bond, origin.account, t])
-  if (sendAttempt?.fingerprint !== fingerprint) sendAttempt = { fingerprint, id:crypto.randomUUID() }
-  const requestId = sendAttempt.id
-  origin.requestId=requestId
   sendBusy.value = true
   sendFail.value = ''
   try {
+    if (sendAttempt?.fingerprint !== fingerprint) sendAttempt = { fingerprint, id:newRequestId() }
+    const requestId = sendAttempt.id
+    origin.requestId=requestId
     const r = await api.monitorSend(origin.cp, origin.bond, t, requestId)
     if (r.ok && r.data?.cmd_id) pendingReceipts.set(r.data.cmd_id, origin)
     if (!stillCurrent()) return
@@ -401,10 +402,10 @@ async function sendChat() {
     message.error('没有发出去')
     sendPhase.value = 'failed'
     sendFail.value = '没有发出去'
-  } catch {
+  } catch (e) {
     if (!stillCurrent()) return
     sendPhase.value = 'failed'
-    sendFail.value = '失败'
+    sendFail.value = e instanceof Error ? e.message : '失败'
   } finally {
     sendBusy.value = false
   }
@@ -589,9 +590,9 @@ function onJump(cpId: string, bondName: string) {
       <aside class="panel bond-panel">
         <div class="panel-hd"><b>当前在聊债券</b><span class="cnt">{{ currentBonds.length }} 只</span></div>
         <details v-if="resumableBonds.length" class="resume-menu" data-testid="paused-bond-actions">
-          <summary>恢复本券</summary>
+          <summary>{{ resumableBonds.some(b => b.stage === '待人工确认') ? '待人工确认 / 恢复本券' : '恢复本券' }}</summary>
           <button v-for="b in resumableBonds" :key="b.sessionId" class="rba" type="button"
-            :disabled="bondControlBusy(b)" @click="toggleBondNegotiation(b)">{{ b.name }} · 恢复本券</button>
+            :disabled="bondControlBusy(b)" @click="toggleBondNegotiation(b)">{{ b.name }} · {{ b.stage === '待人工确认' ? '待人工确认 · 交回机器' : '恢复本券' }}</button>
         </details>
         <div class="panel-body">
           <p v-if="!currentBonds.length" class="empty-real" data-testid="current-bonds-empty">今日暂无询价中债券，历史消息及识券结果仍保留在对话中。</p>

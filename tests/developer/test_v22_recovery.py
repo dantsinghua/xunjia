@@ -2,6 +2,7 @@
 from server.app import create_app
 from server.auth import AuthConfig
 from server.negotiation.settings import Aggregation
+from server.negotiation.reply_render import render_reply_plan
 
 
 def test_rejected_price_can_prompt_clarification_instead_of_stalling_forever(tmp_path):
@@ -14,8 +15,8 @@ def test_rejected_price_can_prompt_clarification_instead_of_stalling_forever(tmp
                     'price':{'kind':'YIELD','value':'3.99'}},'evidence':{'price':[m['message_id']]}}]}
         def decide(self,context):
             self.calls+=1
-            return {'schema_version':'2.2','action':'SEND','proposal':{
-                'kind':'CLARIFY','text':'请再确认这只券的可做价格和数量。'}}
+            return {'schema_version':'2.2','action':'SEND','proposal':render_reply_plan(context,{
+                'kind':'CLARIFY','question':'NONE','text':'请再确认这只券的可做价格和数量。'})['proposal']}
     flows=Flows()
     app=create_app(submission_guard=lambda _owner: None, database_url='sqlite:///'+str(tmp_path/'recovery.db'),enable_background=False,
         chatflows=flows,aggregation=Aggregation(0,0,1000,'synthetic-fixture'),auth_config=AuthConfig(clock=lambda:1792202400))

@@ -8,7 +8,9 @@ import yaml
 
 from dify.negotiation_v22 import node_code, prompts
 from dify.negotiation_v22.build import build
+from server.negotiation.reply_render import render_reply_plan
 from test_model_wire_adapter import sample, paired, feedback_context
+from test_rendered_reply_plan_revision import context as sourced_reply_context
 
 
 VERSIONS = ('0.15.3', '1.17.1')
@@ -26,13 +28,13 @@ def ordinary(stage):
 def repairing(stage):
     if stage == 'analysis':
         return feedback_context(bad_sibling=True)[0]
-    context = ordinary(stage)
+    context = {**sourced_reply_context(), 'schema_version': '2.2', 'stage': 'reply'}
     context['validation_feedback'] = {
         'mode': 'TEXT_ONLY', 'attempt': 1, 'max_attempts': 1,
-        'reason': 'Public yield text differs from validated quote',
+        'reason': 'Reply direction differs from our authorized side',
         'original_response': {'schema_version': '2.2', 'action': 'SEND',
-            'proposal': {'kind': 'REPLY', 'our_price': {'kind': 'YIELD', 'value': '3.19'},
-                         'text': 'SYN-A 3.19收500万'},
+            'proposal': render_reply_plan(context, {'kind': 'REPLY', 'quote_value': '3.19',
+                         'text': 'SYN-A {own_quote}，出{peer_volume}。'})['proposal'],
             'trader_view': {'reason': 'Synthetic immutable decision'},
             'tool_requests': [], 'history_requests': []}}
     return context
@@ -132,27 +134,58 @@ def test_message_and_tool_payloads_cannot_select_or_replace_the_system(version, 
 @pytest.mark.parametrize('version', VERSIONS)
 @pytest.mark.parametrize('stage', ['analysis', 'reply'])
 def test_mode_projection_keeps_all_twenty_default_rows_and_explicit_history_anchor(version, stage):
-    _, _, project, _ = generated(stage, version)
+    _, _, project, contract = generated(stage, version)
     context = ordinary(stage)
     rows = [{'message_id': 'old-'+str(i), 'direction': 'in' if i % 2 else 'out',
              'native_id': 'synthetic-native-'+str(i), 'text': '原文  %s\n  未裁剪%s' % (i, '长' * 100),
              'ingest_revision': i+1, 'historical': False} for i in range(20)]
     anchor = {'message_id': 'explicit-anchor', 'direction': 'out', 'text': 'SYN-A 3.10%收',
               'native_id': 'synthetic-old-anchor', 'ingest_revision': 0, 'historical': True}
-    if stage == 'analysis': context['members'][0]['context'] = rows + [anchor]
+    if stage == 'analysis':
+        context['members'][0]['context'] = rows + [anchor]
+        context['messages'][0]['text'] += '；引用 explicit-anchor'
     else: context['context'] = rows + [anchor]
     context['history_results'] = [{'member_id': 'a', 'message_ids': ['explicit-anchor'], 'messages': [anchor]}]
     context['analysis_tool_results'] = [{'request': {'name': 'issuer_info', 'arguments': {'mode': 'get'}},
         'result': {'status': 'ok', 'data': {'identity': {'issuer_id': 'SYN-ISSUER'}}}}]
     context['analysis_tool_source'] = {'analysis_id': 'synthetic-owned-analysis', 'through_revision': 21}
+    before = deepcopy(context)
     result = project(json.dumps(context, ensure_ascii=False))
     system(result)
     projected = json.loads(result['context'])
     actual = projected['members'][0]['context'] if stage == 'analysis' else projected['context']
-    assert actual == rows + [anchor]
-    assert projected['history_results'] == context['history_results']
+    if stage == 'analysis':
+        # Ordinary A changes metadata references only. Compare the complete
+        # restored canonical rows, not a reduced text-only projection.
+        assert len(actual) == len(rows) + 1
+        restored = []
+        for original, row in zip(rows + [anchor], actual):
+            assert row['message_id'] != original['message_id']
+            copy = deepcopy(row)
+            assert copy.pop('original_reference_id', original['message_id']) == original['message_id']
+            copy['message_id'] = original['message_id']
+            restored.append(copy)
+        assert restored == rows + [anchor]
+        assert actual[-1]['original_reference_id'] == anchor['message_id']
+        wire = {'schema_version':'2.2','history_requests':[{
+            'member_id':projected['members'][0]['member_id'],
+            'message_ids':[row['message_id'] for row in actual]}]}
+        decoded = json.loads(contract(json.dumps(wire),json.dumps(context))['result'])
+        assert decoded['history_requests'] == [{'member_id':context['members'][0]['member_id'],
+            'message_ids':[row['message_id'] for row in rows + [anchor]]}]
+        history = deepcopy(projected['history_results'])
+        assert history[0]['member_id'] == projected['members'][0]['member_id']
+        assert history[0]['message_ids'] == [actual[-1]['message_id']]
+        assert history[0]['messages'] == [actual[-1]]
+        history[0].update(member_id=context['members'][0]['member_id'],
+            message_ids=[anchor['message_id']],messages=[restored[-1]])
+        assert history == context['history_results']
+    else:
+        assert actual == rows + [anchor]
+        assert projected['history_results'] == context['history_results']
     assert projected['analysis_tool_results'] == context['analysis_tool_results']
     assert projected['analysis_tool_source'] == context['analysis_tool_source']
+    assert context == before
 
 
 @pytest.mark.parametrize('version', VERSIONS)
@@ -171,12 +204,14 @@ def test_mode_selection_does_not_change_generated_legacy_paired_or_repair_decodi
     _, _, project_b, contract_b = generated('reply', version)
     ctx = repairing('reply')
     system(project_b(json.dumps(ctx)))
-    text = 'SYN-A 3.19%收500万'
+    text = 'SYN-A {own_quote}{peer_volume}'
     decoded = json.loads(contract_b(json.dumps({'schema_version': '2.2', 'text_repair': {'text': text}}),
                                   json.dumps(ctx))['result'])
     want = deepcopy(ctx['validation_feedback']['original_response'])
-    want['proposal']['text'] = text
+    want['proposal'] = render_reply_plan(ctx,
+        {**want['proposal']['render_plan'], 'text': text})['proposal']
     assert decoded == want
+    assert decoded['proposal']['text'] == 'SYN-A 3.19%收500万'
     # This semantic check remains in the existing decoder, rather than being
     # duplicated by the selector which only validates its routing envelope.
     ctx['validation_feedback']['original_response']['tool_requests'] = [

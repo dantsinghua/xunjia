@@ -5,8 +5,8 @@ import json
 import pytest
 
 from dify.negotiation_v22.build import build
-from server.negotiation.reply_render import quote_grid, render_reply_plan
-from tests.cutover.test_rendered_reply_plan_revision import context, cash_context, plan
+from server.negotiation.reply_render import render_reply_plan
+from tests.cutover.test_rendered_reply_plan_revision import context, cash_context, plan, settlement_plan
 
 
 def missing_tick():
@@ -15,11 +15,11 @@ def missing_tick():
     return value
 
 
-def test_absent_tick_returns_unavailable_without_filling_original_constraints():
+def test_absent_tick_cannot_render_a_literal_without_filling_original_constraints():
     value = missing_tick()
     before = deepcopy(value)
-    assert quote_grid(value) == {'status': 'UNAVAILABLE', 'first_yield_pct': None,
-        'last_yield_pct': None, 'tick_size': '0.01', 'index_min': None, 'index_max': None, 'count': 0}
+    with pytest.raises(ValueError):
+        render_reply_plan(value, plan())
     assert value == before and 'tick_size' not in value['quote_constraints']
 
 
@@ -40,13 +40,15 @@ def test_present_invalid_tick_is_still_rejected_instead_of_becoming_missing(tick
     value = context()
     value['quote_constraints']['tick_size'] = tick
     with pytest.raises(ValueError):
-        quote_grid(value)
+        render_reply_plan(value, plan())
 
 
 @pytest.mark.parametrize('version', ['0.15.3', '1.17.1'])
 def test_generated_projection_retains_cash_facts_without_granting_a_price_domain(version):
     value = {**cash_context(), 'schema_version': '2.2', 'stage': 'reply',
              'context_policy_revision': 'latest_quote_confirmation_v1'}
+    value['context'][0].update(native_id='synthetic-cash-native', event_id='synthetic-cash-event',
+        thread_id=value['thread_id'], target_id=None, source_seq=21, content_hash='synthetic-source-hash')
     del value['quote_constraints']['tick_size']
     before = deepcopy(value)
     nodes = {node['id']: node['data'] for node in build('reply', version=version,
@@ -56,11 +58,18 @@ def test_generated_projection_retains_cash_facts_without_granting_a_price_domain
     exec(nodes['contract']['code'], contract)
     projected = json.loads(projection['main'](json.dumps(value))['context'])
     assert projected['quotes'] == value['quotes']
-    assert projected['context'] == value['context']
+    mechanical = {'message_id', 'native_id', 'event_id', 'thread_id', 'target_id', 'source_seq', 'content_hash'}
+    expected_messages = [{key: item for key, item in message.items() if key not in mechanical}
+                         for message in value['context']]
+    assert projected['context'] == expected_messages
+    assert all(not mechanical.intersection(message) for message in projected['context'])
+    assert [message['text'] for message in projected['context']] == [message['text'] for message in value['context']]
     assert projected['quote_constraints'] == value['quote_constraints']
-    assert projected['quote_grid']['status'] == 'UNAVAILABLE'
-    assert projected['quote_grid']['count'] == 0
-    choice = plan(kind='CLARIFY', quote_value=None, question='ASK_SETTLEMENT')
+    assert 'quote_grid' not in projected
+    assert 'tick_size' not in projected['quote_constraints']
+    choice = settlement_plan()
+    context_input = next(row for row in nodes['contract']['variables'] if row['variable'] == 'context_json')
+    assert context_input['value_selector'] == ['start', 'context_json']
     result = json.loads(contract['main'](json.dumps({'schema_version': '2.2', 'reply_plan': choice}),
                                          json.dumps(value))['result'])
     assert result['action'] == 'SEND' and result['proposal']['kind'] == 'CLARIFY'

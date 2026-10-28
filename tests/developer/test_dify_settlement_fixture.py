@@ -23,8 +23,10 @@ class ScriptedFlow:
         context={**deepcopy(context),'schema_version':'2.2','stage':self.stage}
         if self.stage=='reply':
             quote=context['quotes']['ofr']
-            plan=({'kind':'CLARIFY','question':'ASK_SETTLEMENT'} if not quote['price']['computed_yield'] else
-                  {'kind':'REPLY','quote_index':0,'include_volume':True,'question':'NEGOTIATE'})
+            plan=({'kind':'CLARIFY','question':'ASK_SETTLEMENT',
+                   'text':'你刚才{peer_quote}，结算是{settlement_options}？'} if not quote['price']['computed_yield'] else
+                  {'kind':'REPLY','quote_value':context['quote_constraints']['min_yield_pct'],
+                   'text':'SYN-A {own_quote}，{peer_volume}整笔，你再看看？','question':'NEGOTIATE'})
             return decode_stage_result({'schema_version':'2.2','reply_plan':plan},context,'reply')
         member=context['members'][0]['member_id']
         incoming=[m for m in context['messages'] if m['direction']=='in'][-1]

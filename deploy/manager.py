@@ -538,7 +538,7 @@ class Manager:
 def main():
     os.umask(0o077)
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation',choices=('preflight','install','rollback','recover','verify'))
+    parser.add_argument('operation',choices=('preflight','install','rollback','recover','verify','fresh-install'))
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--dry-run',action='store_true')
@@ -548,12 +548,17 @@ def main():
     local_meta=Path(__file__).resolve().parents[1]/'.deployment.json'
     default_prefix=load_json(local_meta).get('prefix','/home/xunjia') if local_meta.is_file() else '/home/xunjia'
     parser.add_argument('--prefix',type=Path,default=Path(os.getenv('XUNJIA_PREFIX',default_prefix)))
+    parser.add_argument('--service',default=os.getenv('XUNJIA_SERVICE','xunjia-agent.service'))
     args=parser.parse_args()
-    manager=Manager(args.bundle,args.prefix)
+    manager=Manager(args.bundle,args.prefix,SystemService(args.service,args.prefix))
     def interrupted(signum, frame): raise DeployError('DEPLOY_INTERRUPTED',str(signum))
     signal.signal(signal.SIGTERM,interrupted)
     try:
-        if args.operation=='verify':
+        if args.operation=='fresh-install':
+            if args.apply and (args.check or args.dry_run):raise DeployError('CONFLICTING_FRESH_MODES')
+            from fresh_install import run_fresh_install
+            value=run_fresh_install(manager,apply=args.apply)
+        elif args.operation=='verify':
             value=({'status':'package_integrity_only',**verify_bundle(args.bundle)}
                    if args.package_only else manager.verify_installed(liveness=args.liveness))
         elif args.operation=='preflight' or args.operation=='install' and not args.apply:

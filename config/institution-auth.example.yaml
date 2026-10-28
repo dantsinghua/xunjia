@@ -1,0 +1,4 @@
+# Copy to institution-auth.yaml under the NEW installation config directory.
+# Replace both placeholders locally. This is not an access token.
+key: REPLACE_INSTITUTION_KEY
+sm4_key: REPLACE_16_BYTES

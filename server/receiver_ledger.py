@@ -357,7 +357,7 @@ class ReceiverLedger:
                 if original!=supplied:raise ProtocolError('同一原生事件事实冲突')
                 return old['state']
             human=data.get('role')=='human'
-            active=any(row['status']=='pending' for row,_ in self._peer_commands(db,data['peer_id']))
+            active=any(row['status'] in ('pending','unknown') for row,_ in self._peer_commands(db,data['peer_id']))
             state='waiting' if active and not human and not data.get('source_command_id') else 'ready'
             if human:data.pop('source_command_id',None)
             if state=='ready' and not data.get('source_command_id'):
@@ -377,9 +377,9 @@ class ReceiverLedger:
                     mapped=db.execute('SELECT n.command_id,c.command_json FROM rx_native n JOIN rx_command c ON n.scope=c.scope AND n.command_id=c.command_id WHERE n.scope=? AND n.peer_id=? AND n.native_id=?',(self.scope,row['peer_id'],native)).fetchone()
                     if mapped and json.loads(mapped['command_json']).get('owner_user_id')!=self.binding.owner_user_id:mapped=None
                     expired=row['instance']!=self.instance_id or self.clock()>=row['deadline']
-                    active=any(r['status']=='pending' for r,_ in self._peer_commands(db,row['peer_id']))
+                    states={r['status'] for r,_ in self._peer_commands(db,row['peer_id'])}
                     if mapped:data['source_command_id']=mapped['command_id']
-                    elif active and not expired:continue
+                    elif 'unknown' in states or 'pending' in states and not expired:continue
                     else:self._manual_barrier(db,row['peer_id'],row['event_id'])
                     db.execute("UPDATE rx_deferred SET data=?,state='ready' WHERE scope=? AND event_id=?",(canonical(data).decode(),self.scope,row['event_id']))
                 ready.append(data)

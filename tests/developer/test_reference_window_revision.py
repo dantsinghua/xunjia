@@ -30,7 +30,8 @@ def test_named_reference_outside_window_cannot_commit_another_price_or_finality(
     with app.state.repository.db.transaction(write=False) as tx:
         ctx=engine._reply_context(tx,OWNER,mid,{})
     assert ctx['reference_confirmation_required'] is True
-    rendered=render_reply_plan(ctx,{'kind':'CLARIFY','question':'ASK_CURRENT_QUOTE'})
+    rendered=render_reply_plan(ctx,{'kind':'CLARIFY','question':'ASK_CURRENT_QUOTE',
+                                  'text':'SYN-A 上次记录{peer_quote}、{peer_volume}，现在仍是这个报价和数量吗？'})
     assert '上次记录' in rendered['proposal']['text'] and '3.10' in rendered['proposal']['text']
     assert engine._validate_reply(ctx,rendered['proposal'])['kind']=='CLARIFY'
     assert app.state.repository.quote(OWNER,mid,'ofr').dump()==before

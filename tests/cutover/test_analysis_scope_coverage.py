@@ -5,6 +5,7 @@ All state/commands use the real app; only model and native transport are synthet
 """
 from copy import deepcopy
 from types import SimpleNamespace
+from server.negotiation.reply_render import render_reply_plan
 
 import pytest
 
@@ -52,8 +53,8 @@ def omit_b(case, *, text='SYN-A 3.10出500万；SYN-B 3.05出800万'):
 def quoted_reply(context):
     code = context['bond_code']
     value = '3.20' if context['quotes']['ofr']['finality'] == 'FINAL' else '3.19'
-    return {'schema_version': '2.2', 'action': 'SEND', 'proposal': {
-        'kind': 'REPLY', 'text': code+' '+value+'%收500万', 'our_price': {'kind': 'YIELD', 'value': value}}}
+    return {'schema_version': '2.2', 'action': 'SEND', 'proposal': render_reply_plan(context,{
+        'kind': 'REPLY', 'quote_value':value, 'text':'{bond} {own_quote}{peer_volume}'})['proposal']}
 
 
 def assert_uncovered(result, member, side='ofr'):

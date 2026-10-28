@@ -47,9 +47,9 @@ class Chain:
         for k in list(os.environ):
             if k.startswith(('XUNJIA_','QB_')):monkeypatch.delenv(k,raising=False)
         self.gateway=MockPathGateway(self.root/'gateway',[AUTH,AUTH_B],self.clock).start()
-        self.client=lambda path:FileGatewayClient(self.gateway.base,AUTH,path=path,allow_http=True,clock=self.clock,timeout=3)
+        self.client=lambda path:FileGatewayClient(self.gateway.base,AUTH,path=path,ssl_context=self.gateway.client_context,clock=self.clock,timeout=3)
         auth=self.root/'synthetic.yaml';auth.write_text(json.dumps({'key':AUTH.key,'sm4_key':AUTH.sm4_key.decode()}));auth.chmod(0o600)
-        self.cfg=self.root/'institution.json';self.cfg.write_text(json.dumps({'contract':CONTRACT,'base_url':self.gateway.base,'auth_file':auth.name,'allow_http':True}));self.cfg.chmod(0o600)
+        self.cfg=self.root/'institution.json';self.cfg.write_text(json.dumps({'contract':CONTRACT,'base_url':self.gateway.base,'auth_file':auth.name,**self.gateway.tls_files}));self.cfg.chmod(0o600)
         monkeypatch.setenv('XUNJIA_INSTITUTION_CONFIG',str(self.cfg));monkeypatch.setenv('XUNJIA_STATE_DIR',str(self.root/'service-state'))
         self.model=MockChatflow(self.clock).start()
         self.flows=Chatflows(ChatflowClient(self.model.base,"mock-analysis",stage="analysis",timeout=3),ChatflowClient(self.model.base,"mock-reply",stage="reply",timeout=3))
@@ -69,8 +69,13 @@ class Chain:
             self.collector.hosts[row['id'],row['self_uid']]=host
         self.advertise();self.collector.metadata_once();self.runtime.tick()
     def new_app(self):
-        app=create_app(database_url='sqlite:///'+str(self.root/'business.sqlite3'),enable_background=False,chatflows=self.flows,aggregation=Aggregation(0,0,1000,"mock-only-not-production"),auth_config=AuthConfig(sso_secret='s'*64,session_secret='t'*64,clock=self.clock),quote_control=QuoteControl(directory=self.root/'quote',managers=[]))
+        app=create_app(database_url='sqlite:///'+str(self.root/'business.sqlite3'),enable_background=False,chatflows=self.flows,aggregation=Aggregation(0,0,1000,"mock-only-not-production"),auth_config=AuthConfig(sso_secret='s'*64,session_secret='t'*64,clock=self.clock),quote_control=QuoteControl(directory=self.root/'quote'))
         app.state.institution_runtime._factory=self.client
+        # This harness drives these real worker methods deterministically via pump().
+        # Model only the scheduling liveness, not owner/context/gateway readiness.
+        admission=app.state.inquiry.submit_guard
+        admission.enabled=True
+        admission.runtime['workers']={'dispatch':{'running':True},'inbox':{'running':True}}
         return app
     @property
     def runtime(self):return self.app.state.institution_runtime
@@ -78,11 +83,17 @@ class Chain:
         self.collector.publisher.directory(self.collector.directory_rows());self.runtime.tick()
     def login(self,owner='owner-a'):
         self.api.headers['Authorization']='Bearer '+self.app.state.auth.issue_token(AuthUser(owner,owner))
+        try:context=self.app.state.repository.preferences(owner).get('context_id')
+        except PermissionError:context=None
+        if context:self.api.headers['X-Xunjia-Context']=context
+        else:self.api.headers.pop('X-Xunjia-Context',None)
     def select(self,owner='owner-a',uid='10001',version=0):
         self.login(owner)
         r=self.api.post('/api/im/binding/select',json={'workbench_id':'wb-a','account_uid':uid,'expected_version':version});assert r.status_code==200,r.text
+        self.api.headers['X-Xunjia-Context']=r.json()['data']['binding']['context_id']
         for h in self.collector.hosts.values():h.bridge.publish_capabilities()
-        self.runtime.tick();self.app.state.inbox.poll_once()
+        self.pump(2)
+        assert self.app.state.institution.current_adapter(owner).context_ready
         return r.json()['data']
     def pump(self,rounds=1):
         for _ in range(rounds):

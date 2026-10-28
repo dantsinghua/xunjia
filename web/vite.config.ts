@@ -10,6 +10,7 @@ const webRoot = fileURLToPath(new URL('.', import.meta.url))
 let buildSourceHash = ''
 
 export default defineConfig(({ command }) => ({
+  base: './',
   define: { __XUNJIA_BUILD_VERSION__: JSON.stringify(command === 'build' ? buildVersion : 'development') },
   plugins: [vue(), {
     name: 'xunjia-build-version',

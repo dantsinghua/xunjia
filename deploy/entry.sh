@@ -15,8 +15,7 @@ elif command -v python3 >/dev/null 2>&1 && python3 -c "import sys; assert sys.ve
   export PYTHONDONTWRITEBYTECODE=1
   exec python3 "$HERE/bootstrap_runtime.py" "$@"
 else
-  echo "DEPLOY_BOOTSTRAP_PYTHON_MISSING: bundled ARM64 runtime bootstrap requires Python 3.7 or newer" >&2
-  exit 2
+  exec bash "$HERE/bootstrap_no_python.sh" "$@"
 fi
 export PYTHONDONTWRITEBYTECODE=1
 exec "$PY" "$HERE/manager.py" "$@"

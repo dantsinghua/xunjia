@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { newRequestId } from '../lib/requestId'
 /** 开始询价：左侧填每只债，右侧勾当前号的好友和组织架构。确认后才发。 */
 import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { App } from 'ant-design-vue'
@@ -376,12 +377,12 @@ async function requestPreview() {
   if (!imBoundAccount.value?.account_uid) { formError.value = '本人尚未绑定企点账号，不能预览授权'; return }
   const items = policyItems()
   const fingerprint = JSON.stringify({account:accountKey(),items})
-  if (previewAttempt?.fingerprint !== fingerprint) previewAttempt = {fingerprint,id:crypto.randomUUID()}
-  const requestId = previewAttempt.id
   const request = generation
   previewBusy.value = true
   preview.value = null; submission.value = null; previewNotice.value = ''
   try {
+    if (previewAttempt?.fingerprint !== fingerprint) previewAttempt = {fingerprint,id:newRequestId()}
+    const requestId = previewAttempt.id
     const r = await api.imRfqPreview(items, requestId)
     if (request !== generation || !props.open) return
     if (!r.ok) { formError.value = r.hint || '预览失败，没有授权发送'; return }
@@ -393,7 +394,7 @@ async function requestPreview() {
       formError.value = '服务端逐收件人首句为空或超过1500字，不能确认'; return
     }
     preview.value = data
-    confirmRequestId = crypto.randomUUID()
+    confirmRequestId = newRequestId()
   } catch (e) {
     if (request === generation) formError.value = e instanceof Error ? e.message : '预览请求失败'
   } finally { previewBusy.value = false }
@@ -407,7 +408,12 @@ async function sendDirect() {
   }
   if (!imBoundAccount.value?.account_uid) { formError.value = '请先绑定企点账号'; return }
   const account = accountKey(), request = generation
-  if (!directAttempt) directAttempt = { account, id: crypto.randomUUID(), items: policyItems() }
+  try {
+    if (!directAttempt) directAttempt = { account, id: newRequestId(), items: policyItems() }
+  } catch (e) {
+    formError.value = e instanceof Error ? e.message : '请求编号生成失败，未提交请求'
+    return
+  }
   if (directAttempt.account !== account) { formError.value = '当前账号已变化，请重新核对收件人'; return }
   const attempt = directAttempt
   const codes = [...new Set(attempt.items.map(item => item.code))]
@@ -552,7 +558,8 @@ function commandStatus(status: string): string {
                   </label>
                   <label class="fld">起始收益率（%）<input v-model="draft.opening_yield_pct" class="ny-input" inputmode="decimal" data-testid="rfq-opening" :disabled="editingLocked" /></label>
                   <label class="fld">收益率边界（%）<input v-model="draft.limit_yield_pct" class="ny-input" inputmode="decimal" data-testid="rfq-limit" :disabled="editingLocked" /></label>
-                  <label class="fld">每轮步幅（BP）<input v-model="draft.step_bp" class="ny-input" inputmode="decimal" data-testid="rfq-step" :disabled="editingLocked" /></label>
+                  <label class="fld">起始参考步幅（BP）<input v-model="draft.step_bp" class="ny-input" inputmode="decimal" data-testid="rfq-step" :disabled="editingLocked" /></label>
+                  <p class="source-note">模型按双方让步和语气动态谈价，可超过参考步幅；不突破最终边界，不自动承诺成交。</p>
                   <button class="btn-ghost" type="button" data-testid="rfq-prefill" :disabled="editingLocked || !draft.our_side" @click="prefillFromSaved(draft)">用已保存底价/策略补充空值</button>
                   <p v-if="draft.pricing_basis === 'bp'" class="source-note" data-testid="rfq-valuation">预填参考估值：{{ draft.fields.cnbd || '未提供' }}% · 估值日：{{ draft.valuation_date || '未提供' }}；日期仅作提示，未提供也可按中债估值估算。</p>
                   <p class="source-note">起始收益率按本批输入发送，不再与谈价边界比较。BP 模式使用服务端中债估值估算；没有估值数值时会说明原因，估值日期不作为前置条件。</p>

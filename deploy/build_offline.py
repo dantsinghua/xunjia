@@ -5,6 +5,7 @@ import ast
 import gzip
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from email.parser import BytesParser
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'deploy'))
 from common import DeployError, read_env, sha256
@@ -29,18 +31,28 @@ def template_is_clean(path):
     if any(values.get(key) for key in secrets): raise DeployError('TEMPLATE_CONTAINS_SECRET')
     known={'XUNJIA_DATABASE_URL','XUNJIA_HOST','XUNJIA_PORT','XUNJIA_WEB_DIST','XUNJIA_STATE_DIR',
            'XUNJIA_RUN_BACKGROUND','XUNJIA_QUOTE_SOURCE',
-           'XUNJIA_INSTITUTION_CONFIG','XUNJIA_MQ_ALLOW_HTTP','XUNJIA_DIFY_URL','XUNJIA_ALLOWED_ORIGINS',
+           'XUNJIA_INSTITUTION_CONFIG','XUNJIA_EGRESS_GATEWAY','XUNJIA_MQ_ALLOW_HTTP','XUNJIA_DIFY_URL','XUNJIA_ALLOWED_ORIGINS',
            'XUNJIA_AGGREGATION_PROFILE','XUNJIA_REFERENCE_CONFIG',
            'XUNJIA_BOND_CONTEXT_MESSAGES','XUNJIA_DIFY_STAGE_BUDGET_SECONDS','XUNJIA_DIFY_TIMEOUT_SECONDS',
            'XUNJIA_VALUATION_REFRESH_SECONDS','XUNJIA_AUTH_DEV_LOGIN','XUNJIA_DEV_USER_NAME','XUNJIA_DEV_NICK_NAME',
            'QB_CONFIG_DIR','QB_MYSQL_HOST','QB_MYSQL_PORT','QB_MYSQL_USER','QB_MYSQL_DB',
-           'XUNJIA_QUOTE_CACHE','XUNJIA_QUOTE_AUTOSTART',*secrets}
+           'QB_DICTIONARY_SOURCE','QB_DICTIONARY_CONFIG','QB_FE_VER',
+           'XUNJIA_QUOTE_CACHE','XUNJIA_QUOTE_AUTOSTART','XUNJIA_QT_CONFIG',*secrets}
     if set(values)-known:raise DeployError('UNKNOWN_TEMPLATE_FIELD')
     if values.get('XUNJIA_RUN_BACKGROUND')!='1':
         raise DeployError('TEMPLATE_BACKGROUND_DISABLED')
     if any(values.get(k,'0')!='0' for k in ('XUNJIA_AUTH_DEV_LOGIN','XUNJIA_QUOTE_AUTOSTART')):
         raise DeployError('TEMPLATE_AUTOMATION_ENABLED')
     return values
+def validate_qt_template(path):
+    try:data=json.loads(path.read_text(encoding='utf8'))
+    except (ValueError,OSError):raise DeployError('QT_TEMPLATE_INVALID') from None
+    if not isinstance(data,dict) or data.get('mode')!='fix' or data.get('enabled') is not False:
+        raise DeployError('QT_TEMPLATE_INVALID')
+    private=('host','username','password','sender_comp_id','target_comp_id','server_name','ca_file','client_cert_file','client_key_file')
+    if any(data.get(key) for key in private) or data.get('account_owners')!={}:
+        raise DeployError('QT_TEMPLATE_CONTAINS_SITE_CONFIG')
+
 def input_files(root):
     files={}
     for module in ('server','relay','collector'):
@@ -55,12 +67,27 @@ def input_files(root):
                 # Preserve the concurrent, unreviewed local candidate on disk;
                 # the measured production A/B package is negotiation_v22.
                 files[source.relative_to(root).as_posix()]=source
+    # The mount entrypoint requires these exact templates. Do not package arbitrary
+    # operator/site .conf files from the checkout.
+    if (root/'deploy/mount_xunjia.py').is_file():
+        for name in ('nginx-xunjia-map.conf','nginx-xunjia-locations.conf'):
+            source=root/'deploy'/name
+            if source.is_symlink() or not source.is_file():
+                raise DeployError('XUNJIA_MOUNT_CONFIG_MISSING','deploy/'+name)
+            files['deploy/'+name]=source
     collector_source_manifest=root/'deploy/collector-qtrade-v22/manifest.json'
     if collector_source_manifest.is_file():
         files['deploy/collector-qtrade-v22/manifest.json']=collector_source_manifest
     for name in ('requirements.lock','requirements-dev.lock','config/xunjia.env.example',
                  'config/README.md','config/institution-connection.example.json'):
         files[name]=root/name
+    auth_template=root/'config/institution-auth.example.yaml'
+    if auth_template.is_file():files['config/institution-auth.example.yaml']=auth_template
+    for name in ('bond-dictionary.mysql.example.json','bond-dictionary.file.example.json','qt-connection.example.json'):
+        path=root/'config'/name
+        if path.is_file():
+            if name=='qt-connection.example.json':validate_qt_template(path)
+            files['config/'+name]=path
     measured=root/'config/aggregation-profile.measured.json'
     provenance=root/'config/aggregation-measurement.json'
     if measured.is_file()!=provenance.is_file():
@@ -97,15 +124,99 @@ def validate_quote_runtime(files):
         path=files.get('app/collector/'+name)
         if path is None or not path.is_file() or path.is_symlink():
             raise DeployError('QUOTE_RUNTIME_MISSING','app/collector/'+name)
-def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_wheel:Path|None=None):
+    if 'app/server/qt_control.py' in files:
+        for name in ('app/collector/qtrade_fix.py','app/server/qt_credentials.py','app/server/qt_quotes.py','config/qt-connection.example.json'):
+            path=files.get(name)
+            if path is None or not path.is_file() or path.is_symlink():raise DeployError('QT_RUNTIME_MISSING',name)
+def validate_arm_runtime(path):
+    expected='c2083943c86dbb21ca0211238362fd922de7b0475688f26c135cf5d20a1c2f48'
+    if path is None or path.is_symlink() or not path.is_file():raise DeployError('ARM_RUNTIME_MISSING')
+    if sha256(path)!=expected:raise DeployError('ARM_RUNTIME_UNREVIEWED')
+
+def validate_auth_template(path):
+    if not path.is_file():return
+    import yaml
+    try:
+        node=yaml.compose(path.read_text(encoding='utf8'))
+        if not isinstance(node,yaml.nodes.MappingNode) or len(node.value)!=2:
+            raise ValueError()
+        if any(not isinstance(part,yaml.nodes.ScalarNode) or part.tag!='tag:yaml.org,2002:str'
+               for pair in node.value for part in pair):raise ValueError()
+        values={key.value:value.value for key,value in node.value}
+    except (OSError,ValueError,yaml.YAMLError):raise DeployError('AUTH_TEMPLATE_INVALID') from None
+    if values!={'key':'REPLACE_INSTITUTION_KEY','sm4_key':'REPLACE_16_BYTES'}:
+        raise DeployError('AUTH_TEMPLATE_CONTAINS_SECRET_OR_UNKNOWN_FIELD')
+
+def bootstrap_tool_files(directory):
+    directory=directory.resolve()
+    manifest=json.loads((directory/'redistribution-files.json').read_text(encoding='utf8'))
+    files={}
+    for item in manifest['files']:
+        name=item['package_path']
+        source=directory/Path(item['source']).name
+        if name=='runtime/busybox-aarch64':name='runtime/tools/busybox-aarch64'
+        elif not name.startswith('third-party/busybox-static/'):raise DeployError('BOOTSTRAP_TOOL_PATH_INVALID')
+        if (Path(name).is_absolute() or '..' in Path(name).parts or '\\' in name or
+                source.is_symlink() or not source.is_file() or sha256(source)!=item['sha256'] or name in files):
+            raise DeployError('BOOTSTRAP_TOOL_INVALID')
+        files[name]=source
+    binary=files.get('runtime/tools/busybox-aarch64')
+    if binary is None or sha256(binary)!='7d93682be37cf6ed46699f6fff546b80bf133cf8ec342c2d04bc23387f78bc34':
+        raise DeployError('BOOTSTRAP_TOOL_UNREVIEWED')
+    for name in ('COPYRIGHT.debian','LICENSE.GPL-2.0','SOURCE-AND-LICENSE.txt'):
+        if 'third-party/busybox-static/'+name not in files:raise DeployError('BOOTSTRAP_TOOL_LICENSE_MISSING')
+    return files
+def production_wheels(directory:Path, lock:Path):
+    """Select the exact CPython 3.12 ARM64 runtime closure, never development wheels."""
+    normalize=lambda name:re.sub(r'[-_.]+','-',name).lower()
+    required={}
+    for line in lock.read_text(encoding='utf8').splitlines():
+        line=line.strip()
+        if not line or line.startswith('#'):continue
+        match=re.fullmatch(r'([A-Za-z0-9_.-]+)==([A-Za-z0-9_.+!-]+)',line)
+        if not match or normalize(match[1]) in required:raise DeployError('PRODUCTION_LOCK_INVALID')
+        required[normalize(match[1])]=match[2]
+    if not required:raise DeployError('PRODUCTION_LOCK_EMPTY')
+    found={name:[] for name in required}
+    for path in sorted(directory.glob('*.whl')):
+        if path.is_symlink():raise DeployError('INPUT_FILE_INVALID',path.name)
+        parts=path.stem.split('-')
+        if len(parts) not in (5,6):raise DeployError('WHEEL_NAME_INVALID',path.name)
+        name,version=normalize(parts[0]),parts[1]
+        if name not in required:continue
+        python,abi,platform=parts[-3:]
+        pure=python in ('py3','py2.py3') and abi=='none' and platform=='any'
+        arm=all(re.fullmatch(r'manylinux(?:_2_(?:17|28)|2014)_aarch64',p) for p in platform.split('.'))
+        compatible=python=='cp312' and abi in ('cp312','abi3') or (
+            re.fullmatch(r'cp3[0-9]{1,2}',python) and 7<=int(python[3:])<=12 and abi=='abi3')
+        if version!=required[name] or not (pure or arm and compatible):
+            raise DeployError('PRODUCTION_WHEEL_INCOMPATIBLE',path.name)
+        with zipfile.ZipFile(path) as archive:
+            metadata=[p for p in archive.namelist() if p.endswith('.dist-info/METADATA')]
+            if len(metadata)!=1:raise DeployError('WHEEL_METADATA_INVALID',path.name)
+            info=BytesParser().parsebytes(archive.read(metadata[0]))
+            if normalize(info.get('Name',''))!=name or info.get('Version')!=version:
+                raise DeployError('WHEEL_METADATA_INVALID',path.name)
+        found[name].append(path)
+    if any(len(paths)!=1 for paths in found.values()):raise DeployError('PRODUCTION_WHEEL_MISSING_OR_DUPLICATE')
+    return [found[name][0] for name in sorted(found)]
+
+def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_wheel:Path|None=None,*,minimal_aarch64=False,bootstrap_tools:Path|None=None):
     if output.exists() or output.with_name(output.name+'.sha256').exists():raise DeployError('OUTPUT_ALREADY_EXISTS')
     template_is_clean(ROOT/'config/xunjia.env.example')
+    validate_auth_template(ROOT/'config/institution-auth.example.yaml')
     if not (ROOT/'web/dist/index.html').is_file():raise DeployError('FRONTEND_BUILD_MISSING')
     sys.path.insert(0,str(ROOT))
     from deploy.frontend_build import verify_frontend_build
     from scripts.export_oceanbase_schema import render,SQL_FILE
     if SQL_FILE.read_text(encoding='utf8')!=render():raise DeployError('SQL_SOURCE_DRIFT')
     files=input_files(ROOT)
+    if minimal_aarch64:
+        validate_arm_runtime(arm_runtime)
+        files={name:path for name,path in files.items() if 'tests' not in Path(name).parts
+               and name not in ('requirements-dev.lock','deploy/05-test-package.sh','deploy/package_tests.py')}
+        files['app/requirements.lock']=ROOT/'requirements.lock'
+    if bootstrap_tools is not None:files.update(bootstrap_tool_files(bootstrap_tools))
     validate_quote_runtime(files)
     frontend=verify_frontend_build(ROOT/'web')
     if collector_wheel is None or not collector_wheel.is_file():raise DeployError('COLLECTOR_RUNTIME_WHEEL_MISSING')
@@ -120,9 +231,11 @@ def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_
                 raise DeployError('COLLECTOR_RUNTIME_PAYLOAD_DRIFT')
     files['collector-runtime/'+collector_wheel.name]=collector_wheel
     files['collector-runtime/collector-runtime-manifest.json']=collector_manifest
-    for arch in ('x86_64','aarch64','common'):
-        candidates=sorted((wheels/arch).glob('*.whl'))
+    for arch in (('aarch64','common') if minimal_aarch64 else ('x86_64','aarch64','common')):
+        candidates=(production_wheels(wheels/arch,ROOT/'requirements.lock') if minimal_aarch64 and arch=='aarch64'
+                    else sorted((wheels/arch).glob('pip-*-py3-none-any.whl' if minimal_aarch64 else '*.whl')))
         if not candidates:raise DeployError('WHEELHOUSE_MISSING',arch)
+        if minimal_aarch64 and arch=='common' and len(candidates)!=1:raise DeployError('PIP_BOOTSTRAP_AMBIGUOUS')
         for f in candidates:files['wheels/'+arch+'/'+f.name]=f
     if arm_runtime:
         if not arm_runtime.is_file():raise DeployError('ARM_RUNTIME_MISSING')
@@ -147,12 +260,18 @@ def render_package(output:Path,wheels:Path,arm_runtime:Path|None=None,collector_
              'collector_runtime':'collector-runtime/'+collector_wheel.name,
              'customer_database_ddl_executed_by_installer':False,
              'live_chain_e2e':'not performed / not claimed'}
+    if minimal_aarch64:
+        version.update(package_profile='minimal-aarch64',architectures=['aarch64'],
+                       archive_tests='Not included; deploy/06-check-runtime.sh verifies the installed runtime offline',
+                       database_deployment='Explicit fresh-install clears only xunjia_business and recreates current schema',
+                       customer_database_ddl_executed_by_installer='only with explicit fresh-install --apply')
+    version['system_tar_required_for_bootstrap']=bootstrap_tools is None
     with tempfile.TemporaryDirectory(prefix='xunjia-build-batch1-') as tmp:
         stage=Path(tmp)/name;stage.mkdir()
         for rel,source in files.items():
             target=stage/rel;target.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(source,target)
-            target.chmod(0o755 if source.suffix=='.sh' else 0o644)
+            target.chmod(0o755 if source.suffix=='.sh' or rel=='runtime/tools/busybox-aarch64' else 0o644)
             if sha256(target)!=snapshot[rel]:raise DeployError('SOURCE_CHANGED_DURING_BUILD',rel)
         if verify_frontend_build(ROOT/'web',stage/'frontend/dist')!=frontend:
             raise DeployError('FRONTEND_CHANGED_DURING_BUILD')
@@ -196,5 +315,7 @@ def main():
     p.add_argument('--output',type=Path,required=True);p.add_argument('--wheels',type=Path,required=True)
     p.add_argument('--arm-runtime',type=Path)
     p.add_argument('--collector-wheel',type=Path,required=True)
-    args=p.parse_args();render_package(args.output,args.wheels,args.arm_runtime,args.collector_wheel)
+    p.add_argument('--minimal-aarch64',action='store_true',help='ARM runtime and production dependencies only; no development tests')
+    p.add_argument('--bootstrap-tools',type=Path,help='Verified static ARM extraction tool and corresponding source/license directory')
+    args=p.parse_args();render_package(args.output,args.wheels,args.arm_runtime,args.collector_wheel,minimal_aarch64=args.minimal_aarch64,bootstrap_tools=args.bootstrap_tools)
 if __name__=='__main__':main()

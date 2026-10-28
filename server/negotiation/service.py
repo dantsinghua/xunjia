@@ -429,7 +429,9 @@ class Inquiry:
         for group in self.repo.group_rows(owner):
             for peer in group['peers']:
                 q=peer['quotes']['ofr' if group['our_side']=='BUY' else 'bid'];price=q.get('price') or {}
-                state='HANDOFF' if group['state']=='HANDOFF' else 'STOPPED' if not group['send_allowed'] or not peer['send_allowed'] else 'WAITING_SEND' if peer['pending_command_id'] else 'NEGOTIATING'
+                state=('HANDOFF' if group['state']=='HANDOFF' else 'STOPPED' if not group['send_allowed']
+                       else 'HANDOFF' if peer.get('member_handoff_pending') else 'STOPPED' if not peer['send_allowed']
+                       else 'WAITING_SEND' if peer['pending_command_id'] else 'NEGOTIATING')
                 result.append({'session_id':peer['member_id'],'group_id':group['group_id'],'batch_id':group['group_id'],
                     'conversation_id':peer['thread_id'],'peer_id':peer['peer_uid'],'bond_code':group['bond_code'],
                     'state':state,'revision':peer['version'],'pending_command_id':peer['pending_command_id'],

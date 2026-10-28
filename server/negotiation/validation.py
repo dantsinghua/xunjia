@@ -6,8 +6,9 @@ an internal limit, and never treat an outgoing quantity as the peer's amount.
 from __future__ import annotations
 import re
 from .prices import InvalidFact, number, rounded_yield, volume_wan
-from .text_roles import mask_non_trading, numeric_spelling, valuation_offset_spans
+from .text_roles import mask_non_trading, numeric_spelling, valuation_offset_spans, public_language_error
 from .slots import direct_price_question
+from .reply_render import direct_quantity_request, requested_quantity_source
 
 NUM = r'[+-]?\d+(?:\.\d+)?'
 QUANTITY = re.compile(r'(?<![\da-zA-Z.+-])(' + NUM + r')\s*(亿|万|[wW])(?![a-zA-Z])')
@@ -233,6 +234,8 @@ def validate_observation(snapshot, observation, aliases, *, raw_price=None):
             if message['direction']=='in' and message['ingest_revision']==latest:
                 if any(direct_price_question(part,tuple(aliases)) for part in source_parts(ref,preserve_prefix=True)):
                     raise InvalidFact('Explicit asking price is not a counterparty quote')
+                if any(direct_quantity_request(part,tuple(aliases)) for part in source_parts(ref,preserve_prefix=True)):
+                    raise InvalidFact('Explicit asking quantity is not a counterparty quote')
         if re.search(r'(?:是你|你(?:刚才)?说的|你(?:刚才)?报的).*[?？]',all_text):
             raise InvalidFact('Question about our quote is not a counterparty quote')
         if (re.search(r'(?:客户|别人|别家|市场|有人|他).*(?:说|报)',all_text) and
@@ -390,15 +393,8 @@ def validate_public_text(context, proposal, *, economic_text=None):
     text = proposal.get('text')
     if not isinstance(text, str) or not 1 <= len(text.strip()) <= 1500:
         raise InvalidFact('Reply text must contain 1..1500 characters')
-    if re.search(r'内部|底价|限价|授权|步长|目标(?:价|量)|其他对手|别家给|system.prompt|tool_budget|policy_version|member_id|group_id',text,re.I):
-        raise InvalidFact('Public reply exposes private policy or internal context')
-    # The tool negotiates and collects quotes, never executes or reserves a lot.
-    for clause in re.split(r'[，,。;；\n]', text):
-        if re.search(r'\d+(?:\.\d+)?\s*(?:万|亿)\s*确认(?!报价)',clause):
-            raise InvalidFact('Quantity confirmation must explicitly refer to a quotation, not execution')
-        if re.search(r'成交|锁(?:量|定|券)|占(?:用)?额度|确认买入|确认卖出|就(?:按.*)?要了', clause):
-            if not re.search(r'不(?:会|作|做|能)?(?:自动)?(?:成交|锁|占|确认)', clause):
-                raise InvalidFact('Reply promises execution or reserves a counterparty lot')
+    language_error=public_language_error(text)
+    if language_error:raise InvalidFact(language_error)
     economic_text = text if economic_text is None else economic_text
     prices, quantities = economics(economic_text, bond_codes=(context.get('bond_code', ''),))
     kind = proposal['kind']
@@ -411,10 +407,22 @@ def validate_public_text(context, proposal, *, economic_text=None):
         normalize=rounded_yield if proposal['our_price']['kind']=='YIELD' else number
         if not prices or any(normalize(p) != expected for p, _a, _b in prices):
             raise InvalidFact('All public price tokens must match the structured quote')
-        own_side = context['our_side']
-        if own_side == 'BUY' and re.search(r'出|卖', economic_text) or own_side == 'SELL' and re.search(r'收|买', economic_text):
+        expected_side='bid' if context['our_side']=='BUY' else 'ofr'
+        if any(token_side(economic_text,start,end) not in (None,expected_side)
+               for _value,start,end in prices+quantities):
             raise InvalidFact('Reply direction differs from our authorized side')
+        for assertion in re.finditer(r'(?:我(?:们|方|这边)?|本方|这边)\s*(?:再|也|就|愿意|可以|能)?\s*'
+                                     r'(收(?!到|悉|信)|出(?!差|现|发|去|来)|买(?:入)?|卖(?:出)?)',economic_text):
+            if ('bid' if assertion[1] in ('收','买','买入') else 'ofr')!=expected_side:
+                raise InvalidFact('Reply direction differs from our authorized side')
     if not quantities:
+        return
+    if kind=='REPLY' and '{requested_volume}' in (proposal.get('render_plan') or {}).get('text',''):
+        request=requested_quantity_source(context)
+        if request is None:raise InvalidFact('Requested quantity has no current direct source')
+        requested_lot=number(request['volume_wan'])
+        if any(q!=requested_lot for q,_a,_b in quantities):
+            raise InvalidFact('Reply must preserve the requested whole lot')
         return
     target = number(context['plan']['volume_wan'])
     if kind == 'ASK_VOLUME':

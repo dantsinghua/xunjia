@@ -5,11 +5,12 @@ import pytest
 
 from dify.negotiation_v22 import measurement as statistics
 from dify.negotiation_v22.node_code import compact_context
+from server.negotiation.reply_render import render_reply_plan
 from scripts import measure_dify_v22 as runner
 
 
-@pytest.mark.parametrize('first_text', ['SYN-A 3.18收500万', 'SYN-A 3.18%出500万'])
-def test_measurement_retains_initial_reply_rejection_and_text_only_repair(monkeypatch, first_text):
+@pytest.mark.parametrize('first_template', ['SYN-A {own_quote}，我出给你。', 'SYN-A {own_quote}，出{peer_volume}。'])
+def test_measurement_retains_initial_reply_rejection_and_text_only_repair(monkeypatch, first_template):
     seen = []
 
     class Client:
@@ -25,12 +26,13 @@ def test_measurement_retains_initial_reply_rejection_and_text_only_repair(monkey
                     assert feedback['mode'] == 'TEXT_ONLY'
                     assert feedback['attempt'] == feedback['max_attempts'] == 1
                     result = deepcopy(feedback['original_response'])
-                    result['proposal']['text'] = 'SYN-A 3.18%收500万'
+                    result['proposal'] = render_reply_plan(context,
+                        {**result['proposal']['render_plan'], 'text': 'SYN-A {own_quote}{peer_volume}'})['proposal']
                     return result
                 return {'schema_version': '2.2', 'action': 'SEND',
-                        'proposal': {'kind': 'REPLY', 'text': first_text,
-                                     'our_price': {'kind': 'YIELD', 'value': '3.18'}},
-                        'trader_view': {'reason': '仍按授权步长谈价'}}
+                        'proposal': render_reply_plan(context, {'kind': 'REPLY', 'text': first_template,
+                                                               'quote_value': '3.18'})['proposal'],
+                        'trader_view': {'reason': '结合对方走势继续沟通'}}
             current = context['messages'][-1]
             member = context['members'][0]
             changes = {'price': {'kind': 'YIELD', 'value': '3.10'}, 'volume_wan': '500万',
@@ -49,7 +51,7 @@ def test_measurement_retains_initial_reply_rejection_and_text_only_repair(monkey
     result = runner.run_case(runner.cases()[0], config, 300, stage_budget_seconds=540)
     assert result['success'], result.get('error_code')
     assert [stage for stage, _ in seen] == ['analysis', 'reply', 'reply']
-    assert result['reply_outputs'][0]['proposal']['text'] == first_text
+    assert result['reply_outputs'][0]['proposal']['text'] == first_template.replace('{own_quote}', '3.18%收').replace('{peer_volume}', '500万')
     assert result['reply_outputs'][1]['proposal']['text'] == 'SYN-A 3.18%收500万'
     audit = result['reply_repair']
     assert audit['attempted'] is True and audit['succeeded'] is True

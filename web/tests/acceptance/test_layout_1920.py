@@ -12,8 +12,10 @@ def open_quote(ui, width=1920):
     return page
 
 
-def test_quote_14_columns_headers_align_and_right_quotes_are_visible_at_1920(ui):
+def test_broker_14_columns_headers_align_and_right_quotes_are_visible_at_1920(ui):
     page = open_quote(ui)
+    page.get_by_text('经纪商', exact=True).click()
+    expect(page.locator('.mkt-row').first).to_be_visible()
     geometry = page.evaluate('''() => {
       const table=document.querySelector('.mkt'), rows=table.tHead.rows;
       const cells=[...table.querySelector('.mkt-row').cells];
@@ -66,3 +68,26 @@ def test_empty_mode_labels_still_display_both_channel_names(ui):
     page.goto(base + '/#/link')
     expect(page.locator('.channel b')).to_have_text(['文件中转', '邮件通道'])
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+def test_all_quotes_10_columns_align_without_private_floor_columns(ui):
+    page = open_quote(ui)
+    geometry = page.evaluate("""() => {
+      const table=document.querySelector('.mkt'), rows=table.tHead.rows;
+      const cells=[...table.querySelector('.mkt-row').cells];
+      const rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right}};
+      return {columns:table.querySelectorAll('col').length, body:cells.length,
+        spans:[...rows[0].cells].map(c=>c.colSpan), subcolumns:rows[1].cells.length,
+        basic:rect(rows[0].cells[1]), external:rect(rows[0].cells[2]), status:rect(rows[0].cells[3]),
+        cells:cells.map(rect), documentWidth:document.documentElement.scrollWidth,
+        bodyWidth:document.body.scrollWidth, viewport:innerWidth};
+    }""")
+    assert geometry['columns'] == geometry['body'] == 10
+    assert geometry['spans'] == [1,2,6,1]
+    assert geometry['subcolumns'] == 8
+    for group, first, last in [('basic',1,2),('external',3,8),('status',9,9)]:
+        assert abs(geometry[group]['left'] - geometry['cells'][first]['left']) <= 2
+        assert abs(geometry[group]['right'] - geometry['cells'][last]['right']) <= 2
+    assert geometry['external']['right'] <= geometry['viewport']
+    assert geometry['cells'][8]['right'] <= geometry['viewport']
+    assert geometry['documentWidth'] <= 1920 and geometry['bodyWidth'] <= 1920

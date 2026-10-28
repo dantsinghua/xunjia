@@ -99,6 +99,13 @@ def ui(browser, frontend_url):
             data["data"] = {"user_id": "qa-trader", "display_name": "验收交易员", "account_uid": "910001", "binding": {"account_uid": "910001"}}
             if status != 200:
                 data = {"ok": False, "hint": "合成身份已失效"}
+        elif parsed.path == "/api/im/qt-quote":
+            data["data"] = {"revision":"new","mode":"fix","shared":True,"enabled":False,"configured":False,"mapped":False,
+                "host":"","port":0,"username":"","password_set":False,"sender_comp_id":"","target_comp_id":"",
+                "transport":"tls","plaintext_confirmed":False,"server_name":"","ca_file":"","client_cert_file":"","client_key_file":"",
+                "heartbeat_seconds":60,"connect_timeout_seconds":10,"encoding":"utf-8","sending_timezone":"Asia/Shanghai","timezone":"Asia/Shanghai",
+                "qt_account_ids":[],"mapped_account_count":0,"collector_active":False,"collector_state":"stopped","code":"QT_STOPPED","note":"QT未配置",
+                "fix_session_connected":False,"stats":{"quotes_received":0,"quotes_written":0,"duplicate_quotes":0,"rejected_quotes":0,"reconnects":0}}
         elif parsed.path == "/api/qa":
             status = state["qa_status"]
             data["data"] = {"answer": state["answer"]}

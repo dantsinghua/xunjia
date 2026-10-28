@@ -8,7 +8,7 @@ def test_portal_proof_and_application_token_expiry():
     from server.auth import AuthConfig, AuthService
 
     now = [1800000000]
-    service = AuthService(AuthConfig(sso_secret="test-portal", session_secret="test-session-secret-32-characters!", clock=lambda: now[0]))
+    service = AuthService(AuthConfig(sso_secret="test-portal", session_secret="test-session-secret-32-characters!", token_ttl_seconds=3600, clock=lambda: now[0]))
     data = {"userName": "trader-a", "nickName": "甲", "ts": str(now[0])}
     data["sign"] = hashlib.md5(f"trader-a|甲|{now[0]}|test-portal".encode()).hexdigest()
     user = service.verify_sso(data)

@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from test_verified_literal_fact_binding import canonical_analysis_view
+
 from dify.negotiation_v22 import node_code
 from dify.negotiation_v22.build import build
 from server.negotiation.slots import collect_candidates, literal_member_hints
@@ -91,6 +93,7 @@ def test_generated_projection_preserves_both_twenty_windows_and_all_existing_can
     namespace = {};exec(nodes['context']['code'], namespace)
     projected = json.loads(namespace['main'](json.dumps(value))['context'])
     assert projected == node_code.compact_context(value) and value == before
+    projected = canonical_analysis_view(value, projected)
     assert projected['messages'] == value['messages']
     for original, member in zip(value['members'], projected['members']):
         assert member['context'] == original['context'] and len(member['context']) == 20

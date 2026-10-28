@@ -99,7 +99,10 @@ def confirm_without_dispatch(case):
         calls.append(deepcopy(context))
         return {'schema_version': '2.2', 'action': 'SEND',
                 'proposal': render_reply_plan(context,
-                    {'kind': 'CLARIFY', 'question': 'ASK_CURRENT_QUOTE'})['proposal']}
+                    {'kind': 'CLARIFY', 'question': 'ASK_CURRENT_QUOTE',
+                     'text': ('SYN-A 上次记录{peer_quote}、{peer_volume}，现在仍是这个报价和数量吗？'
+                              if context['quotes']['ofr'].get('validity') != 'WITHDRAWN'
+                              else 'SYN-A 请确认现在的报价和数量？')})['proposal']}
     case.flows.decide = reply
     result = case.engine.decide_member(OWNER, case.member)
     assert result['state'] == 'QUEUED' and len(calls) == 1
@@ -190,17 +193,44 @@ def test_fresh_explicit_quote_still_updates_normally_with_old_evidence_outside_w
     assert not case.reply_context()['reference_confirmation_required'] and not upward
 
 
-def test_default_b_history_request_is_one_model_call_and_never_fetches_old_anchor(window, monkeypatch):
+def test_default_b_history_request_cannot_create_a_server_fallback_sentence_or_fetch_old_anchor(window, monkeypatch):
     case = window
     before = case.quote()
     case.inbound('SYN-A 请问此前报价还在吗？')
     assert case.analyze([])['facts_committed']
+    before_window = deepcopy(case.reply_context()['context'])
+    before_commands = case.service.commands(OWNER)
     calls = []
     case.flows.decide = lambda context: calls.append(deepcopy(context)) or legacy_request(case)
     upward = no_upward_query(case, monkeypatch)
     result = case.engine.decide_member(OWNER, case.member)
-    assert result['state'] == 'QUEUED' and len(calls) == 1 and not upward
+    assert result['state'] == 'RETRY' and len(calls) == 1 and not upward
     assert calls[0]['context_policy_revision'] == 'latest_quote_confirmation_v1'
+    assert case.service.commands(OWNER) == before_commands
+    assert case.reply_context()['context'] == before_window and len(before_window) == 20
+    assert case.quote() == before
+
+
+def test_default_b_can_queue_one_natural_model_clarification_without_fetch_or_local_wording_fallback(window, monkeypatch):
+    case = window
+    before = case.quote()
+    case.inbound('SYN-A 请问此前报价还在吗？')
+    assert case.analyze([])['facts_committed']
+    before_window = deepcopy(case.reply_context()['context'])
+    count = len(case.service.commands(OWNER))
+    calls = []
+    template = 'SYN-A 你现在是{peer_quote}、{peer_volume}，再帮我确认一下好吗？'
+    def model(context):
+        calls.append(deepcopy(context))
+        return {'schema_version': '2.2', 'action': 'SEND', 'proposal': render_reply_plan(context,
+            {'kind': 'CLARIFY', 'question': 'ASK_CURRENT_QUOTE', 'text': template})['proposal']}
+    case.flows.decide = model
+    upward = no_upward_query(case, monkeypatch)
+    result = case.engine.decide_member(OWNER, case.member)
+    assert result['state'] == 'QUEUED' and len(calls) == 1 and not upward
+    assert len(case.service.commands(OWNER)) == count+1
     body = json.loads(case.service.commands_core.get(OWNER, result['command_id'])['body_json'])
-    assert body['kind'] == 'CLARIFY' and '上次' in body['text'] and body.get('our_price') is None
+    assert body['kind'] == 'CLARIFY' and body.get('our_price') is None
+    assert body['text'] == template.replace('{peer_quote}', '3.10%出').replace('{peer_volume}', '500万')
+    assert case.reply_context()['context'] == before_window and len(before_window) == 20
     assert case.quote() == before

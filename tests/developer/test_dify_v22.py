@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import pytest
 
+from test_verified_literal_fact_binding import canonical_analysis_view
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -202,7 +204,10 @@ def test_measurement_counts_actual_engine_fact_rejection_as_failure(monkeypatch,
     class LocalFixtureClient:
         def __init__(self,*args,stage,**kwargs):self.stage=stage;self.last_evidence={'stage':stage,'elapsed_ms':0,'source':'developer-fixture'}
         def call(self,ctx):
-            if self.stage=='reply':return {'schema_version':'2.2','action':'SEND','proposal':{'kind':'REPLY','text':'SYN-A 3.18%收','our_price':{'kind':'YIELD','value':'3.18'}}}
+            if self.stage=='reply':
+                from server.negotiation.reply_render import render_reply_plan
+                return {'schema_version':'2.2','action':'SEND','proposal':render_reply_plan(ctx,
+                    {'kind':'REPLY','quote_value':'3.18','text':'SYN-A {own_quote}'})['proposal']}
             peer=next(x for x in ctx['members'] if x['bond_code']=='SYN-A');msg=ctx['messages'][-1]
             changes={'price':{'kind':'YIELD','value':'9.99' if malformed else '3.10'},'volume_wan':'500','finality':'NEGOTIABLE','confirmed_day':'2026-10-17'}
             return {'schema_version':'2.2','scopes':{msg['message_id']:[peer['member_id']]},'unresolved':{},'observations':[
@@ -309,6 +314,7 @@ def test_model_projection_keeps_all_semantic_evidence_and_control_inputs(stage):
     original=deepcopy(common)
     compact=module('node_code').compact_context(common)
     assert common==original
+    if stage=='analysis':compact=canonical_analysis_view(common,compact)
     for key in ('stage','schema_version','from_revision','through_revision','context_messages','aliases','tool_results','unresolved','policy','boundary','group_summary','reconfirm_day'):
         assert compact[key]==common[key]
     actual=compact['members'][0]['context'] if stage=='analysis' else compact['context']
@@ -361,7 +367,7 @@ def test_history_projection_keeps_original_twenty_plus_extra_anchor_and_final_ev
     anchor={'message_id':'older','text':'SYN-A 3.20%收','direction':'out','native_id':'native-old','ingest_revision':1}
     ctx['members'][0]['context']=original+[anchor]
     ctx['history_results']=[{'member_id':'p1','message_ids':['older'],'messages':[anchor]}]
-    projected=code.compact_context(ctx)
+    projected=canonical_analysis_view(ctx,code.compact_context(ctx))
     assert len(projected['members'][0]['context'])==21
     assert projected['members'][0]['context'][:20]==original
     assert projected['history_results']==ctx['history_results']
@@ -457,7 +463,7 @@ def test_projection_exposes_loaded_and_missing_reference_ids_without_inventing_t
     member['our_quote_json']=json.dumps({'message_id':'old-outside-window','price':{'kind':'YIELD','value':'3.20'}})
     member['quotes']={'ofr':{'evidence':{'price':['loaded-0','old-price'],'volume_wan':['old-price']}}}
     before=deepcopy(ctx)
-    projected=module('node_code').compact_context(ctx)
+    projected=canonical_analysis_view(ctx,module('node_code').compact_context(ctx))
     assert ctx==before
     assert projected['evidence_index']==[{'member_id':'p1','loaded_message_ids':['m1']+['loaded-'+str(i) for i in range(20)],
                                           'unloaded_reference_ids':['old-outside-window','old-price'],
@@ -471,7 +477,7 @@ def test_projection_marks_history_anchor_loaded_after_real_context_is_added():
     ctx=context();member=ctx['members'][0]
     member['our_quote_json']=json.dumps({'message_id':'old'})
     member['context']=[{'message_id':'old','text':'真实补取的完整旧原文','direction':'out'}]
-    projected=module('node_code').compact_context(ctx)
+    projected=canonical_analysis_view(ctx,module('node_code').compact_context(ctx))
     assert projected['evidence_index']==[{'member_id':'p1','loaded_message_ids':['m1','old'],'unloaded_reference_ids':[],
                                           'our_quote_message_id':'old','our_quote_loaded':True}]
     assert projected['members'][0]['context']==member['context']
@@ -498,7 +504,7 @@ def test_our_quote_index_does_not_borrow_another_members_loaded_anchor():
                              context=[{'message_id':'own-out','text':'本券原文','direction':'out'}])
     ctx['members'].append({'member_id':'p2','our_quote_json':json.dumps({'message_id':'other-out'}),
                            'context':[{'message_id':'other-out','text':'另券原文','direction':'out'}]})
-    index=module('node_code').compact_context(ctx)['evidence_index']
+    index=canonical_analysis_view(ctx,module('node_code').compact_context(ctx))['evidence_index']
     assert index[0]['our_quote_message_id']=='other-out' and index[0]['our_quote_loaded'] is False
     assert 'other-out' not in index[0]['loaded_message_ids']
     assert index[1]['our_quote_message_id']=='other-out' and index[1]['our_quote_loaded'] is True
@@ -528,7 +534,7 @@ def test_analysis_projection_places_current_messages_first_without_changing_delt
     ctx=context();ctx.update(from_revision=20,through_revision=21,context_messages=20)
     ctx['members'][0]['context']=[{'message_id':'history-'+str(i),'direction':'in' if i%2 else 'out',
                                   'text':'完整历史原文'+str(i),'trade_day':'2026-10-17'} for i in range(20)]
-    before=deepcopy(ctx);result=module('node_code').compact_context(ctx)
+    before=deepcopy(ctx);result=canonical_analysis_view(ctx,module('node_code').compact_context(ctx))
     assert ctx==before
     assert list(result)[0]=='messages'
     assert result['messages']==ctx['messages']
@@ -574,6 +580,7 @@ def test_projection_frontloads_actual_tool_and_history_results_without_rewriting
         ctx['analysis_tool_source']={'analysis_id':'actual-analysis','through_revision':21}
     before=deepcopy(ctx);result=module('node_code').compact_context(ctx)
     assert ctx==before
+    if stage=='analysis':result=canonical_analysis_view(ctx,result)
     for key in ('tool_results','history_results','analysis_tool_results','analysis_tool_source'):
         if key in ctx:
             assert result[key]==ctx[key]

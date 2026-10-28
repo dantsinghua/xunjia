@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from email.message import Message
 import http.client
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -18,6 +19,15 @@ import urllib.request
 import uuid
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from relay.site_egress import EgressError, SiteHTTPSHandler, destination
+
+def timing_event(stage, **fields):
+    """Best-effort metadata only; diagnostics must never alter delivery semantics."""
+    try:
+        logging.getLogger('xunjia.timing').info(json.dumps(
+            {'stage': stage, 'at': time.time(), **fields}, separators=(',', ':')))
+    except Exception:
+        pass
 
 class FileGatewayError(RuntimeError):
     def __init__(self, code, *, status=None, ambiguous=False):
@@ -131,6 +141,12 @@ class FileGatewayClient:
                 raise ValueError()
         except ValueError:
             raise FileGatewayError("FILE_GATEWAY_URL_INVALID") from None
+        try:
+            route = destination(base_url)
+        except EgressError as exc:
+            raise FileGatewayError(exc.code) from None
+        if route is not None and opener is not None:
+            raise FileGatewayError('EGRESS_OPENER_CONFLICT')
         if not isinstance(auth, GatewayAuth) or type(timeout) not in (int,float) or not math.isfinite(timeout) or not 0 < timeout <= 60:
             raise FileGatewayError("FILE_GATEWAY_CONFIG_INVALID")
         if type(max_bytes) is not int or not 1 <= max_bytes <= 1024*1024*1024:
@@ -149,9 +165,27 @@ class FileGatewayClient:
         self.queue_identity = (url.scheme.lower(), url.hostname.lower(), port or (443 if url.scheme == "https" else 80), url.path.rstrip("/"))
         if path is not None:
             self.queue_identity += (path, hashlib.sha256(auth.key.encode("utf8")).hexdigest())
-        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), urllib.request.HTTPSHandler(context=ssl_context))
+        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), SiteHTTPSHandler(context=ssl_context))
 
-    def _request(self, operation, body=None, content_type=None):
+    def _request(self, operation, body=None, content_type=None, *, blob_sha256=None):
+        started = time.monotonic()
+        request_id = uuid.uuid4().hex
+        outcome = {}
+        queue_id = hashlib.sha256(repr(self.queue_identity).encode()).hexdigest()[:16]
+        trace = {'blob_sha256': blob_sha256} if blob_sha256 is not None else {}
+        outcome.update(trace)
+        timing_event('http_started', operation=operation, request_id=request_id, queue_id=queue_id, **trace)
+        try:
+            return self._request_response(operation, body, content_type, outcome)
+        except FileGatewayError as exc:
+            outcome.update(code=exc.code, ambiguous=exc.ambiguous)
+            if exc.status is not None:outcome['status']=exc.status
+            raise
+        finally:
+            timing_event('http_completed', operation=operation, request_id=request_id,
+                         queue_id=queue_id, elapsed_ms=round((time.monotonic()-started)*1000,3), **outcome)
+
+    def _request_response(self, operation, body, content_type, outcome):
         mutation = operation != "pending"
         headers = {"accesstoken": self.auth.token(now=self.clock()), "Cache-Control": "no-store"}
         if content_type:
@@ -165,6 +199,7 @@ class FileGatewayClient:
                 response = exc
             with response:
                 status = response.code if hasattr(response, "code") else response.status
+                outcome['status'] = status
                 if status not in (200, 204):
                     safe = {401: "FILE_AUTH_REJECTED", 403: "FILE_ACCESS_DENIED", 413: "FILE_TOO_LARGE", 429: "FILE_RATE_LIMITED"}
                     code = safe.get(status, "FILE_DOWNLOAD_OBJECT_MISSING" if status == 404 and operation == "download" else "FILE_GATEWAY_HTTP_ERROR")
@@ -180,6 +215,7 @@ class FileGatewayClient:
                 length = response.headers.get("Content-Length")
                 if length is not None and (not length.isdecimal() or int(length) != len(data)):
                     raise FileGatewayError("FILE_GATEWAY_RESPONSE_TRUNCATED", ambiguous=mutation)
+                if operation == 'download':outcome['blob_sha256']=hashlib.sha256(data).hexdigest()
                 return status, dict(response.headers), data
         except FileGatewayError:
             raise
@@ -214,7 +250,8 @@ class FileGatewayClient:
         boundary = "xunjia-" + uuid.uuid4().hex
         head = ("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + name + "\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode("utf-8")
         body = head + data + ("\r\n--" + boundary + "--\r\n").encode("ascii")
-        _, _, raw = self._request("upload", body, "multipart/form-data; boundary=" + boundary)
+        _, _, raw = self._request("upload", body, "multipart/form-data; boundary=" + boundary,
+                                  blob_sha256=hashlib.sha256(data).hexdigest())
         try:
             result = json.loads(raw)
             if str(uuid.UUID(result["file_key"])) != result["file_key"].lower() or not isinstance(result["file_name"], str):

@@ -9,16 +9,19 @@ import pytest
 
 import server.negotiation.engine as engine_module
 from server.negotiation.engine import Engine
+from server.negotiation.prices import InvalidFact
+from server.negotiation.reply_render import render_reply_plan
 from test_production_flow import OWNER, desk, raw
 from test_acceptance_contract import current, observation, parser, setup_groups
 from test_persistent_retry_http import latest_row
 
 
 ERRORS = {
-    'percent': 'Public yield text differs from validated quote',
-    'direction': 'Reply direction differs from our authorized side',
+    'standalone_direction': 'Reply direction differs from our authorized side',
+    'quantity_direction': 'Reply direction differs from our authorized side',
 }
 FIXED_TEXT = 'SYN-A 3.19%收500万，烦请继续沟通。'
+FIXED_TEMPLATE = 'SYN-A {own_quote}{peer_volume}，烦请继续沟通。'
 
 
 def reply_case(desk, *, final=False):
@@ -35,21 +38,27 @@ def reply_case(desk, *, final=False):
                            fact=current(app, peer).dump())
 
 
-def response(failure='percent'):
-    return {'schema_version': '2.2', 'action': 'SEND', 'proposal': {
-        'kind': 'REPLY', 'text': 'SYN-A 3.19收500万' if failure=='percent' else 'SYN-A 3.19%收，出500万',
-        'our_price': {'kind': 'YIELD', 'value': '3.19'}},
+def response(failure='quantity_direction', *, context=None):
+    if context is None:
+        # Explicit low-level text-patch fixture, never an ordinary Engine SEND.
+        proposal={'kind':'REPLY','text':'SYN-A 3.19收500万','our_price':{'kind':'YIELD','value':'3.19'}}
+    else:
+        text=('SYN-A {own_quote}，我出给你。' if failure=='standalone_direction'
+              else 'SYN-A {own_quote}，出{peer_volume}。')
+        proposal=render_reply_plan(context,{'kind':'REPLY','quote_value':'3.19','text':text})['proposal']
+    return {'schema_version': '2.2', 'action': 'SEND', 'proposal': proposal,
         'trader_view': {'reason': 'synthetic frozen decision'}, 'tool_requests': [], 'history_requests': []}
 
 
-def install(case, *, failure='percent', transform=None, first_hook=None, repair_hook=None):
-    original = response(failure)
+def install(case, *, failure='quantity_direction', transform=None, first_hook=None, repair_hook=None):
+    original = {}
     calls = []
     def decide(context):
         calls.append(deepcopy(context))
         assert len(calls) <= 2, 'Text repair may request only one extra final B response'
         if len(calls) == 1:
             assert not context.get('validation_feedback')
+            original.update(response(failure, context=context))
             if first_hook: first_hook(context, original)
             return deepcopy(original)
         feedback = context.get('validation_feedback')
@@ -59,7 +68,8 @@ def install(case, *, failure='percent', transform=None, first_hook=None, repair_
         assert feedback['original_response'] == original
         if repair_hook: repair_hook(context)
         repaired = deepcopy(original)
-        repaired['proposal']['text'] = FIXED_TEXT
+        repaired['proposal']=render_reply_plan(context,
+            {**original['proposal']['render_plan'],'text':FIXED_TEMPLATE})['proposal']
         return transform(repaired) if transform else repaired
     case.flows.decide = decide
     return calls, original
@@ -84,7 +94,7 @@ def rejected(case, result):
     unchanged_facts(case)
 
 
-@pytest.mark.parametrize('failure', ['percent', 'direction'])
+@pytest.mark.parametrize('failure', ['standalone_direction', 'quantity_direction'])
 def test_model_repairs_only_text_and_exact_second_response_creates_one_command(desk, failure):
     case = reply_case(desk)
     calls, original = install(case, failure=failure)
@@ -154,15 +164,23 @@ def test_repair_cannot_open_another_tool_history_or_retry_round(desk, monkeypatc
     rejected(case, result)
 
 
-@pytest.mark.parametrize('failure', ['limit', 'step', 'final', 'quantity'])
+@pytest.mark.parametrize('failure', ['limit', 'cash_basis', 'final', 'quantity'])
 def test_economic_or_other_public_rejection_never_becomes_text_repair(desk, failure):
     case = reply_case(desk, final=failure=='final')
     calls = []
     def decide(context):
         calls.append(context)
-        value=response()
-        if failure=='limit': value['proposal']['our_price']['value']='3.11'
-        elif failure=='step': value['proposal']['our_price']['value']='3.12'
+        value={'schema_version':'2.2','action':'SEND','proposal':render_reply_plan(context,
+            {'kind':'REPLY','quote_value':'3.20' if failure=='final' else '3.19','text':FIXED_TEMPLATE})['proposal']}
+        if failure in ('limit','final'):
+            price='3.11' if failure=='limit' else '3.19'
+            value['proposal']['our_price']['value']=price
+            value['proposal']['render_plan']['quote_value']=price
+            value['proposal']['text']='SYN-A '+price+'%收500万'
+        elif failure=='cash_basis':
+            cash={'kind':'REPLY','text':'SYN-A 净价97.00收500万','our_price':{'kind':'NET_PRICE','value':'97.00'}}
+            with pytest.raises(InvalidFact):case.app.state.negotiation_engine._validate_reply(context,cash)
+            value['proposal']['our_price']=cash['our_price']
         elif failure=='quantity': value['proposal']['text']='SYN-A 3.19%收600万'
         return value
     case.flows.decide=decide
@@ -265,7 +283,7 @@ def test_reply_repair_audit_and_persisted_result_keep_original_failure_and_spent
     audit=result['repair']
     assert audit['mode']=='TEXT_ONLY' and audit['claim_attempt']==1
     assert audit['attempted'] is True and audit['succeeded'] is succeeds and audit['fallback'] is (not succeeds)
-    assert audit['initial_errors']==[{'reason':ERRORS['percent']}]
+    assert audit['initial_errors']==[{'reason':ERRORS['quantity_direction']}]
     assert audit['initial_response']==original and audit['repair_response'] is not None
     assert audit['initial_elapsed_ms']>=1000 and audit['repair_elapsed_ms']>=2000
     if not succeeds:assert audit['repair_error']
@@ -289,11 +307,12 @@ def test_completed_tool_results_are_preserved_when_text_repair_starts(desk,monke
             return {'schema_version':'2.2','tool_requests':[{'name':'bond_info','arguments':{
                 'schema_version':'1','mode':'search','query':'synthetic-'+str(i)}} for i in range(6)]}
         assert len(context['tool_results'])==6
-        value=response()
+        value=response(context=context)
         if len(calls)==3:
             assert context['validation_feedback']['mode']=='TEXT_ONLY'
             assert context['tool_results']==calls[1]['tool_results']
-            value['proposal']['text']=FIXED_TEXT
+            value['proposal']=render_reply_plan(context,
+                {**value['proposal']['render_plan'],'text':FIXED_TEMPLATE})['proposal']
         return value
     case.flows.decide=decide
     result=run(case)
@@ -307,7 +326,8 @@ def test_reply_without_repair_still_persists_explicit_clean_audit(desk,action):
     def decide(context):
         calls.append(context)
         if action=='WAIT':return {'schema_version':'2.2','action':'WAIT','proposal':None}
-        value=response();value['proposal']['text']=FIXED_TEXT;return value
+        return {'schema_version':'2.2','action':'SEND','proposal':render_reply_plan(context,
+            {'kind':'REPLY','quote_value':'3.19','text':FIXED_TEMPLATE})['proposal']}
     case.flows.decide=decide
     result=run(case)
     assert len(calls)==1 and result['state']==('QUEUED' if action=='SEND' else 'WAIT')

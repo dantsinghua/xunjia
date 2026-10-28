@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from server.app import create_app
 from server.auth import AuthConfig
 from server.negotiation.settings import Aggregation
+from server.negotiation.reply_render import render_reply_plan
 from server.reference_data import ReferenceSnapshot
 from test_production_flow import Clock, FakeFlows, FakeNative, OWNER, User, confirm, desk, draft, item, raw
 from test_acceptance_contract import current, observation, parser, setup_groups
@@ -57,8 +58,8 @@ def test_rollover_asks_every_counterparty_and_updates_only_bp_boundary(tmp_path,
         contexts = []
         def reconfirm(context):
             contexts.append(context)
-            return {"schema_version": "2.2", "action": "SEND", "proposal": {
-                "kind": "RECONFIRM", "text": "SYN-A 请确认今天的报价和可做数量。"}}
+            return {"schema_version": "2.2", "action": "SEND", "proposal": render_reply_plan(context,{
+                "kind": "RECONFIRM", "question":"ASK_CURRENT_QUOTE", "text": "{bond} 请确认今天的报价和可做数量。"})['proposal']}
         flows.decide = reconfirm
         app.state.negotiation_engine.run_once()
         app.state.dispatcher.run_once()

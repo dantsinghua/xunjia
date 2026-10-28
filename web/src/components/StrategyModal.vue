@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 个人策略模板：保存后仅供新批次预览参考，不构成发送授权。 */
-import { computed, reactive, watch } from 'vue'
+import { reactive, watch } from 'vue'
 import { App } from 'ant-design-vue'
 import { api } from '../api'
 import { STRATEGY_DEFAULT, type Strategy } from '../lib/types'
@@ -14,18 +14,11 @@ useBodyScrollLock(() => props.open)
 const draft = reactive<Strategy>({ ...props.value })
 watch(() => props.open, (o) => { if (o) Object.assign(draft, props.value) })
 
-// 派生:轮次上限 =(起始−边界)/步幅 + 1
-const maxRounds = computed(() => {
-  const span = draft.startDev - draft.boundary
-  if (draft.step <= 0 || span < 0) return '—'
-  return Math.ceil(span / draft.step) + 1
-})
-
 interface Item { key: keyof Strategy; label: string; desc: string; min: number; max: number; step: number; unit: string }
 const ITEMS: Item[] = [
   { key: 'startDev', label: '起始偏离(BP)', desc: '首轮报价相对中债估值的偏离,买入为最有利端(估值+N),越大越保守。', min: 1, max: 30, step: 1, unit: 'BP' },
   { key: 'boundary', label: '探价边界(BP)', desc: '可让步到的最差位置;越过边界即钳到边界并收口请示,末轮不越界。', min: 0, max: 25, step: 1, unit: 'BP' },
-  { key: 'step', label: '步幅(BP)', desc: '每轮在上一轮基础上让步的幅度,决定还价节奏与轮次上限。', min: 0.5, max: 10, step: 0.5, unit: 'BP' },
+  { key: 'step', label: '起始参考步幅(BP)', desc: '模型结合双方报价走势与语气动态调整，可超过参考步幅；最终边界始终有效，不自动承诺成交。', min: 0.5, max: 10, step: 0.5, unit: 'BP' },
 ]
 
 function pct(it: Item) { const v = draft[it.key] as number; return Math.round((v - it.min) / (it.max - it.min) * 100) }
@@ -79,9 +72,8 @@ async function save() {
         </div>
 
         <div class="derived">
-          <span>派生 · 参考步数</span>
-          <b class="mono">{{ maxRounds }} 步</b>
-          <span class="derived-note">=ceil((起始 − 边界)/步幅)+1；仅为参数参考，不代表已授权或强制执行轮次</span>
+          <span>动态谈价</span>
+          <span class="derived-note">让步幅度与轮数由实际对话决定，始终受本批最终边界约束。</span>
         </div>
 
         <p class="sub">询价量由每批人工填写；本期不自动生成数量或跨日继承授权。</p>

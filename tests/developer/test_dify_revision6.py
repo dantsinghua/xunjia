@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from test_verified_literal_fact_binding import canonical_analysis_view
+
 from dify.negotiation_v22 import node_code, prompts
 from dify.negotiation_v22.build import build
 from server.negotiation.slots import collect_candidates
@@ -26,14 +28,16 @@ def test_all_gap_generated_route_emits_valid_pending_confirmation_without_quote_
     projected = namespace['main'](json.dumps(ctx))
     template = json.loads(projected['system_prompt'].splitlines()[-1])
     assert template['observations'] == [] and not template.get('tool_requests') and not template.get('history_requests')
-    assert template['confirmation_requests'] == [{'member_id': 'a', 'side': 'ofr', 'source_ids': ['current']}]
+    view = json.loads(projected['context'])
+    assert template['confirmation_requests'] == [{'member_id':view['members'][0]['member_id'],
+        'side':'ofr', 'source_ids':[view['messages'][0]['message_id']]}]
     namespace = {}
     exec(nodes['contract']['code'], namespace)
     decoded = json.loads(namespace['main'](json.dumps(template), json.dumps(ctx))['result'])
     assert decoded['scopes'] == {'current': ['a']}
     assert decoded['observations'][0]['validation_error'] == 'REFERENCE_CONFIRMATION_REQUIRED'
     assert 'changes' not in decoded['observations'][0]
-    assert json.loads(projected['context'])['messages'] == ctx['messages']
+    assert canonical_analysis_view(ctx, json.loads(projected['context']))['messages'] == ctx['messages']
 
 
 def test_reference_gap_with_another_member_keeps_joint_analysis_for_the_sibling():
@@ -51,8 +55,11 @@ def test_conflicting_confirmation_and_final_observation_is_still_rejected():
     result = json.loads(prompts.select_system_prompt(ctx, 'analysis').splitlines()[-1])
     result['observations'] = [{'member_id': 'a', 'side': 'ofr', 'source_ids': ['current'],
         'slots': {}, 'meaning': {'intent': 'QUOTE', 'validity': 'ACTIVE', 'negotiation_space': 'FINAL', 'reason': '不能再改善'}}]
+    graph=build('analysis',version='1.17.1',provider='synthetic',model='synthetic')['workflow']['graph']
+    namespace={}
+    exec(next(row['data']['code'] for row in graph['nodes'] if row['id']=='contract'),namespace)
     with pytest.raises(ValueError, match='Unresolved reference cannot also commit'):
-        node_code.decode_stage_result(result, ctx, 'analysis')
+        namespace['main'](json.dumps(result),json.dumps(ctx))
 
 
 def test_candidate_presentation_preserves_all_sources_ids_and_literals_with_current_first():
@@ -61,7 +68,7 @@ def test_candidate_presentation_preserves_all_sources_ids_and_literals_with_curr
         'text': 'SYN-A 3.20收，请报量'}]
     original = deepcopy(ctx)
     all_candidates = collect_candidates(ctx)
-    projected = node_code.compact_context(ctx)['slot_candidates']
+    projected = canonical_analysis_view(ctx,node_code.compact_context(ctx))['slot_candidates']
     assert projected[0]['message_id'] == 'current' and projected[0]['source_region'] == 'CURRENT'
     numeric = {'YIELD', 'YIELD_SUFFIX', 'CHINABOND_BP', 'NET_PRICE', 'DIRTY_PRICE', 'QUANTITY'}
     expected = [c for c in all_candidates if c['message_id'] == 'current' or numeric.intersection(c['roles'])]

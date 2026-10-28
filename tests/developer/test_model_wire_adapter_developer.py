@@ -74,17 +74,33 @@ def test_evidence_patch_only_adds_explicit_supplied_source_and_preserves_other_r
 
 
 def test_text_patch_copies_original_nontext_fields_and_cannot_smuggle_full_action():
+    from tests.cutover.test_rendered_reply_plan_revision import context as reply_context
+    from server.negotiation.reply_render import render_reply_plan
+    ctx={**reply_context(),'schema_version':'2.2','stage':'reply'}
+    base={'schema_version':'2.2','action':'SEND','proposal':render_reply_plan(ctx,
+          {'kind':'REPLY','quote_value':'3.18','text':'SYN-A {own_quote}，出{peer_volume}。'})['proposal'],
+          'trader_view':{'reason':'原始判断不改'}}
+    ctx['validation_feedback']={'mode':'TEXT_ONLY','attempt':1,'max_attempts':1,
+              'reason':'Reply direction differs from our authorized side','original_response':base}
+    patch={'schema_version':'2.2','text_repair':{'text':'SYN-A {own_quote}{peer_volume}。'}}
+    decoded=node_code.decode_stage_result(patch,ctx,'reply')
+    expected=deepcopy(base)
+    expected['proposal']=render_reply_plan(ctx,{**base['proposal']['render_plan'],'text':patch['text_repair']['text']})['proposal']
+    assert decoded==expected and base['proposal']['text']=='SYN-A 3.18%收，出500万。'
+    with pytest.raises(ValueError):node_code.decode_stage_result({**patch,'action':'WAIT'},ctx,'reply')
+    with pytest.raises(ValueError):node_code.decode_stage_result(patch,{'schema_version':'2.2','stage':'reply'},'reply')
+
+
+def test_text_patch_cannot_revive_an_unbound_old_response_from_feedback():
     base={'schema_version':'2.2','action':'SEND','proposal':{'kind':'REPLY','text':'SYN-A 2.65出',
-          'our_price':{'kind':'YIELD','value':'2.65'}},'trader_view':{'reason':'原始判断不改'}}
+          'our_price':{'kind':'YIELD','value':'2.65'}}}
     ctx={'schema_version':'2.2','stage':'reply','member_id':'p1',
          'validation_feedback':{'mode':'TEXT_ONLY','attempt':1,'max_attempts':1,
               'reason':'Reply direction differs from our authorized side','original_response':base}}
-    patch={'schema_version':'2.2','text_repair':{'text':'SYN-A 2.65%收'}}
-    decoded=node_code.decode_stage_result(patch,ctx,'reply')
-    expected=deepcopy(base);expected['proposal']['text']='SYN-A 2.65%收'
-    assert decoded==expected and base['proposal']['text']=='SYN-A 2.65出'
-    with pytest.raises(ValueError):node_code.decode_stage_result({**patch,'action':'WAIT'},ctx,'reply')
-    with pytest.raises(ValueError):node_code.decode_stage_result(patch,{'schema_version':'2.2','stage':'reply'},'reply')
+    before=deepcopy(ctx)
+    with pytest.raises(ValueError):
+        node_code.decode_stage_result({'schema_version':'2.2','text_repair':{'text':'SYN-A 2.65%收'}},ctx,'reply')
+    assert ctx==before
 
 
 def test_actual_v15_negotiation_space_fact_is_rejected_without_remapping_or_dropping():
@@ -158,17 +174,28 @@ def test_explicit_price_expression_is_only_a_lossless_representation_map(express
     ('','SYN-A 2.65%收。'),
     ('请确认券归属。',''),
 ])
-def test_reply_parts_preserve_exact_strings_and_all_nontext_fields(information,negotiation):
+def test_retired_split_parts_are_rejected_without_modifying_the_raw_model_response(information,negotiation):
     kind='REPLY' if negotiation else 'CLARIFY'
     proposal={'kind':kind,'information_text':information,'negotiation_text':negotiation}
     if kind=='REPLY':proposal['our_price']={'kind':'YIELD','value':'2.65'}
     raw={'schema_version':'2.2','action':'SEND','proposal':proposal,'trader_view':{'source':'actual-tool'},
          'tool_requests':[],'history_requests':[]}
     ctx={'schema_version':'2.2','stage':'reply','member_id':'p1'}
+    before=deepcopy(raw)
+    with pytest.raises(ValueError):node_code.decode_stage_result(raw,ctx,'reply')
+    assert raw==before
+
+
+@pytest.mark.parametrize('text',['这次我报{own_quote}，你再看看？','您好，{own_quote}。'])
+def test_natural_reply_preserves_model_wording_and_original_structured_quote(text):
+    from tests.cutover.test_rendered_reply_plan_revision import context as reply_context
+    from server.negotiation.engine import Engine
+    ctx={**reply_context(),'schema_version':'2.2','stage':'reply'}
+    raw={'schema_version':'2.2','reply_plan':{'kind':'REPLY','quote_value':'3.18','text':text},'trader_view':{}}
     before=deepcopy(raw);decoded=node_code.decode_stage_result(raw,ctx,'reply')
-    expected=deepcopy(raw);expected['proposal'].pop('information_text');expected['proposal'].pop('negotiation_text')
-    expected['proposal']['text']='\n'.join(text for text in (information,negotiation) if text)
-    assert raw==before and decoded==expected
+    checked=Engine.__new__(Engine)._validate_reply(ctx,decoded['proposal'])
+    assert raw==before and checked['text']==text.replace('{own_quote}','3.18%收')
+    assert checked['our_price']['value']=='3.18'
 
 
 @pytest.mark.parametrize('index',[0,1])

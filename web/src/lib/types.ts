@@ -1,7 +1,11 @@
 /** 工作台业务DTO与未保存表单的建议初始值。这里不生成行情或业务结果。 */
 export type BondStatus = '待询价' | '询价中' | '待回执' | '发送失败' | '转人工' | '已报价' | '还价中' | '待人工确认' | '已成交' | '已暂停' | '未成交' | '已撤价' | '已放弃' | '待核对' | '停止中'
 
+export interface QtColumn { key: string; label: string; tag: string }
 export interface BondRow {
+  rowId?: string
+  qtFields?: Record<string, string>
+  qtStatus?: string
   bondUniCode?: string   // 行身份(契约 §1.2);推送 delta.u 对的是它
   quotedAt?: number
   flowId?: number        // 行版本

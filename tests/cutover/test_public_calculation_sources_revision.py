@@ -10,7 +10,7 @@ from server.negotiation.engine import Engine
 from server.negotiation.prices import InvalidFact
 from server.negotiation.reply_render import public_information, render_reply_plan
 from server.reference_data import ReferenceSnapshot
-from tests.cutover.test_rendered_reply_plan_revision import context, plan, public_record, DAY
+from tests.cutover.test_rendered_reply_plan_revision import context, plan, public_record, DAY, information_text
 
 
 def desk():
@@ -59,7 +59,7 @@ def calc_rows(value):
 
 def publish(value, rows):
     before = deepcopy(value)
-    rendered = render_reply_plan(value, plan(information_ids=[row['id'] for row in rows]))
+    rendered = render_reply_plan(value, plan(text=information_text(rows)))
     body = Engine.__new__(Engine)._validate_reply(value, deepcopy(rendered['proposal']))
     assert value == before
     assert body['our_price']['value'] == '3.18'

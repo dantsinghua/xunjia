@@ -1,6 +1,6 @@
 # its-relay 两端隔离联验
 
-本目录验证 Windows IM 采集端与 xunjia-agent 的文件通道。只替换外部边界：its-relay 网关、Dify 返回、原生发送终点均为显式替身；生产 HTTP 客户端、SM4 鉴权、协议封装、账号路由、业务 API、SQLite 账本、归档、ChatflowClient 和 Vue 页面使用实际代码。
+本目录验证 Windows IM 采集端与 xunjia-agent 的文件通道。当前2026-10-27合同使用HTTPS/mTLS、accesstoken和/api/files；合成CA和证书仅在临时目录生成，服务端也校验客户端证书。仅调度存活状态由手动pump驱动的测试时钟模拟，鉴权、账号绑定上下文、在线判断、源数据和发送守卫不绕过。只替换外部边界：its-relay 网关、Dify 返回、原生发送终点均为显式替身；生产 HTTP 客户端、SM4 鉴权、协议封装、账号路由、业务 API、SQLite 账本、归档、ChatflowClient 和 Vue 页面使用实际代码。
 
 ## 不会做的操作
 
@@ -10,7 +10,7 @@
 
 ## 网关合同
 
-按用户提供的新版 HTML：`/its-relay/v1/api/files/{pending,upload,download}?path=...`；真实 SM4-CBC 令牌解密与时间校验；key/path 分队列；multipart 字段 file；同名不覆盖；FIFO 下载即取走；空队列204；400/401/413/502、取走后404或断流均按明确场景模拟。待取24小时按用户部署要求模拟。
+按用户提供的新版 HTML：`/api/files/{pending,upload,download}?path=...`；真实 SM4-CBC 令牌解密与时间校验；key/path 分队列；multipart 字段 file；同名不覆盖；FIFO 下载即取走；空队列204；400/401/413/502、取走后404或断流均按明确场景模拟。待取24小时按用户部署要求模拟。
 
 不提供远端合同没有的 ACK 接口。可靠性确认由两端原有签名协议处理，不能把 pending=0 当作业务成功。
 
@@ -25,7 +25,7 @@ python qa/its_relay_joint/run.py \
   --suite all --build-web
 ```
 
-分组：`--suite http`（20项），`--suite media`（16项），`--suite browser`（1项）；browser 需要该 output 下已构建的 web-dist，或同时指定 --build-web。用独立输出目录保留每轮 XML/日志，不重复提交同一长任务。
+分组：`--suite http`（23项，含3项TLS拒绝），`--suite media`（16项），`--suite browser`（1项）；browser 需要该 output 下已构建的 web-dist，或同时指定 --build-web。用独立输出目录保留每轮 XML/日志，不重复提交同一长任务。
 
 ## 覆盖矩阵
 
@@ -43,3 +43,4 @@ python qa/its_relay_joint/run.py \
 不证明真实网关502已恢复、不证明所有企点原生附件格式都通过实样验收、不覆盖Windows安装/UAC冷启动。当前原生主库实读样本为文本；图片/文件字节来自按已核对格式构造的夹具。旧完整采集端套件的12项合同红测、南银接收适配的2项兼容缺陷不由本目录自动取消或修改断言。
 
 所有产品修复及发布仍须按完整回归、包内源码核对、真实链路和旧状态接续要求验收。
+2026-10-27：发送用例通过真实上下文激活握手并携带X-Xunjia-Context；新提交通道故障按当前503与submitted=false合同校验。普通Dify模拟返回由当前render_reply_plan生成来源绑定正文，不接受已退役的无render_plan SEND。群消息只留在原生归档/采集层，不进入双边谈判线程。过期心跳显示“未就绪”，不把证据不足冒称明确离线。

@@ -34,6 +34,7 @@ def check_database(options=None):
             with db.cursor() as c:
                 required={'qb_live_best_quote':set(Q_COLS)|{'id'},'qb_live_trade':set(T_COLS)|{'id'},
                           'qb_bond_dict':{'bond_uni_code','bond_code','bond_short_name'},'qb_broker':{'broker_id','broker_name'}}
+                if os.environ.get('QB_DICTIONARY_SOURCE')=='innodealing':required['qb_bond_dict'].add('com_short_name')
                 for table,columns in required.items():
                     c.execute('SHOW COLUMNS FROM '+table)
                     missing=columns-{r[0] for r in c.fetchall()}
@@ -41,7 +42,7 @@ def check_database(options=None):
                         return {'ok':False,'code':'QUOTE_SCHEMA_MIGRATION_REQUIRED','note':'行情表缺列：'+table+'.'+','.join(sorted(missing))+'；须执行对应显式迁移，不能直接跳过'}
                 c.execute('SELECT 1 FROM qb_bond_dict LIMIT 1')
                 if c.fetchone() is None:
-                    return {'ok':False,'code':'QUOTE_DICTIONARY_EMPTY','note':'债券代码／简称字典为空；须先导入真实字典，不能用虚构代码填充'}
+                    return {'ok':False,'code':'QUOTE_DICTIONARY_EMPTY','structure_ready':True,'note':'债券代码／简称字典为空；须先导入真实字典，不能用虚构代码填充'}
         return {'ok':True,'code':'QUOTE_DATABASE_READY','note':'行情数据库、报价表和真实债券字典可用'}
     except ImportError:
         return _runtime_unavailable()
@@ -80,6 +81,8 @@ class QuoteControl:
         self._stats={'quotes_received':0,'quotes_written':0,'trades_written':0,'decode_errors':0,'last_quote_at':None,'last_frame_at':None}
         self._reader_health={'ok':False,'note':'行情读取尚未开始','last_poll_at':None}
         self._last_probe=None;self._database=None
+        self._dictionary_resolver=None
+        self._stats.update(dictionary_pending=0,dictionary_resolved=0,dictionary_failures=0)
     def _database_options(self):
         options=getattr(getattr(self.reader,"source",None),"connection_options",None)
         return options if options is not None else database_options()
@@ -133,8 +136,18 @@ class QuoteControl:
             values=merged({},self.directory)
             if not (values['cookie'] or values['sid']) or not values['device_id']:raise ValueError('请先保存有效的 Cookie／SID 和设备标识')
             if self.reader is None:raise ValueError('行情读取未配置：须启用 XUNJIA_QUOTE_SOURCE=qb、行情数据库和 XUNJIA_QUOTE_CACHE；仅连接WebSocket不能让报价进入工作台')
+            self._dictionary_resolver=None
+            if os.environ.get('QB_DICTIONARY_SOURCE') or os.environ.get('QB_DICTIONARY_CONFIG'):
+                from collector.bond_dictionary import resolver_from_env
+                from collector.qb_gateway import merge_sid
+                self._dictionary_resolver=resolver_from_env(merge_sid(values['cookie'],values['sid']),values['device_id'])
             self._database=await asyncio.to_thread(self._db_check)
-            if not self._database['ok']:raise ValueError(self._database['note'])
+            auto_dictionary=(os.environ.get('QB_DICTIONARY_SOURCE')=='innodealing'
+                             and self._dictionary_resolver is not None
+                             and self._database.get('code')=='QUOTE_DICTIONARY_EMPTY'
+                             and self._database.get('structure_ready') is True)
+            if not self._database['ok'] and not auto_dictionary:raise ValueError(self._database['note'])
+            if auto_dictionary:self._database={**self._database,'dictionary_pending':True,'note':'行情表结构齐全；真实报价先入库，债券代码与简称将按真实uni异步补齐'}
             lease=_Lease(self.directory/'collector.lock');lease.acquire()
             try:
                 if persist:self._desired(True)
@@ -153,7 +166,8 @@ class QuoteControl:
             self._state='stopped';self._code='QUOTE_STOPPED';self._note='采集已停止；历史行情保留，未删除数据'
             return self.status(user)
     async def startup(self):
-        if os.environ.get('XUNJIA_QUOTE_AUTOSTART')!='1':return
+        # Only a persisted explicit start authorizes recovery. Browser presence and
+        # the legacy AUTOSTART flag must not revoke that durable operator intent.
         try:
             saved=json.loads((self.directory/'collector-state.json').read_text())
             if saved.get('enabled') is True:await self.start('system',persist=False)
@@ -176,8 +190,9 @@ class QuoteControl:
                     if self._session:await self._session(values,self._update)
                     else:
                         from collector.managed_session import collect
-                        await collect(values,self._update,self._database_options())
-                    attempt=0
+                        await collect(values,self._update,self._database_options(),dictionary_resolver=self._dictionary_resolver)
+                    # An exhausted feed is a disconnect, not a successful endless session.
+                    raise ConnectionError('PUBLIC_FEED_ENDED')
                 except asyncio.CancelledError:raise
                 except ImportError:
                     result=_runtime_unavailable()

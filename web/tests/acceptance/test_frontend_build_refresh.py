@@ -35,8 +35,8 @@ def production_builds(tmp_path_factory):
         shutil.copytree(source / 'dist', destination)
         manifest = json.loads((destination / 'assets/build-version.json').read_text())
         html = (destination / 'index.html').read_text()
-        asset = re.search(r'src="(/assets/[^\"]+\.js)"', html).group(1)
-        assert manifest['version'] in (destination / asset.lstrip('/')).read_text()
+        asset = re.search(r'src="((?:/|\./)assets/[A-Za-z0-9._-]+\.js)"', html).group(1)
+        assert manifest['version'] in (destination / asset.removeprefix('./').lstrip('/')).read_text()
         builds.append({'root': destination, 'source': source_snapshot, 'manifest': manifest, 'version': manifest['version'], 'asset': asset})
     assert builds[0]['version'] != builds[1]['version']
     return builds

@@ -13,7 +13,7 @@ import time
 from .prices import InvalidFact, Price, StaleDecision, number, resolve_yield_suffix, valuation_quote, volume_wan
 from .store import encoded, new_id
 from .validation import economics, token_side, validate_public_text, validate_observation
-from .reply_render import render_reply_plan
+from .reply_render import render_reply_plan, reply_requirements, requested_volume_signature, handoff_notice_source
 from .slots import collect_candidates, window_reference_gaps
 from .text_roles import numeric_spelling, settlement_literal
 class Engine:
@@ -66,7 +66,10 @@ class Engine:
     @staticmethod
     def _reply_without_text(result):
         frozen=deepcopy(result)
-        if isinstance(frozen.get('proposal'),dict):frozen['proposal'].pop('text',None)
+        if isinstance(frozen.get('proposal'),dict):
+            frozen['proposal'].pop('text',None)
+            if isinstance(frozen['proposal'].get('render_plan'),dict):
+                frozen['proposal']['render_plan'].pop('text',None)
         return encoded(frozen)
 
     def _tool_call(self,method,context,*,owner=None,on_final=None,repair_audit=None):
@@ -110,10 +113,9 @@ class Engine:
                             or not 1<=len(request['message_ids'])<=30
                             or any(not isinstance(ref,str) or not 1<=len(ref)<=160 for ref in request['message_ids'])):
                         raise InvalidFact('Invalid scoped reference request')
-                # A legacy model may still ask to fetch. The current policy
-                # records the missing reference without reading older history
-                # or spending another remote model round.
                 if method=='analyze':
+                    # Record the missing reference without reading older
+                    # history or spending another remote model round.
                     mids={request['member_id'] for request in private}
                     scopes={message['message_id']:[mid for mid,p in members.items()
                             if p.get('bond_code','') and p['bond_code'] in message['text']]
@@ -125,8 +127,7 @@ class Engine:
                         {'member_id':mid,'side':'ofr' if members[mid]['our_side']=='BUY' else 'bid',
                          'validation_error':'REFERENCE_CONFIRMATION_REQUIRED'} for mid in sorted(mids)]}
                 else:
-                    plan={'kind':'CLARIFY','question':'ASK_CURRENT_QUOTE'}
-                    result={'schema_version':'2.2','action':'SEND','proposal':render_reply_plan(context,plan)['proposal']}
+                    raise InvalidFact('Current reply contract does not accept legacy history requests')
                 requests=[];private=[]
             if not requests and not private:
                 result=dict(result);result['_history_context']=deepcopy(histories)
@@ -585,6 +586,17 @@ class Engine:
                 result={'scopes':{m['message_id']:[] for m in snapshot['messages']},
                     'observations':[],'unresolved':{},'_public_tool_results':[]}
                 repair_audit['mode']='NO_ACTIVE_MEMBERS'
+            elif (self.context_policy_revision=='latest_quote_confirmation_v1' and snapshot['messages']
+                  and set(snapshot.get('known_outbound_scopes',{}))=={m['message_id'] for m in snapshot['messages']}
+                  and all(m.get('kind')=='message' and m.get('direction')=='out' and not m.get('historical') and m.get('native_id')
+                          and snapshot['known_outbound_scopes'].get(m['message_id'])
+                          for m in snapshot['messages'])):
+                # The frozen map was built from current-epoch, hash-verified
+                # native SENT commands. Preserve the normal lease/CAS commit;
+                # mixed, manual or unproven messages still need joint analysis.
+                result={'scopes':deepcopy(snapshot['known_outbound_scopes']),
+                    'observations':[],'unresolved':{},'_public_tool_results':[]}
+                repair_audit['mode']='KNOWN_OUTBOUND_ONLY'
             else:
                 result=self._tool_call('analyze',snapshot,owner=owner,on_final=final_analysis,repair_audit=repair_audit)
             saved=self.store.commit_analysis(owner,job['analysis_id'],job['lease_token'],
@@ -622,10 +634,10 @@ class Engine:
         return number(boundary['value'])
 
     @staticmethod
-    def _final_peer_yield(context,limit):
+    def _current_peer_yield(context,limit):
         peer=context['quotes'].get('ofr' if context['our_side']=='BUY' else 'bid',{})
         if (peer.get('assertion')=='QUOTE' and peer.get('validity')=='ACTIVE'
-                and peer.get('finality')=='FINAL' and peer.get('confirmed_day')==context['trade_day']
+                and peer.get('confirmed_day')==context['trade_day']
                 and peer.get('price')):
             value=Price.load(peer['price']).as_yield()
             if value is not None and (context['our_side']=='BUY' and value>=limit
@@ -642,31 +654,27 @@ class Engine:
 
     @classmethod
     def _quote_constraints(cls,context):
-        """Project existing economic guards onto the 0.01 yield-percent grid.
+        """Expose the private boundary, current eligible peer price and soft reference.
 
         This pure view chooses neither a price nor an action and grants no send
         authority. Validation always uses the original server-owned inputs.
         """
         result={'status':'UNAVAILABLE','price_kind':'YIELD','tick_size':'0.01',
             'min_yield_pct':None,'max_yield_pct':None,'base_yield_pct':None,
-            'base_source':None,'max_step_bp':None,'reason':None}
+            'base_source':None,'reference_step_bp':None,'reason':None}
         try:
             side=context['our_side']
             if side not in ('BUY','SELL'):raise InvalidFact('Explicit BUY/SELL is required')
             limit=cls._reply_boundary_yield(context.get('boundary'))
-            final=cls._final_peer_yield(context,limit)
+            peer_yield=cls._current_peer_yield(context,limit)
             previous,step,source=cls._reply_step_inputs(context)
-            result.update(base_yield_pct=format(previous,'f'),base_source=source,max_step_bp=format(step,'f'))
-            delta=step/Decimal(100)
-            lower,upper=previous-delta,previous+delta
-            if side=='BUY':lower=max(lower,limit,final if final is not None else limit)
-            else:upper=min(upper,limit,final if final is not None else limit)
-            lower=lower.quantize(Decimal('0.01'),rounding=ROUND_CEILING)
-            upper=upper.quantize(Decimal('0.01'),rounding=ROUND_FLOOR)
-            if lower>upper:
-                result.update(status='EMPTY',reason='No legal REPLY yield satisfies the current price constraints')
+            result.update(base_yield_pct=format(previous,'f'),base_source=source,reference_step_bp=format(step,'f'))
+            if side=='BUY':
+                lower=max(limit,peer_yield if peer_yield is not None else limit).quantize(Decimal('0.01'),rounding=ROUND_CEILING)
+                result.update(status='AVAILABLE',min_yield_pct=format(lower,'.2f'))
             else:
-                result.update(status='AVAILABLE',min_yield_pct=format(lower,'.2f'),max_yield_pct=format(upper,'.2f'))
+                upper=min(limit,peer_yield if peer_yield is not None else limit).quantize(Decimal('0.01'),rounding=ROUND_FLOOR)
+                result.update(status='AVAILABLE',max_yield_pct=format(upper,'.2f'))
         except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError) as exc:
             result['reason']=str(exc) or 'Comparable reply pricing inputs are unavailable'
         return result
@@ -685,7 +693,27 @@ class Engine:
                 'reconfirm_command_id':member['reconfirm_command_id'],'unresolved_messages':unresolved,
                 'response_state':member['response_state'],
                 'context':self.store._context(tx,mid,thread['analyzed_revision'])}
+        waiting=self.commands._reconfirmation_waiting(tx,owner,member,group,thread)
+        context['reconfirmation_waiting']=waiting is not None
+        context['reconfirmation_sent_at']=waiting['sent_at'] if waiting else None
+        actual=context['our_quote']
+        actual['verified_sent']=False
+        if all(actual.get(key) for key in ('command_id','message_id','native_id','price')):
+            sent=tx.execute("SELECT c.*,m.trade_day AS message_day,m.text AS message_text,m.native_id AS message_native,m.direction AS message_direction,m.thread_id AS message_thread FROM xj2_command c JOIN xj2_message m ON m.message_id=? JOIN xj2_command_member cm ON cm.command_id=c.command_id AND cm.member_id=? WHERE c.command_id=? AND c.thread_id=? AND c.state='SENT'",
+                (actual['message_id'],mid,actual['command_id'],member['thread_id'])).fetchone()
+            if sent:
+                sent=dict(sent);body=json.loads(sent['body_json'])
+                sent_price=body.get('scope_prices',{}).get(mid) or (body.get('our_price') if sent['member_id']==mid else None)
+                actual['verified_sent']=(body.get('kind')!='MANUAL' and sent_price==actual['price']
+                    and sent['native_id']==actual['native_id']==sent['message_native']
+                    and sent['message_direction']=='out' and sent['message_thread']==member['thread_id']
+                    and sent['message_text']==body.get('text') and sent['message_day']==group['trade_day']
+                    and hashlib.sha256(encoded(body).encode()).hexdigest()==sent['content_hash']
+                    and sent['account_epoch']==self.store.account_epoch(tx,owner,thread['account_uid'],
+                        workbench_id=thread.get('workbench_id') or ''))
+                if actual['verified_sent']:actual['text']=body['text']
         context['quote_constraints']=self._quote_constraints(context)
+        context['handoff_evidence']=self.commands._handoff_evidence(tx,mid,context['quotes'],actual,thread['analyzed_revision'])
         context['analysis_tool_results']=[]
         context['analysis_tool_source']=None
         context['context_policy_revision']=self.context_policy_revision
@@ -734,11 +762,22 @@ class Engine:
             except (ValueError,KeyError,TypeError,ArithmeticError) as exc:raise InvalidFact(str(exc)) from exc
             if rendered['proposal']!=proposal:raise InvalidFact('Public text or price differs from its source-bound plan')
             economic_text=rendered['economic_text']
+            if proposal.get('kind')=='SOCIAL' and any(part['role'] in (
+                    'OWN_QUOTE','COUNTERPARTY_REFERENCE','OWN_HISTORY_REFERENCE','SETTLEMENT_QUESTION')
+                    for part in rendered['parts']):
+                raise InvalidFact('Social wording cannot publish a quotation or lot reference')
         kind=proposal.get('kind')
-        if kind not in ('REPLY','RECONFIRM','ASK_VOLUME','CLARIFY','SOCIAL'):raise InvalidFact('Unsupported reply action')
+        if kind not in ('REPLY','RECONFIRM','ASK_VOLUME','CLARIFY','SOCIAL','HANDOFF_NOTICE'):raise InvalidFact('Unsupported reply action')
         if context.get('unresolved_messages') and kind!='CLARIFY':raise InvalidFact('Resolve the uncertain bond fragment before an economic reply')
-        if context['reconfirm_day'] and kind not in ('RECONFIRM','CLARIFY'):raise InvalidFact('Must ask this peer for today\'s quote first')
+        if (context['reconfirm_day'] and kind not in ('RECONFIRM','CLARIFY')
+                and not (kind=='SOCIAL' and context.get('reconfirmation_waiting'))):
+            raise InvalidFact('Must ask this peer for today\'s quote first')
         body=dict(proposal)
+        if kind=='HANDOFF_NOTICE':
+            marker=handoff_notice_source(context)
+            if marker is None or proposal.get('render_plan',{}).get('acceptance')!={'meaning':'ACCEPTED_CURRENT_QUOTE','source':'LATEST_INBOUND'}:
+                raise InvalidFact('Handoff notice requires current accepted quote evidence')
+            body['handoff_notice']=marker
         price=body.get('our_price')
         if kind=='REPLY' and price is None:raise InvalidFact('A quote reply needs a structured our_price')
         if kind!='REPLY' and price is not None:raise InvalidFact('Nonquote actions must not silently insert a price')
@@ -751,12 +790,12 @@ class Engine:
                 price=self._verified_reply_cash(context,price)
             quoted,limit=price.as_yield(),self._reply_boundary_yield(boundary)
             if context['our_side']=='BUY' and quoted<limit or context['our_side']=='SELL' and quoted>limit:raise InvalidFact('Reply exceeds internal limit')
-            peer_yield=self._final_peer_yield(context,limit)
+            peer_yield=self._current_peer_yield(context,limit)
             if peer_yield is not None and (context['our_side']=='BUY' and quoted<peer_yield
                     or context['our_side']=='SELL' and quoted>peer_yield):
-                raise InvalidFact('Reply worsens this counterparty current final eligible price')
-            previous,step,_source=self._reply_step_inputs(context)
-            if abs(quoted-previous)*100>step:raise InvalidFact('Reply exceeds maximum step from actual sent price')
+                raise InvalidFact('Reply worsens this counterparty current eligible price')
+            if price.kind=='YIELD' and number(proposal['our_price']['value'])%Decimal('0.01'):
+                raise InvalidFact('Reply yield must preserve the authorized tick precision')
             text=economic_text
             advertised=re.findall(r'(?<![\d.+-])([+-]?\d+(?:\.\d+)?)\s*%',numeric_spelling(text))
             if price.kind=='YIELD':
@@ -768,6 +807,15 @@ class Engine:
         # The original response and its plan remain in the decision audit;
         # only validated native message fields cross the command boundary.
         body.pop('render_plan',None)
+        if (kind=='CLARIFY' and context.get('reconfirm_day')
+                and context['reconfirm_day']==context.get('trade_day')
+                and proposal.get('render_plan',{}).get('question')=='ASK_CURRENT_QUOTE'
+                and reply_requirements(context)['reason'] in (
+                    'CURRENT_DAY_CONFIRMATION_REQUIRED','CURRENT_DAY_CONFIRMATION_PENDING')):
+            # Both validated enums express this daily question. Canonicalize
+            # only the native body so the existing SENT receipt tracks it;
+            # source plans and other clarification semantics stay unchanged.
+            body['kind']='RECONFIRM'
         if proposal.get('render_plan',{}).get('question')=='ASK_SETTLEMENT':
             side='ofr' if context['our_side']=='BUY' else 'bid'
             body['settlement_question']={'side':side,'quote_revision':context['quotes'][side]['revision']}
@@ -805,7 +853,8 @@ class Engine:
         frozen={}
         def final_reply(value,*,repair=False):
             if repair:
-                if self._reply_without_text(value)!=frozen['key']:
+                if (self._reply_without_text(value)!=frozen['key']
+                        or requested_volume_signature(value.get('proposal'))!=requested_volume_signature(frozen['original'].get('proposal'))):
                     raise InvalidFact('Text repair changed frozen nontext response fields')
                 prepared=deepcopy(value)
                 prepared['_history_context']=deepcopy(frozen['history'])
@@ -817,7 +866,13 @@ class Engine:
                 prepared=dict(value)
             if prepared.get('action')!='SEND':return prepared,None
             proposal=prepared.get('proposal');body=error=None
-            try:body=self._validate_reply(context,proposal)
+            try:
+                if not isinstance(proposal,dict) or not isinstance(proposal.get('render_plan'),dict):
+                    raise InvalidFact('Ordinary model SEND requires a source-bound natural reply plan')
+                body=self._validate_reply(context,proposal)
+                if (proposal.get('kind')=='REPLY' and context['our_quote'].get('verified_sent')
+                        and body['text']==context['our_quote'].get('text')):
+                    raise InvalidFact('Reply repeats the last verified native quotation')
             except Exception as exc:error=exc
             try:
                 proposal_key=encoded(proposal);proposal_key.encode('utf8')
@@ -832,7 +887,9 @@ class Engine:
             frozen['key']=public_key
             if error is not None:repair_audit['initial_errors']=[{'reason':str(error)}]
             eligible=(isinstance(error,InvalidFact) and str(error) in (
-                'Public yield text differs from validated quote','Reply direction differs from our authorized side')
+                'Public yield text differs from validated quote','Reply direction differs from our authorized side',
+                'Reply repeats the last verified native quotation',
+                'Own quote slot repeats or conflicts with an adjacent direction')
                 and isinstance(proposal,dict) and proposal.get('kind')=='REPLY'
                 and proposal.get('our_price') is not None and public_key is not None)
             feedback={'mode':'TEXT_ONLY','attempt':1,'max_attempts':1,'reason':str(error),
@@ -901,8 +958,11 @@ class Engine:
                 if self.store._analysis_pending(tx,dict(candidate)):threads.append(candidate)
                 if len(threads)==10:break
         analyzed=0
+        analyzed_scopes=[]
         for t in threads:
-            if self.analyze_thread(t['owner_id'],t['thread_id'],force=force) is not None:analyzed+=1
+            if self.analyze_thread(t['owner_id'],t['thread_id'],force=force) is not None:
+                analyzed+=1
+                analyzed_scopes.append((t['owner_id'],t['thread_id'],t['analyzed_revision']))
         with self.store.db.transaction(write=False) as tx:
             base=("SELECT p.member_id,g.owner_id FROM xj2_peer p JOIN xj2_group g ON g.group_id=p.group_id "
                   "JOIN xj2_owner o ON o.owner_id=g.owner_id WHERE g.state='OPEN' AND g.archived=0 "
@@ -912,6 +972,20 @@ class Engine:
             if len(members)<100 and cursor:
                 members.extend(tx.execute(base+"AND p.member_id<=? ORDER BY p.member_id LIMIT ?",(cursor,100-len(members))).fetchall())
             if members:self._reply_cursor=members[-1]['member_id']
+            fresh_members=set()
+            if members:
+                for owner,thread_id,previous_revision in analyzed_scopes:
+                    fresh_members.update(row['member_id'] for row in tx.execute(
+                        "SELECT DISTINCT s.member_id FROM xj2_scope s "
+                        "JOIN xj2_message m ON m.message_id=s.message_id "
+                        "JOIN xj2_thread t ON t.thread_id=m.thread_id "
+                        "WHERE t.owner_id=? AND t.thread_id=? AND m.direction='in' "
+                        "AND m.historical=0 AND m.ingest_revision>? "
+                        "AND m.ingest_revision<=t.analyzed_revision",
+                        (owner,thread_id,previous_revision)).fetchall())
+            # Keep the existing rotating batch and its cursor. Only its newly
+            # analyzed inbound scopes move ahead of old due work this pass.
+            members.sort(key=lambda member: member['member_id'] not in fresh_members)
         decided=0
         for member in members:
             if self.decide_member(member['owner_id'],member['member_id']) is not None:decided+=1

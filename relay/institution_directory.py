@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 import math
+import re
 import os
 from pathlib import Path
 import sqlite3
@@ -78,7 +79,9 @@ class InstitutionDirectory:
             if data["kind"]!="manifest" or uid!="organization":raise ProtocolError("ORGANIZATION_IDENTITY_INVALID")
             state=p.get("state")
             if state not in ("ready","empty"):
-                with self.db() as db:db.execute("INSERT INTO ip_directory_error VALUES(?,?,?) ON CONFLICT(kind) DO UPDATE SET code=excluded.code,at=excluded.at",(kind,"ORGANIZATION_REFRESH_FAILED",self.clock()))
+                code=p.get("error_code")
+                if not isinstance(code,str) or re.fullmatch(r"ORG_[A-Z0-9_]{1,75}",code) is None:code="ORGANIZATION_REFRESH_FAILED"
+                with self.db() as db:db.execute("INSERT INTO ip_directory_error VALUES(?,?,?) ON CONFLICT(kind) DO UPDATE SET code=excluded.code,at=excluded.at",(kind,code,self.clock()))
                 return False
             org=p.get("org")
             if not isinstance(org,dict) or not isinstance(org.get("departments"),list) or not isinstance(org.get("members"),list):raise ProtocolError("ORGANIZATION_INVALID")

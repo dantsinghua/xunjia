@@ -3,6 +3,7 @@ import { computed, nextTick, ref } from 'vue'
 import { App } from 'ant-design-vue'
 import { api, type MqConfig } from '../api'
 import InnodealingSettings from '../components/InnodealingSettings.vue'
+import QTradeSettings from '../components/QTradeSettings.vue'
 import MqSettings from '../components/MqSettings.vue'
 import CollectorAccountSettings from '../components/CollectorAccountSettings.vue'
 import FileTransferFiles from '../components/FileTransferFiles.vue'
@@ -91,6 +92,7 @@ async function collectorSaved() {
     <ul v-if="steps.length"><li v-for="step in steps" :key="step.name">{{ step.ok ? '通过' : '未通过' }} · {{ step.name }}：{{ step.detail }}</li></ul>
     <p>目录检查不代表消息已发送。发送状态以采集端执行回执为准，结果未知时先对账。</p>
     <InnodealingSettings />
+    <QTradeSettings />
     <button class="btn-ghost" type="button" :disabled="busy" @click="reload">刷新通道状态</button>
   </section>
 </template>

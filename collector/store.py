@@ -12,7 +12,7 @@ DB = dict(
     host=os.environ.get("QB_MYSQL_HOST", "127.0.0.1"),
     port=int(os.environ.get("QB_MYSQL_PORT", "3306")),
     user=os.environ.get("QB_MYSQL_USER", "bondtrade"),
-    password=os.environ.get("QB_MYSQL_PASSWORD", "Bondtrade@2026"),
+    password=os.environ.get("QB_MYSQL_PASSWORD", ""),
     database=os.environ.get("QB_MYSQL_DB", "bondtrade_test"),
     charset="utf8mb4", autocommit=True,
 )

@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from test_verified_literal_fact_binding import canonical_analysis_view
+
 from dify.negotiation_v22 import node_code, prompts
 from dify.negotiation_v22.build import build
 from server.negotiation.prices import InvalidFact
@@ -104,11 +106,14 @@ def test_generated_all_gap_prompt_is_only_pending_confirmation_and_does_not_auth
     system = projected['system_prompt']
     assert prompts.ANALYSIS not in system and 'evidence_repairs' not in system
     response = json.loads(system.splitlines()[-1])
-    assert response['scopes'] == {'in-a': ['a'], 'in-b': ['b']}
+    model_view = json.loads(projected['context'])
+    mids = [row['member_id'] for row in model_view['members']]
+    refs = [row['message_id'] for row in model_view['messages']]
+    assert response['scopes'] == {refs[0]: [mids[0]], refs[1]: [mids[1]]}
     assert response['observations'] == []
     assert response['confirmation_requests'] == [
-        {'member_id': 'a', 'side': 'ofr', 'source_ids': ['in-a']},
-        {'member_id': 'b', 'side': 'bid', 'source_ids': ['in-b']}]
+        {'member_id': mids[0], 'side': 'ofr', 'source_ids': [refs[0]]},
+        {'member_id': mids[1], 'side': 'bid', 'source_ids': [refs[1]]}]
     assert not response.get('tool_requests') and not response.get('history_requests')
     decoded = json.loads(contract['main'](json.dumps(response), json.dumps(context))['result'])
     assert {row['member_id'] for row in decoded['observations']} == {'a', 'b'}
@@ -149,7 +154,7 @@ def test_current_first_projection_keeps_the_existing_visible_candidates_and_all_
     current = {row['message_id'] for row in context['messages']}
     numeric = {'YIELD', 'YIELD_SUFFIX', 'CHINABOND_BP', 'NET_PRICE', 'DIRTY_PRICE', 'QUANTITY'}
     expected = {row['id']: row for row in candidates if row['message_id'] in current or numeric.intersection(row['roles'])}
-    projected = node_code.compact_context(context)
+    projected = canonical_analysis_view(context, node_code.compact_context(context))
     rows = projected['slot_candidates']
     assert {row['id'] for row in rows} == set(expected)
     assert len(rows) == len(expected) == 70

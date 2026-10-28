@@ -7,6 +7,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from .prices import InvalidFact, Price, StaleDecision
 from .store import encoded, identity, new_id
 class Commands:
@@ -39,6 +41,33 @@ class Commands:
     def get(self, owner, command_id):
         with self.store.db.transaction(write=False) as tx:
             return self._command(tx, owner, command_id)
+    def _reconfirmation_waiting(self,tx,owner,member,group,thread):
+        """A current native SENT question is waiting for facts, not yet confirmed."""
+        day=group['trade_day']
+        if (member.get('reconfirm_day')!=day or not member.get('reconfirm_command_id')
+                or group.get('owner_id')!=owner or thread.get('owner_id')!=owner
+                or self.current_day is not None and day!=self.current_day()):return None
+        sent=tx.execute("SELECT * FROM xj2_command WHERE command_id=? AND member_id=? AND group_id=? AND thread_id=? AND state='SENT'",
+            (member['reconfirm_command_id'],member['member_id'],group['group_id'],thread['thread_id'])).fetchone()
+        if not sent:return None
+        sent=dict(sent);stamp=sent['sent_at']
+        if (not sent.get('native_id') or type(stamp) not in (int,float) or not math.isfinite(stamp)
+                or sent['account_epoch']!=self.store.account_epoch(tx,owner,thread['account_uid'],
+                    workbench_id=thread.get('workbench_id') or '')):return None
+        try:
+            if datetime.fromtimestamp(stamp,ZoneInfo('Asia/Shanghai')).date().isoformat()!=day:return None
+            body,basis=json.loads(sent['body_json']),json.loads(sent['basis_json'])
+            if (not isinstance(body,dict) or not isinstance(basis,dict) or body.get('kind')!='RECONFIRM'
+                    or basis.get('trade_day')!=day
+                    or hashlib.sha256(encoded(body).encode()).hexdigest()!=sent['content_hash']):return None
+        except (ValueError,TypeError,UnicodeError,OverflowError,OSError):return None
+        source=tx.execute("""SELECT m.* FROM xj2_message m
+            JOIN xj2_command_member cm ON cm.command_id=? AND cm.member_id=?
+            JOIN xj2_scope s ON s.message_id=m.message_id AND s.member_id=cm.member_id AND s.relation='MENTION'
+            WHERE m.thread_id=? AND m.native_id=? AND m.direction='out' AND m.kind='message' AND m.historical=0""",
+            (sent['command_id'],member['member_id'],thread['thread_id'],sent['native_id'])).fetchall()
+        if len(source)!=1 or source[0]['text']!=body.get('text') or source[0]['trade_day']!=day:return None
+        return {'command_id':sent['command_id'],'sent_at':stamp,'native_id':sent['native_id']}
     def _gate(self, tx, owner, member_id, basis, *, command_id=None, kind="REPLY"):
         member = self.store._member(tx, owner, member_id)
         group = self.store._group(tx, owner, member["group_id"])
@@ -68,19 +97,32 @@ class Commands:
         if kind not in ("MANUAL","CLARIFY") and tx.execute("SELECT message_id FROM xj2_scope WHERE member_id=? AND relation IN ('UNRESOLVED','INVALID') LIMIT 1", (member_id,)).fetchone():
             return "UNRESOLVED_BOND_REFERENCE"
         if member["reconfirm_day"] and kind not in ("RECONFIRM","CLARIFY","MANUAL"):
-            return "DAILY_RECONFIRMATION_REQUIRED"
+            if kind!='SOCIAL' or self._reconfirmation_waiting(tx,owner,member,group,thread) is None:
+                return "DAILY_RECONFIRMATION_REQUIRED"
         if member["pending_command_id"] and member["pending_command_id"] != command_id:
             return "MEMBER_HAS_PENDING_COMMAND"
         return None
     @staticmethod
     def _body(value):
-        if not isinstance(value, dict) or set(value) - {"kind", "text", "our_price", "scope_members", "scope_prices", "scope_bases", "settlement_question"}:
+        if not isinstance(value, dict) or set(value) - {"kind", "text", "our_price", "scope_members", "scope_prices", "scope_bases", "settlement_question", "handoff_notice"}:
             raise InvalidFact("Invalid validated reply body")
-        if value.get("kind") not in ("REPLY", "RECONFIRM", "ASK_VOLUME", "CLARIFY", "SOCIAL", "INITIAL", "MANUAL"):
+        if value.get("kind") not in ("REPLY", "RECONFIRM", "ASK_VOLUME", "CLARIFY", "SOCIAL", "INITIAL", "MANUAL", "HANDOFF_NOTICE"):
             raise InvalidFact("Invalid reply action")
         if not isinstance(value.get("text"), str) or not 1 <= len(value["text"].strip()) <= 1500:
             raise InvalidFact("Reply text is empty or too long")
         result = dict(value)
+        if result['kind']=='HANDOFF_NOTICE' or 'handoff_notice' in result:
+            from .reply_render import validate_handoff_notice_text
+            marker=result.get('handoff_notice')
+            if (result['kind']!='HANDOFF_NOTICE' or result.get('our_price') is not None
+                    or any(key in result for key in ('scope_members','scope_prices','scope_bases'))
+                    or not isinstance(marker,dict) or set(marker)!={'side','quote_revision','own_command_id','source_ids'}
+                    or marker['side'] not in ('bid','ofr') or type(marker['quote_revision']) is not int or marker['quote_revision']<1
+                    or not isinstance(marker['source_ids'],list) or len(marker['source_ids'])!=1):
+                raise InvalidFact('Invalid server-owned handoff notice')
+            identity(marker['own_command_id'],'own sent command')
+            identity(marker['source_ids'][0],'acceptance source')
+            validate_handoff_notice_text(result['text'])
         if 'settlement_question' in result:
             question=result['settlement_question']
             if (result['kind']!='CLARIFY' or result.get('our_price') is not None or 'scope_members' in result
@@ -105,6 +147,8 @@ class Commands:
         reason=self._gate(tx,owner,member_id,basis,command_id=command_id,kind=body['kind'])
         if reason:return reason
         first=self.store._member(tx,owner,member_id)
+        if body['kind']=='HANDOFF_NOTICE' and not self._handoff_notice_current(tx,owner,member_id,body['handoff_notice']):
+            return 'STALE_HANDOFF_NOTICE'
         question=body.get('settlement_question')
         if question:
             group=self.store._group(tx,owner,first['group_id'])
@@ -123,6 +167,63 @@ class Commands:
             reason=self._gate(tx,owner,mid,other,command_id=command_id,kind=body['kind'])
             if reason:return reason
         return None
+    def _handoff_evidence(self,tx,member_id,quotes,own,through):
+        refs={own.get('message_id')} if own.get('message_id') else set()
+        for quote in quotes.values():
+            for field in ('price','volume_wan'):
+                refs.update((quote.get('evidence') or {}).get(field,[]))
+        return [dict(row) for ref in sorted(refs)
+                if (row:=self.store._history_message(tx,member_id,ref,through)) is not None]
+
+    def _handoff_notice_current(self,tx,owner,member_id,marker,*,through=None):
+        from .reply_render import handoff_notice_source
+        member=self.store._member(tx,owner,member_id);group=self.store._group(tx,owner,member['group_id'])
+        thread=self.store._thread(tx,owner,member['thread_id'])
+        through=thread['analyzed_revision'] if through is None else through
+        own=json.loads(member['our_quote_json']);own['verified_sent']=False
+        try:
+            sent=self._command(tx,owner,own['command_id']);body=json.loads(sent['body_json'])
+            source=self.store._history_message(tx,member_id,own['message_id'],through)
+            linked=tx.execute('SELECT 1 FROM xj2_command_member WHERE command_id=? AND member_id=?',(sent['command_id'],member_id)).fetchone()
+            price=body.get('scope_prices',{}).get(member_id) or (body.get('our_price') if sent['member_id']==member_id else None)
+            own['verified_sent']=bool(linked and source and sent['state']=='SENT' and sent['thread_id']==thread['thread_id']
+                and body['kind']!='MANUAL' and price==own['price']
+                and sent['native_id']==own['native_id']==source['native_id'] and source['direction']=='out'
+                and source['trade_day']==group['trade_day'] and not source['historical'] and source['text']==body['text']
+                and hashlib.sha256(encoded(body).encode()).hexdigest()==sent['content_hash']
+                and sent['account_epoch']==self.store.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or ''))
+        except (ValueError,KeyError,TypeError):return False
+        quotes={side:self.store._quote(tx,member_id,side).dump() for side in ('bid','ofr')}
+        context={'member_id':member_id,'thread_id':thread['thread_id'],'bond_code':group['bond_code'],
+                 'our_side':group['our_side'],'trade_day':group['trade_day'],'reconfirm_day':member['reconfirm_day'],
+                 'boundary':json.loads(group['boundary_json']),'our_quote':own,'quotes':quotes,
+                 'context':self.store._context(tx,member_id,through),
+                 'handoff_evidence':self._handoff_evidence(tx,member_id,quotes,own,through)}
+        return handoff_notice_source(context)==marker
+
+    def _handoff_receipt_control(self,tx,owner,row,basis,body):
+        """A real SENT notice transfers control, not acceptance of later facts."""
+        member=self.store._member(tx,owner,row['member_id'])
+        group=self.store._group(tx,owner,row['group_id'])
+        thread=self.store._thread(tx,owner,row['thread_id'])
+        if row['state'] not in ('PENDING','UNKNOWN'):return 'NOTICE_NOT_DISPATCHED'
+        if hashlib.sha256(encoded(body).encode()).hexdigest()!=row['content_hash']:return 'NOTICE_CONTENT_CHANGED'
+        if not self.store.thread_is_current(tx,thread):return 'COLLECTOR_ACCOUNT_CHANGED'
+        if group['archived'] or self.store.group_is_retired(tx,owner,group['group_id']):return 'AUTHORIZATION_ROUND_ARCHIVED'
+        reset=self.store._account_reset(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or '')
+        if reset and reset['state']!='complete':return 'SESSION_RESET_IN_PROGRESS'
+        if row['account_epoch']!=self.store.account_epoch(tx,owner,thread['account_uid'],workbench_id=thread.get('workbench_id') or ''):
+            return 'ACCOUNT_EPOCH_CHANGED'
+        if self.current_day is not None and group['trade_day']!=self.current_day():return 'DAILY_ROLLOVER_REQUIRED'
+        current=self._basis(tx,owner,row['member_id'],basis.get('group_volume_version') is not None)
+        if set(basis)!=set(current):return 'INVALID_BASIS'
+        facts={'member_version','group_volume_version','observed_watermark'}
+        if any(basis[key]!=current[key] for key in current if key not in facts):return 'STALE_NOTICE_CONTROL'
+        control=tx.execute('SELECT send_allowed FROM xj2_owner WHERE owner_id=?',(owner,)).fetchone()
+        if not control['send_allowed'] or not group['send_allowed'] or not member['send_allowed'] or group['state']!='OPEN':
+            return 'SENDING_PAUSED'
+        return None
+
     def _insert(self,tx,owner,member_id,basis,request_id,body,expires_at):
         member=self.store._member(tx,owner,member_id)
         digest=hashlib.sha256(encoded(body).encode()).hexdigest()
@@ -268,7 +369,7 @@ class Commands:
             if price and occurred_at>=actual.get('sent_at',-1):
                 actual={'price':price,'command_id':row['command_id'],'message_id':message_id,'native_id':native_id,'sent_at':occurred_at}
                 tx.execute('UPDATE xj2_peer SET our_quote_json=?,version=version+1 WHERE member_id=?',(encoded(actual),mid))
-            if body['kind']!='SOCIAL' and (member['waiting_since'] is None or occurred_at>=member['waiting_since']):
+            if body['kind'] not in ('SOCIAL','HANDOFF_NOTICE') and (member['waiting_since'] is None or occurred_at>=member['waiting_since']):
                 tx.execute("UPDATE xj2_peer SET waiting_command_id=?,waiting_since=?,response_state='WAITING' WHERE member_id=?",(row['command_id'],occurred_at,mid))
             if body['kind']=='RECONFIRM' and basis['trade_day']==group['trade_day'] and member['reconfirm_day']==group['trade_day']:
                 tx.execute('UPDATE xj2_peer SET reconfirm_command_id=? WHERE member_id=?',(row['command_id'],mid))
@@ -294,7 +395,12 @@ class Commands:
             if receipt in receipts:
                 return row["state"]
             native_conflict = status == "SENT" and row["native_id"] is not None and row["native_id"] != native_id
+            notice_reason=None;notice_candidate=False
             if status == "SENT" and row["native_id"] is None:
+                body,basis=json.loads(row['body_json']),json.loads(row['basis_json'])
+                if body.get('kind')=='HANDOFF_NOTICE':
+                    notice_candidate=True
+                    notice_reason=self._handoff_receipt_control(tx,owner,row,basis,body)
                 self._record_native_send(tx, owner, row, native_id, stamp)
                 tx.execute("UPDATE xj2_command SET native_id=?,sent_at=? WHERE command_id=?", (native_id, stamp, command_id))
             terminal = {"SENT", "FAILED", "CANCELLED"}
@@ -319,6 +425,19 @@ class Commands:
             if conflict:
                 tx.execute("UPDATE xj2_peer SET send_allowed=0,control_version=control_version+1 WHERE member_id=?", (row["member_id"],))
                 self.store._cancel_commands(tx, member_id=row["member_id"], reason="CONFLICTING_NATIVE_EVIDENCE")
+            if notice_candidate:
+                applied=final=='SENT' and not conflict and notice_reason is None
+                if applied:
+                    changed=tx.execute("UPDATE xj2_peer SET send_allowed=0,control_version=control_version+1,waiting_command_id=NULL,waiting_since=NULL,response_state='NONE' WHERE member_id=? AND control_version=? AND send_allowed=1",
+                                       (row['member_id'],basis['member_control'])).rowcount
+                    applied=changed==1
+                    if applied:
+                        handoff={'state':'HANDOFF','reason':'ACCEPTED_QUOTE_NOTICE_SENT','command_id':command_id,'native_id':native_id}
+                        tx.execute('INSERT INTO xj2_decision(decision_id,member_id,basis_json,state,result_json,created_at,command_id) VALUES(?,?,?,?,?,?,?)',
+                                   (new_id(),row['member_id'],encoded(basis),'HANDOFF',encoded(handoff),self.store.clock(),command_id))
+                        self.store._cancel_commands(tx,member_id=row['member_id'],reason='HANDOFF_NOTICE_SENT')
+                result['handoff_notice']={'applied':applied,'reason':None if applied else notice_reason or 'NATIVE_NOTICE_NOT_CURRENT_SENT'}
+                tx.execute('UPDATE xj2_command SET result_json=? WHERE command_id=?',(encoded(result),command_id))
             return final
     def mark_unresponsive(self, owner):
         """One hour since an actual outbound question; never infers finality."""

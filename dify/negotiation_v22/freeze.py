@@ -13,7 +13,7 @@ def freeze_sources(root, destination):
     if destination.exists():
         raise ValueError('Measurement source snapshot already exists; choose a new output directory')
     allowed = {'.py', '.yml', '.yaml', '.json', '.md'}
-    files = sorted(p for name in ('server', 'dify', 'scripts') for p in (root/name).rglob('*')
+    files = sorted(p for name in ('server', 'relay', 'dify', 'scripts') for p in (root/name).rglob('*')
                    if p.is_file() and not p.is_symlink() and p.suffix in allowed and '__pycache__' not in p.parts)
     hashes = {}
     destination.mkdir(parents=True)

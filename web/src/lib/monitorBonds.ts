@@ -17,9 +17,9 @@ export function isCurrentInquiry(bond: CpBond, day: string): boolean {
     && bond.groupSendAllowed !== false && bond.memberSendAllowed !== false
 }
 
-/** Today's paused members have a compact recovery action, not an active bond card. */
+/** Today's paused or handed-off members keep an explicit recovery action. */
 export function canResumeInquiry(bond: CpBond, day: string): boolean {
-  return bond.tradeDay === day && bond.stage === '已暂停'
+  return bond.tradeDay === day && ['已暂停', '待人工确认'].includes(bond.stage)
     && bond.groupState === 'OPEN' && bond.groupSendAllowed !== false
     && bond.memberSendAllowed === false && !!bond.sessionId
 }

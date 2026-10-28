@@ -22,6 +22,8 @@ import BondModal from '../components/BondModal.vue'
 import RfqAssignModal from '../components/RfqAssignModal.vue'
 import StrategyModal from '../components/StrategyModal.vue'
 import ImLinkBar from '../components/ImLinkBar.vue'
+import QtQuoteTable from '../components/QtQuoteTable.vue'
+import type { QtColumn } from '../lib/types'
 
 const { message } = App.useApp()
 const router = useRouter()
@@ -57,7 +59,10 @@ const SIX_BROKERS = [
 const brokerList = ref(SIX_BROKERS.map(b => ({ ...b })))
 const brokerMenu = ref<HTMLElement | null>(null)
 const channelNote = ref('')
-const beforeUni = ref(0)
+const beforeUni = ref<number | string>(0)
+const qtColumns = ref<QtColumn[]>([])
+const privateCombined = ref(false)
+const sourceNotice = ref('')
 const bpAdj = ref(2)
 const strategyOpen = ref(false)
 const strategy = ref<Strategy>({ ...STRATEGY_DEFAULT })
@@ -76,7 +81,7 @@ const scroller = ref<HTMLElement | null>(null)
 let stopStream: (() => void) | null = null
 
 const pageIndex = ref(0)
-const pageCursors: { before:number; uni:number }[] = [{ before:0, uni:0 }]
+const pageCursors: { before:number; uni:number | string }[] = [{ before:0, uni:0 }]
 let generation = 0
 async function readPage(index: number, cursor = pageCursors[index], resetScroll = true): Promise<boolean> {
   if (!cursor || feedStopped) return false
@@ -211,6 +216,9 @@ function e2eStat() {
 
 function onBatch(b: Map<string, QuoteDelta[]>) {
   if (!isAggregate()) return
+  // Public worker deltas are not an owner-scoped combined best. Refresh the
+  // server projection instead of overwriting a winning private QT side.
+  if (privateCombined.value) { scheduleHeadSync(); return }
   const t0 = performance.now()
   let n = 0
   let unseen = 0
@@ -333,11 +341,16 @@ function filterSpec(): FilterSpec {
   return { keyword:appliedKeyword.value, chips:{...activeChip}, prices:JSON.parse(JSON.stringify(priceApplied)), groups:[...activeGroups.value], channel:CHAN[chanTab.value], broker:chanTab.value === 2 ? brokerPick.value : '' }
 }
 function scopeKey() { const binding = imBoundAccount.value; return JSON.stringify([filterSpec(), binding?.workbench_id, binding?.account_uid, binding?.version ?? 0]) }
-function quoteBonds(before: number, uni = 0) {
+function quoteBonds(before: number, uni: number | string = 0) {
   const filter = filterSpec()
   return api.bonds(before, PAGE, filter.groups, filter.channel, filter.broker, uni, filter)
 }
 function takePage(r: Awaited<ReturnType<typeof api.bonds>>, mode: 'replace' | 'more') {
+  qtColumns.value = r.qtColumns || []
+  privateCombined.value = r.privateCombined === true
+  sourceNotice.value = r.sourceNotice || ''
+  if (chanTab.value === 1 && r.qtStatus?.state === 'input_error') sourceNotice.value += ' 接入日志异常，当前仅显示已保存记录。'
+
   if (r.emptyReason) {
     bonds.value = []
     total.value = 0
@@ -369,6 +382,7 @@ function scheduleReload() {
 }
 watch(scopeKey, () => {
   generation++; loading.value = false
+  bonds.value = []; qtColumns.value = []; sourceNotice.value = ''; channelNote.value = ''; reindex()
   if (hasChecked.value) message.info('筛选范围已变化，已清除原选择')
   clearSel(); pageIndex.value = 0; pageCursors.splice(0, pageCursors.length, {before:0,uni:0})
   scheduleReload()
@@ -412,20 +426,22 @@ async function reloadByFilter() {
   unsub?.(); unsub = next ?? null
 }
 const CHAN_TABS = [
-  { key: 'best', label: '最优' },
+  { key: 'best', label: '全部报价' },
   { key: 'qt', label: 'QT意向' },
   { key: 'broker', label: '经纪商' },
   { key: 'mm', label: '做市商' },
 ]
 const INTENT_MODES: [string, 'yield' | 'price' | 'bp'][] = [['收益率', 'yield'], ['估值±BP', 'bp']]
 
-const SUBCOLS = [
+const BASE_SUBCOLS = [
   { label: '剩余期限', g: 0 }, { label: '中债推荐估值', g: 0 },
   { label: 'bid-vol', g: 1 }, { label: 'bid 底价', g: 1 }, { label: 'ofr 底价', g: 1 }, { label: 'ofr-vol', g: 1 },
   { label: '最优 bid 方', g: 2 }, { label: 'bid-vol', g: 2 }, { label: '最优 bid', g: 2 }, { label: '最优 ofr', g: 2 }, { label: 'ofr-vol', g: 2 }, { label: '最优 ofr 方', g: 2 },
 ]
+const SUBCOLS = computed(() => BASE_SUBCOLS.filter(c => chanTab.value !== 0 || c.g !== 1))
+const tableColumns = computed(() => chanTab.value === 0 ? 10 : 14)
 function subColColor(g: number) { return g === 1 ? '#B01C24' : g === 2 ? '#7A5A2E' : '#6E6258' }
-function subColBl(i: number) { return (i === 2 || i === 6) ? '1px solid rgba(176, 28, 36,.18)' : 'none' }
+function subColBl(i: number) { return (i === 2 || chanTab.value !== 0 && i === 6) ? '1px solid rgba(176, 28, 36,.18)' : 'none' }
 
 function tagStyle(t: string): [string, string] {
   const M: Record<string, [string, string]> = { 绿: ['rgba(46,125,79,.14)', '#1F6B3E'], 科创: ['rgba(30,95,180,.12)', '#1E5FB4'], 公募: ['rgba(198,141,88,.2)', '#7A5A2E'], 私募: ['rgba(110,98,88,.14)', '#5C5148'] }
@@ -501,7 +517,7 @@ function clearSel() { selectAll.value = false; picked.clear(); except.clear() }
 function selection(): Selection {
   return selectAll.value
     ? { selectAll: true, groups: activeGroups.value, filter:filterSpec(), except: [...except] }
-    : { windcodes: [...picked] }
+    : chanTab.value === 1 ? { rowIds: [...picked], filter:filterSpec() } : { windcodes: [...picked] }
 }
 /** 选中数:全选时是"当前筛选命中数 − 例外",不枚举 */
 function selCount() { return selectAll.value ? Math.max(0, total.value - except.size) : picked.size }
@@ -541,7 +557,7 @@ async function resolveSelected(): Promise<BondRow[] | null> {
 async function startRfq() {
   const selected = await resolveSelected()
   if (!selected?.length) return
-  rfqBonds.value = selected
+  rfqBonds.value = [...new Map(selected.map(row => [row.code, row])).values()]
   await refreshBusiness()
   rfqOpen.value = true
 }
@@ -603,7 +619,7 @@ async function applyBp() {
   const selected = await resolveSelected()
   if (!selected?.length) return
   try {
-    const r = await api.setFloor(selected.map(b => b.code), value, floorMode.value)
+    const r = await api.setFloor([...new Set(selected.map(b => b.code))], value, floorMode.value)
     if (!r.ok) { message.error(r.hint || '底价没有写上'); return }
     await refreshBusiness()
     message.success(`已对 ${selected.length} 只债券保存底价`)
@@ -784,11 +800,13 @@ function onJump(cpId: string, bondName: string) {
         </div>
 
         <div v-if="feedHint" class="feed-hint">{{ feedHint }}</div>
+        <div v-if="sourceNotice" class="feed-hint" data-testid="quote-source-notice">{{ sourceNotice }}</div>
         <div ref="scroller" class="table-scroll" @scroll.passive="onScroll">
-          <table class="mkt">
+          <QtQuoteTable v-if="chanTab === 1" :rows="rows" :columns="qtColumns" :is-picked="isPicked" :all-checked="allChecked" :empty-reason="channelNote" @toggle="toggle" @toggle-all="toggleAll" @open="openModal" />
+          <table v-else class="mkt" data-testid="quote-common-table">
             <colgroup>
               <col style="width:260px"><col style="width:104px"><col style="width:150px">
-              <col style="width:76px"><col style="width:92px"><col style="width:92px"><col style="width:76px">
+              <template v-if="chanTab !== 0"><col style="width:76px"><col style="width:92px"><col style="width:92px"><col style="width:76px"></template>
               <col style="width:108px"><col style="width:76px"><col style="width:92px"><col style="width:92px">
               <col style="width:76px"><col style="width:108px"><col style="width:100px">
             </colgroup>
@@ -802,7 +820,7 @@ function onJump(cpId: string, bondName: string) {
                   </div>
                 </th>
                 <th colspan="2" class="grp base">债券基本信息</th>
-                <th colspan="4" class="grp intent">内部意向</th>
+                <th v-if="chanTab !== 0" colspan="4" class="grp intent">内部意向</th>
                 <th colspan="6" class="grp ext">外部报价</th>
                 <th rowspan="2" class="sticky-r">当前状态</th>
               </tr>
@@ -811,8 +829,8 @@ function onJump(cpId: string, bondName: string) {
               </tr>
             </thead>
             <tbody>
-              <tr v-if="padTop" class="pad-row" :style="padTopStyle"><td :colspan="14" /></tr>
-              <tr v-if="channelNote && !bonds.length" class="empty-row"><td colspan="14" class="chan-empty" data-testid="channel-note">{{ channelNote }}</td></tr>
+              <tr v-if="padTop" class="pad-row" :style="padTopStyle"><td :colspan="tableColumns" /></tr>
+              <tr v-if="channelNote && !bonds.length" class="empty-row"><td :colspan="tableColumns" class="chan-empty" data-testid="channel-note">{{ channelNote }}</td></tr>
               <tr v-for="r in visRows" :key="r.code" class="mkt-row" :class="[{ sel: isPicked(r.code) }, rowCls(r.code)]">
                 <td class="sticky-l cell-name" :class="cellCls(r.code, 'name')">
                   <div class="name-cell">
@@ -824,10 +842,12 @@ function onJump(cpId: string, bondName: string) {
                 </td>
                 <td class="muted" :title="r.term">{{ r.term }}</td>
                 <td class="mono muted" :title="r.val">{{ r.val }}</td>
+                <template v-if="chanTab !== 0">
                 <td class="mono muted intent-bl">{{ r.ibv }}</td>
                 <td class="mono b red" :class="cellCls(r.code, 'ib')">{{ r.dispIb }}</td>
                 <td class="mono b green" :class="cellCls(r.code, 'io')">{{ r.dispIo }}</td>
                 <td class="mono muted">{{ r.iov }}</td>
+                </template>
                 <td class="ext-bl"><span class="side-pill" :title="r.obs" :style="{ background: r.obsBg, color: r.obsColor }">{{ r.obs }}</span></td>
                 <td class="mono muted">{{ r.obv }}</td>
                 <td class="mono b red" :class="cellCls(r.code, 'ob')">{{ r.ob }}</td>
@@ -836,7 +856,7 @@ function onJump(cpId: string, bondName: string) {
                 <td><span class="side-pill" :title="r.oos" :style="{ background: r.oosBg, color: r.oosColor }">{{ r.oos }}</span></td>
                 <td class="sticky-r status-cell"><span class="status" :style="{ background: r.stBg, color: r.stColor, boxShadow: '0 0 10px ' + r.stGlow }">{{ r.status }}</span></td>
               </tr>
-              <tr v-if="padBottom" class="pad-row" :style="padBotStyle"><td :colspan="14" /></tr>
+              <tr v-if="padBottom" class="pad-row" :style="padBotStyle"><td :colspan="tableColumns" /></tr>
             </tbody>
           </table>
         <div class="load-more">

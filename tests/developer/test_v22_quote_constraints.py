@@ -1,4 +1,4 @@
-"""Decimal grid bounds describe, but cannot replace, the existing price gates."""
+"""Hard final bounds and a soft initial reference describe quote authority."""
 from copy import deepcopy
 from decimal import Decimal
 
@@ -19,14 +19,14 @@ def context(side='BUY', base='3.20', step='2', limit='3.12'):
 
 
 @pytest.mark.parametrize('side,base,step,limit,lower,upper', [
-    ('BUY', '3.20', '1.5', '3.12', '3.19', '3.21'),
-    ('SELL', '3.20', '1.5', '3.30', '3.19', '3.21'),
-    ('BUY', '3.14', '2', '3.125', '3.13', '3.16'),
-    ('SELL', '3.12', '2', '3.125', '3.10', '3.12'),
-    ('BUY', '-0.10', '0.5', '-0.20', '-0.10', '-0.10'),
-    ('SELL', '-0.10', '0.5', '0.00', '-0.10', '-0.10'),
+    ('BUY', '3.20', '1.5', '3.12', '3.12', None),
+    ('SELL', '3.20', '1.5', '3.30', None, '3.30'),
+    ('BUY', '3.14', '2', '3.125', '3.13', None),
+    ('SELL', '3.12', '2', '3.125', None, '3.12'),
+    ('BUY', '-0.10', '0.5', '-0.20', '-0.20', None),
+    ('SELL', '-0.10', '0.5', '0.00', None, '0.00'),
 ])
-def test_fractional_grid_is_inward_and_matches_original_economic_guard(side, base, step, limit, lower, upper):
+def test_fractional_final_bound_rounds_inward_and_step_remains_reference_only(side, base, step, limit, lower, upper):
     engine = object.__new__(Engine)
     data = context(side, base, step, limit)
     original = deepcopy(data)
@@ -35,22 +35,26 @@ def test_fractional_grid_is_inward_and_matches_original_economic_guard(side, bas
     assert bounds['status'] == 'AVAILABLE' and bounds['reason'] is None
     assert (bounds['min_yield_pct'], bounds['max_yield_pct']) == (lower, upper)
     assert bounds['tick_size'] == '0.01'
+    assert Decimal(bounds['reference_step_bp'])==Decimal(step)
+    assert 'max_step_bp' not in bounds
     middle = int(Decimal(base) * 100)
     for tick in range(middle-5, middle+6):
         value = Decimal(tick) / 100
         candidate = {'kind': 'REPLY', 'our_price': {'kind': 'YIELD', 'value': format(value, '.2f')},
             'text': 'SYN-A ' + format(value, '.2f') + '%' + ('收' if side == 'BUY' else '出') + '500万'}
-        if Decimal(lower) <= value <= Decimal(upper):
+        if (lower is None or Decimal(lower)<=value) and (upper is None or value<=Decimal(upper)):
             assert engine._validate_reply(data, candidate)['our_price']['value'] == format(value, '.2f')
         else:
             with pytest.raises(InvalidFact):
                 engine._validate_reply(data, candidate)
 
 
-def test_forged_projected_bounds_cannot_authorize_eight_bp_from_a_two_bp_base():
+def test_forged_projection_cannot_widen_final_boundary_but_a_legal_eight_bp_move_is_allowed():
     engine = object.__new__(Engine)
     data = context()
     data['quote_constraints'] = {'status': 'AVAILABLE', 'min_yield_pct': '0.00', 'max_yield_pct': '99.00'}
-    with pytest.raises(InvalidFact, match='maximum step'):
-        engine._validate_reply(data, {'kind': 'REPLY', 'text': 'SYN-A 3.12%收500万',
-                                     'our_price': {'kind': 'YIELD', 'value': '3.12'}})
+    valid={'kind':'REPLY','text':'SYN-A 3.12%收500万','our_price':{'kind':'YIELD','value':'3.12'}}
+    assert engine._validate_reply(data,valid)['our_price']['value']=='3.12'
+    with pytest.raises(InvalidFact,match='internal limit'):
+        engine._validate_reply(data,{'kind':'REPLY','text':'SYN-A 3.11%收500万',
+                                    'our_price':{'kind':'YIELD','value':'3.11'}})

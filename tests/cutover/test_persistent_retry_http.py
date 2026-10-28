@@ -9,6 +9,7 @@ from server.negotiation.application_store import ApplicationStore
 from server.negotiation.chatflow import ChatflowClient, Chatflows
 from server.negotiation.engine import Engine
 from server.negotiation.prices import Price
+from server.negotiation.reply_render import render_reply_plan
 from server.negotiation.service import Inquiry
 from test_chatflow_redirect_security import server
 from test_production_flow import OWNER, desk, raw
@@ -44,9 +45,8 @@ def flaky_http(fail_stage):
                                              "evidence": {key: [msg["message_id"]] for key in changes}})
                 value = {"schema_version": "2.2", "scopes": scopes, "observations": observations, "unresolved": {}}
             else:
-                volume = context["quotes"]["ofr"]["volume_wan"]
-                value = {"schema_version": "2.2", "action": "SEND", "proposal": {
-                    "kind": "REPLY", "text": "3.19%收" + volume + "万", "our_price": Price("YIELD", "3.19").dump()}}
+                value = {"schema_version": "2.2", "action": "SEND", "proposal": render_reply_plan(context,
+                    {"kind": "REPLY", "quote_value": "3.19", "text": "{own_quote}{peer_volume}"})["proposal"]}
             data = json.dumps({"answer": json.dumps(value), "message_id": "synthetic-http-" + str(len(calls))}).encode()
             try:
                 self.send_response(200)

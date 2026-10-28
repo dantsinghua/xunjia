@@ -1,3 +1,5 @@
+> 2026-10-26 ARM64最小包入口：先阅读 `deploy/OFFLINE-QUICKSTART.md`。安琳明确选择全新部署，使用 `07-fresh-install.sh --apply`；该入口会清空且重建 `xunjia_business` 并移除旧询价配置/状态。下文01安装、回滚等属于原有保留数据工具，不是本次一键全新重置流程。最小包不附05开发测试，请用06检查安装后的运行时。
+
 # Xunjia V2.2 独立离线应用包
 ## 本版边界
 本包包含现役 V2.2 询价核心、API、构建后的前端、A/B Chatflow 画布、采集端协议 wheel 与宿主接线资料、离线 Python 依赖及包内验收用例。完整 ARM 交付还包含独立 CPython 3.12 运行时；目标机不需要 Node、编译器或公网下载依赖。
@@ -55,7 +57,7 @@ Dify 只使用客户已有 Chatflow URL 与 App API Key；不需要管理员权�
 HTTP 接口：
 - /api/health：兼容历史 200 状态，必须读取 data.ready，不能用它作为严格探活。
 - /api/health/live：进程存活，不访问数据库。
-- /api/health/ready：检查 V2.2 的 15 张 `xj2_*` 表全部预期字段、类型、主键/唯一约束、13 个二级索引、登录配置及发布身份；不通过返回 503。
+- /api/health/ready：检查 V2.2 的 16 张 `xj2_*` 表全部预期字段、类型、主键/唯一约束、14 个二级索引、登录配置及发布身份；不通过返回 503。
 - /api/health/automation：本轮未接入真实跨端能力验证，明确返回未验证，不把 configured 当成已验证。
 数据库诊断只返回安全错误码、缺失的表/列/索引名，不输出密码或底层异常原文。
 业务就绪并不证明真实 Dify、正式文件通道、企点收发通过；它们仍须按对应版本单独验收。
@@ -78,19 +80,19 @@ ARM 验证必须记录实际 Python 架构、glibc、依赖导入与包内测试
 
 本版运行时及锁定依赖已在官方 `cr.kylinos.cn/kylin/kylin-server-platform:v10sp3` 的 ARM64 用户态中实际离线安装、pip check、导入与 SM4 运算通过，系统为 V10 SP3 / Lance / glibc 2.28 / Python 3.7.9。`.productinfo` 标识为 `aarch64-Build23.02/20230324`，镜像元数据构建时间为 `2026-10-10T17:22:56.43012458Z`（北京时间 2026-10-11）；与上文历史现场 Halberd 画像分开记录。验证镜像 ARM manifest 为 `sha256:8b0496126f596b44f92da0f117a71e1af290e62037ea577f8b0b388c54d41b30`。该验证由 QEMU 用户态在 WSL/x86_64 宿主内核上执行，不是客户物理 ARM 机器；完整最终包的实际测试结果以对应 build_id 的交付证据为准，不能借用旧包结果。
 ## OceanBase 建表
-使用 sql/oceanbase/001_xunjia_schema_mysql.sql（V2.2 的15张 `xj2_*` 表及声明索引）。旧9表SQL仅作历史对照。
+使用 sql/oceanbase/001_xunjia_schema_mysql.sql（V2.2 的16张 `xj2_*` 表及声明索引）。旧9表SQL仅作历史对照。
 只供 DBA 审核后在明确选定的 xunjia_* 数据库内执行；安装、回滚、恢复均不自动运行它。
 CREATE TABLE IF NOT EXISTS 不是旧表迁移，数据库升级另行审查。
 ## V2.2 当前接口与采集端配套
 
-- 当前生产入口固定为 `server.app:create_app`，必须用本包 `sql/oceanbase/001_xunjia_schema_mysql.sql` 的15张 `xj2_*` 表；旧9表SQL在archive中仅供历史对照，不是升级方案。安装器不执行客户DDL，不覆盖现有现场配置或数据。
+- 当前生产入口固定为 `server.app:create_app`，必须用本包 `sql/oceanbase/001_xunjia_schema_mysql.sql` 的16张 `xj2_*` 表；旧9表SQL在archive中仅供历史对照，不是升级方案。安装器不执行客户DDL，不覆盖现有现场配置或数据。
 - 客户Dify导入 `dify/negotiation_v22/` 对应版本A/B画布，仅填 `XUNJIA_DIFY_URL`、`XUNJIA_DIFY_ANALYSIS_APP_KEY`、`XUNJIA_DIFY_REPLY_APP_KEY`。旧单APP_KEY不能作为新两阶段合同。公开Tool免Token，客户不需要提供管理权限。
 - `XUNJIA_AGGREGATION_PROFILE` 指向实测报告生成的参数；未测量时不启用自动分析窗口。`XUNJIA_BOND_CONTEXT_MESSAGES` 默认20、范围10..30。`XUNJIA_REFERENCE_CONFIG` 为可选公开资料/发布日历adapter配置，缺少真实源必须显示未配置。
 - `XUNJIA_DIFY_TIMEOUT_SECONDS` 为每次HTTP调用超时（模板90秒、范围1–300秒），`XUNJIA_DIFY_STAGE_BUDGET_SECONDS` 为包含工具/历史补取的阶段总预算（模板150秒、最大540秒）。实际HTTP超时还受当前剩余阶段预算限制；租约为阶段预算加30秒。部署时须显式沿用所选模型报告的HTTP/阶段预算，不能把默认值冒充已验证配置。
 - `config/aggregation-profile.measured.json` 提供本轮已测 qwen-max/shim 链路的四字段聚合配置：1463ms静默窗、4389ms累计上限；溯源及字节摘要位于 `config/aggregation-measurement.json`。应用的 `XUNJIA_AGGREGATION_PROFILE` 指向前者。首次安装带入配置目录；升级保留现场文件，运维可另存新测量配置并显式选择。该配置来自46对真实清洁实耗与固定合成到达实验；其他模型/运行环境按对应链路重新测量，累计上限不包含忙时排队。后台任务使用统一生命周期配置。
 - 标准部署默认 `XUNJIA_RUN_BACKGROUND=1`，启动入站、分析、派发和对账；有效授权指令通过用户暂停状态、有效期、水位和去重检查后派发，不另设真实发送开关。需要暂停时使用工作台现有暂停功能。
-- 构建共享包执行 `python3 scripts/build_collector_runtime.py --output <fresh-dir> --wheelhouse <local-build-wheels>`；主包使用 `deploy/build_offline.py` 的 `--collector-wheel <fresh-dir>/xunjia_collector_runtime-2.2.11-py3-none-any.whl`。输出目录必须为本次新目录，构建依赖来自指定本地 wheelhouse；打包会核 wheel 与本版15个共享源码逐文件一致。
-- QTrade必须部署匹配的完整冻结应用，在其**专用Python环境**离线安装精确版本 `xunjia_collector_runtime-2.2.11-py3-none-any.whl`；安装前检查 `pip show xunjia-collector-runtime`，安装后检查 `pip check` 和模块路径。不能在其他服务的共用Python环境中覆盖同名 server/relay 包。该 wheel 不含Web服务、现场密钥或运行数据。
+- 构建共享包执行 `python3 scripts/build_collector_runtime.py --output <fresh-dir> --wheelhouse <local-build-wheels>`；主包使用 `deploy/build_offline.py` 的 `--collector-wheel <fresh-dir>/xunjia_collector_runtime-2.2.12-py3-none-any.whl`。输出目录必须为本次新目录，构建依赖来自指定本地 wheelhouse；打包会核 wheel 与本版18个共享源码逐文件一致。
+- QTrade必须部署匹配的完整冻结应用，在其**专用Python环境**离线安装精确版本 `xunjia_collector_runtime-2.2.12-py3-none-any.whl`；安装前检查 `pip show xunjia-collector-runtime`，安装后检查 `pip check` 和模块路径。不能在其他服务的共用Python环境中覆盖同名 server/relay 包。该 wheel 不含Web服务、现场密钥或运行数据。
 - 当前宿主由采集端自有 `CollectorReportingSettings` 自动装配唯一 `InstitutionCollectorHost`，有效授权指令经原生守卫交给绑定账号；不得以旧环境开关启用另一套 factory。参考闭包及精确文件 hash 见 `deploy/collector-qtrade-v22/README.md`、`deploy/collector-qtrade-v22/manifest.json`，其中 `deploy/collector-qtrade-v22/source/src/qtrade_agent/app.py`、`deploy/collector-qtrade-v22/source/src/qtrade_agent/ossbox/collector_settings.py`、`deploy/collector-qtrade-v22/source/src/qtrade_agent/ossbox/institution.py` 展示现役接线；该子集不能覆盖安装为完整应用。
 - 机构目录/组织及按工作台、channel、UID派生的账号队列 path 均内置；采集端和询价端不填写远端文件路径或两方向 URL。询价UI只选择企点，微信目录/消息交由南银采集消费。
 - wheel离线安装及合成跨仓通过不等于完整QTrade安装EXE、真实文件通道或IM已验收。上线前仍需在指定测试对手范围核真实native ACK；传输 accepted/pending 始终不算已发。

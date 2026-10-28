@@ -9,6 +9,8 @@ import json
 
 import pytest
 
+from test_verified_literal_fact_binding import canonical_analysis_view
+
 from dify.negotiation_v22 import node_code, prompts
 from dify.negotiation_v22.build import build
 from server.negotiation import slots
@@ -143,6 +145,7 @@ def test_generated_short_route_keeps_raw_twenty_context_candidates_and_one_model
     assert ack_system() in result['system_prompt'] and prompts.ANALYSIS not in result['system_prompt']
     projected = json.loads(result['context'])
     assert projected == node_code.compact_context(value)
+    projected = canonical_analysis_view(value, projected)
     assert projected['messages'] == value['messages']
     assert projected['members'][0]['context'] == value['members'][0]['context']
     assert len(projected['members'][0]['context']) == 20
@@ -262,12 +265,15 @@ def test_ack_prompt_ends_with_real_snapshot_ids_that_the_actual_contract_accepts
     _, project, decode = generated(version)
     projected = project(json.dumps(value, ensure_ascii=False))
     bound = json.loads(projected['system_prompt'].splitlines()[-1])
+    view = json.loads(projected['context'])
     assert bound == {'schema_version': '2.2',
-                     'scopes': {'actual-inbound-7d8c9e': ['a'], 'actual-inbound-2a3b4c': ['a']},
+                     'scopes': {row['message_id']: [view['members'][0]['member_id']]
+                                for row in view['messages'] if row['direction']=='in'},
                      'observations': []}
     raw_before = deepcopy(bound)
     decoded = json.loads(decode(json.dumps(bound), json.dumps(value))['result'])
-    assert decoded == {**bound, 'scopes': {**bound['scopes'], 'question-out': ['a']}}
+    assert decoded == {'schema_version':'2.2', 'observations':[], 'scopes': {
+        'actual-inbound-7d8c9e':['a'], 'actual-inbound-2a3b4c':['a'], 'question-out':['a']}}
     assert bound == raw_before and value == before
     assert json.loads(projected['context']) == node_code.compact_context(before)
 

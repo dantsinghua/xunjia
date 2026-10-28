@@ -9,6 +9,7 @@ from server.negotiation.engine import Engine
 from server.negotiation.prices import LimitPolicy
 from server.negotiation.service import Inquiry
 from server.negotiation.store import encoded
+from server.negotiation.reply_render import render_reply_plan
 
 
 OWNER = 'synthetic-text-repair-owner'
@@ -41,9 +42,9 @@ def desk(tmp_path):
     return store, engine, flows, member
 
 
-def response(text='3.19%收500万'):
-    return {'schema_version': '2.2', 'action': 'SEND', 'proposal': {
-        'kind': 'REPLY', 'text': text, 'our_price': {'kind': 'YIELD', 'value': '3.19'}},
+def response(context,text='{own_quote}{peer_volume}'):
+    return {'schema_version': '2.2', 'action': 'SEND', 'proposal': render_reply_plan(context,{
+        'kind': 'REPLY', 'text': text, 'quote_value':'3.19'})['proposal'],
         'trader_view': {'reason': 'synthetic immutable explanation'}}
 
 
@@ -53,7 +54,7 @@ def test_full_reply_validator_runs_once_per_response_and_audit_is_persistent(tmp
     calls, checked = [], []
     def decide(context):
         calls.append(deepcopy(context))
-        return response('3.19%收500万' if context.get('validation_feedback') else '3.19收500万')
+        return response(context,'{own_quote}{peer_volume}' if context.get('validation_feedback') else '{own_quote}，出{peer_volume}')
     validate = engine._validate_reply
     def counted(*args):
         checked.append(deepcopy(args[1]))
@@ -74,7 +75,7 @@ def test_full_reply_validator_runs_once_per_response_and_audit_is_persistent(tmp
 
 def test_cached_validator_refuses_proposal_mutation_at_command_boundary(tmp_path, monkeypatch):
     store, engine, flows, member = desk(tmp_path)
-    flows.decide = lambda context: response()
+    flows.decide = lambda context: response(context)
     propose = engine.commands.propose
     def changed(*args, **kwargs):
         kwargs['proposal']['our_price']['value'] = '3.20'
@@ -91,7 +92,7 @@ def test_nonfinite_model_price_remains_rejected_with_readable_repair_audit(tmp_p
     calls = []
     def malformed(context):
         calls.append(context)
-        value = response()
+        value = response(context)
         value['proposal']['our_price']['value'] = float('nan')
         return value
     flows.decide = malformed

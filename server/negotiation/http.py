@@ -69,10 +69,21 @@ def router(service,market,tools,transport,*,collector_selection=None):
     @r.get('/negotiation/updates')
     async def updates(request:Request,after:int=Query(0,ge=0)):
         who=owner(request)
+        supplied=request.headers.get('Authorization','')
+        token=supplied[7:] if supplied.startswith('Bearer ') else request.headers.get('X-Auth-Token','')
+        def authorized():
+            auth=getattr(request.app.state,'auth',None)
+            verify=getattr(auth,'verify_token',None)
+            if not callable(verify):return False
+            try:user=verify(token)
+            except Exception:return False
+            return user is not None and getattr(user,'user_id',None)==who
         async def events():
             revision=after
             while not await request.is_disconnected():
+                if not authorized():return
                 data=await asyncio.to_thread(store.snapshot,who)
+                if not authorized():return
                 if data['revision']>revision:
                     revision=data['revision'];yield 'id: '+str(revision)+'\nevent: changed\ndata: '+encoded({'revision':revision})+'\n\n'
                 else:yield ': keepalive\n\n'
@@ -398,7 +409,7 @@ def router(service,market,tools,transport,*,collector_selection=None):
         kind=body.get('kind','bp');return save_floor(owner(request),body.get('codes',[]),kind,body.get('bp') if kind=='bp' else body.get('value'))
     @r.post('/instruction/floor')
     def instruction(request:Request,body:dict=Body(default_factory=dict)):
-        return save_floor(owner(request),[v['code'] for v in market.resolve(owner(request),body)],'bp',body.get('bp'))
+        return save_floor(owner(request),list(dict.fromkeys(v['code'] for v in market.resolve(owner(request),body))),'bp',body.get('bp'))
     def strategy_view(prefs):
         value=prefs.get('strategy')
         return {'templates':[value] if value else [],'active_template_id':value.get('template_id') if value else None,'system':value.get('system',{}) if value else {},'configured':bool(value)}
@@ -411,7 +422,7 @@ def router(service,market,tools,transport,*,collector_selection=None):
         return {'ok':True,'data':strategy_view(prefs)}
     @r.post('/rfq/stop')
     def rfq_stop(request:Request,body:dict=Body(default_factory=dict)):
-        return {'ok':True,'data':service.stop_sessions(owner(request),[v['code'] for v in market.resolve(owner(request),body)])}
+        return {'ok':True,'data':service.stop_sessions(owner(request),list(dict.fromkeys(v['code'] for v in market.resolve(owner(request),body))))}
     @r.post('/rfq/start')
     def rfq_start():raise InvalidFact('须先分配、预览并确认')
     def spreadsheet(rows,columns):
@@ -432,7 +443,17 @@ def router(service,market,tools,transport,*,collector_selection=None):
         return Response(stream.getvalue(),media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',headers={'Content-Disposition':'attachment; filename="xunjia.xlsx"'})
     @r.get('/bonds/export')
     def export_bonds(request:Request,filter:str=''):
-        return spreadsheet(market.rows(owner(request),parse_filter(filter)),[('code','代码'),('name','债券'),('ob','买价'),('oo','卖价'),('val_yield','中债估值')])
+        spec=parse_filter(filter);rows=market.rows(owner(request),spec)
+        if spec['channel']=='qt':
+            from ..qt_quotes import COLUMNS
+            rows=[{**row,**{'qt_'+key:value for key,value in row['qt_fields'].items()}} for row in rows]
+            columns=[('code','代码'),('name','债券'),('ibv','bid vol（万）'),('ib','bid底价'),('io','ofr底价'),('iov','ofr vol（万）')]
+            columns += [('qt_'+column['key'],column['label']+' ['+column['tag']+']') for column in COLUMNS]
+            columns += [('qt_status','QT记录状态')]
+        else:
+            columns=[('code','代码'),('name','债券'),('obs','最优bid方'),('obv','bid vol（万）'),('ob','最优bid'),
+                     ('oo','最优ofr'),('oov','ofr vol（万）'),('oos','最优ofr方'),('val_yield','中债估值')]
+        return spreadsheet(rows,columns)
     @r.get('/monitor/export')
     def export_messages(request:Request,start:str='',end:str='',peer:str=''):
         if not start or not end:raise InvalidFact('请选择明确起止日期')

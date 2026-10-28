@@ -27,7 +27,7 @@ const directorySaved = computed(() => {
 })
 const savedAvailable = computed(() => !!directorySaved.value.account)
 const savedStale = computed(() => !!directorySaved.value.wb?.stale || !!directorySaved.value.account?.stale || directorySaved.value.account?.available === false || expired(directorySaved.value.account?.updated_at || directorySaved.value.wb?.updated_at))
-const draftStale = computed(() => !!workbench.value?.stale || !!account.value?.stale || account.value?.available === false || expired(account.value?.updated_at || workbench.value?.updated_at))
+const draftStale = computed(() => !!workbench.value && (!!workbench.value.stale || !!account.value?.stale || account.value?.available === false || expired(account.value?.updated_at || workbench.value.updated_at)))
 watch([savedAvailable, savedStale, institutional], () => { emit('availability', savedAvailable.value && !savedStale.value); emit('institution', institutional.value) })
 const orgTree = computed(() => buildOrgTree(preview.value?.org))
 function samePair(a: { workbench_id: string; account_uid: string } | null | undefined, b: typeof a): boolean {
@@ -63,7 +63,8 @@ async function load(refresh = false, silent = false) {
         accountUid.value = item ? saved.value.account_uid : ''
       }
     } else {
-      workbenchId.value = ''; accountUid.value = ''; savedNickname.value = ''; clearImAccount()
+      if (!silent || previous) { workbenchId.value = ''; accountUid.value = '' }
+      savedNickname.value = ''; clearImAccount()
     }
     if (!silent || !samePair(previous, saved.value)) preview.value = null
     if (response.data.refresh_error) error.value = response.data.refresh_error

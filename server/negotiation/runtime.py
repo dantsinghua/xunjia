@@ -5,11 +5,28 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import json
+import hashlib
+import time
+from relay.file_gateway import timing_event
 from .prices import InvalidFact
 from .store import encoded, identity, new_id
 class Inbox:
     def __init__(self,service,transport):self.service,self.transport=service,transport
     def apply(self,binding,envelope):
+        started=time.monotonic()
+        ref=hashlib.sha256(str(envelope.get('message_id','')).encode()).hexdigest()
+        timing_event('business_ingest_started',message_ref=ref)
+        code='RETURNED'
+        try:
+            return self._apply(binding,envelope)
+        except Exception:
+            code='REJECTED_OR_FAILED'
+            raise
+        finally:
+            timing_event('business_ingest_completed',message_ref=ref,code=code,
+                         elapsed_ms=round((time.monotonic()-started)*1000,3))
+
+    def _apply(self,binding,envelope):
         store=self.service.store;owner=binding.owner_user_id
         if getattr(binding,'channel','qidian')!='qidian' or envelope.get('channel','qidian')!='qidian':raise PermissionError('V2 negotiation only accepts Qidian accounts')
         if envelope.get('owner_user_id')!=owner:raise PermissionError('Wrong event owner')
@@ -43,6 +60,13 @@ class Inbox:
         peer=payload.get('peer_id')
         if peer!=envelope.get('peer_id'):raise InvalidFact('Counterparty envelope mismatch')
         identity(peer,'counterparty')
+        session=payload.get('session')
+        if session is not None and (not isinstance(session,dict) or session.get('kind') not in ('private','group')):
+            raise InvalidFact('Invalid native session kind')
+        # Native archive/capture keeps its own records. Group events must never
+        # create a bilateral negotiation thread or trigger a manual-send fence.
+        if (session is not None and session['kind']=='group') or peer.startswith('g_') or peer.endswith('@chatroom'):
+            return None
         preferences=store.preferences(owner)
         if envelope.get('created_at',0)<preferences.get('context_started_at',0):
             payload={**payload,'historical':True}

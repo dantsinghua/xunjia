@@ -1,13 +1,14 @@
-"""Source-bound public fragments and the complete authorized quote grid.
+"""Bind verified economic facts inside model-written natural public wording.
 
 Rendering does not choose an action or authorize sending. The application
 rebuilds the result with its own context, then applies its normal state gates.
 """
-from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import re
 from .slots import collect_candidates
+from .text_roles import public_language_error, numeric_spelling
 
 
 def _decimal(value):
@@ -19,30 +20,87 @@ def _decimal(value):
     return result
 
 
+def requested_volume_signature(proposal):
+    """Freeze only the requested-lot binding category, never public wording."""
+    plan=proposal.get('render_plan') if isinstance(proposal,dict) else None
+    text=plan.get('text') if isinstance(plan,dict) else None
+    return isinstance(text,str) and '{requested_volume}' in text
+
+
+def direct_quantity_request(text, bond_codes=()):
+    """Recognize a complete direct lot question, never infer a firm offer."""
+    if not isinstance(text,str):return None
+    text=numeric_spelling(text)
+    if re.search(r'别家|别人|第三方|客户|听说|转述|假设|假如|如果|只要|条件|不是我|并非我|不代表|撤回|作废|取消',text):
+        return None
+    number=r'\d{1,12}(?:\.\d{1,8})?'
+    lot=r'(?P<amount>'+number+r')\s*(?P<unit>万|亿|[wW])?'
+    direction=r'(?P<direction>买入|卖出|收|出|买|卖)'
+    # Match the complete source. Never discard an unknown leading sentence
+    # such as a third party's attribution before a seemingly direct question.
+    clause=text.strip().rstrip('。!！').strip()
+    for code in sorted(set(bond_codes),key=len,reverse=True):
+        if code:clause=re.sub(r'^\s*'+re.escape(numeric_spelling(code))+r'(?:(?![A-Za-z0-9_-])|(?=-?\d+\.\d))\s*[:：,，]?\s*','',clause,count=1,flags=re.I)
+    question=bool(re.search(r'[吗么?？]\s*$',clause) or re.search(r'能否|可否|是否|能不能',clause))
+    if not question:return None
+    clause=re.sub(r'[吗么?？]+\s*$','',clause).strip()
+    clause=re.sub(r'^(?:这个价格|这个价|这价|按这个价)\s*','',clause)
+    speaker=re.match(r'^(你|您|贵方|我们|我方|本方|我)(?:这边)?\s*',clause)
+    actor=('RECIPIENT' if speaker[1] in ('你','您','贵方') else 'SELF') if speaker else None
+    if speaker:clause=clause[speaker.end():]
+    modal=re.match(r'^(?:能不能|是否可以|是否能|能否|可否|是否|可以|能)\s*',clause)
+    had_modal=modal is not None
+    if modal:clause=clause[modal.end():]
+    match=re.fullmatch(r'(?:(?P<offer_price>-?'+number+r')\s*[%％]?\s*)?'+direction+r'\s*'+lot,clause)
+    if match is None:match=re.fullmatch(r'(?:做|接|给)\s*'+lot,clause)
+    if match is None:
+        match=re.fullmatch(lot+r'\s*(?:能不能|能否|可否|是否可以|是否能|是否|可以|能)\s*(?:'+direction+r'|做|接)',clause)
+    if match is None:return None
+    amount=_decimal(match['amount'])*(Decimal(10000) if match['unit']=='亿' else Decimal(1))
+    if amount<=0:return None
+    word=match.groupdict().get('direction')
+    if actor is None:
+        actor='RECIPIENT' if had_modal else 'OFFER' if match.groupdict().get('offer_price') is not None else 'RECIPIENT' if word else 'UNSPECIFIED'
+    return {'volume_wan':format(amount,'f'),'unit':match['unit'],
+        'direction':('bid' if word in ('收','买','买入') else 'ofr') if word else None,
+        'actor':actor,'source_text':text}
+
+
+def requested_quantity_source(context):
+    """Prove one current direct request without changing either saved side."""
+    rows=context.get('context',[])+context.get('unresolved_messages',[])
+    if not rows or any(type(row.get('ingest_revision')) is not int for row in rows):return None
+    message=max(rows,key=lambda row:row['ingest_revision'])
+    if (message.get('direction')!='in' or message.get('historical')
+            or message.get('kind','message')!='message'
+            or not context.get('trade_day') or message.get('trade_day')!=context['trade_day']
+            or message.get('thread_id')!=context.get('thread_id')):return None
+    request=direct_quantity_request(message.get('text'),(context.get('bond_code',''),))
+    if request is None or request['unit'] is None:return None
+    own_side={'BUY':'bid','SELL':'ofr'}.get(context.get('our_side'))
+    if own_side is None:return None
+    if request['direction'] is not None:
+        expected=own_side if request['actor']=='RECIPIENT' else ('ofr' if own_side=='bid' else 'bid')
+        if request['direction']!=expected:return None
+    matches=[]
+    for side in ('bid','ofr'):
+        quote=(context.get('quotes') or {}).get(side) or {}
+        refs=(quote.get('evidence') or {}).get('volume_wan') or []
+        if quote.get('assertion')!='QUESTION' or quote.get('validity')!='ACTIVE' or message.get('message_id') not in refs:continue
+        try:amount=_decimal(quote.get('volume_wan'))
+        except (TypeError,ValueError,ArithmeticError):continue
+        if amount>0 and amount==_decimal(request['volume_wan']):matches.append(side)
+    if not matches:return None
+    return {'volume_wan':request['volume_wan'],'text':request['volume_wan']+'万',
+        'source':{'member_id':context.get('member_id'),'thread_id':context.get('thread_id'),
+            'message_ids':[message['message_id']],'observed_sides':matches,
+            'actor':request['actor'],'assertion':'QUESTION','purpose':'OWN_REQUESTED_QUANTITY_OFFER'}}
+
+
 def _fact(value):
     if isinstance(value,dict) and 'value' in value:
         return value['value']
     return value
-
-
-def quote_grid(context):
-    """Represent every authorized 0.01 tick with a constant-size index range."""
-    domain=context.get('quote_constraints') or {}
-    status=domain.get('status','UNAVAILABLE')
-    grid={'status':status,'first_yield_pct':None,'last_yield_pct':None,'tick_size':'0.01',
-          'index_min':None,'index_max':None,'count':0}
-    if status!='AVAILABLE':return grid
-    # An older/incomplete projection can still carry cash facts for a question.
-    # It supplies no price authorization: never invent a missing tick size.
-    if 'tick_size' not in domain:return {**grid,'status':'UNAVAILABLE'}
-    tick=_decimal(domain.get('tick_size'))
-    if tick!=Decimal('0.01'):raise ValueError('Unsupported authorized quote tick')
-    lower=_decimal(domain.get('min_yield_pct'));upper=_decimal(domain.get('max_yield_pct'))
-    first=int((lower/tick).to_integral_value(rounding=ROUND_CEILING))
-    last=int((upper/tick).to_integral_value(rounding=ROUND_FLOOR))
-    if first>last:return {**grid,'status':'EMPTY'}
-    return {**grid,'first_yield_pct':format(first*tick,'.2f'),'last_yield_pct':format(last*tick,'.2f'),
-            'index_min':0,'index_max':last-first,'count':last-first+1}
 
 
 def _public_yield_values(context):
@@ -159,13 +217,67 @@ def public_information(context):
     return result
 
 
+def handoff_notice_source(context):
+    """Prove eligibility only; equal prices never choose this model action."""
+    try:
+        if context.get('reconfirm_day') or context.get('unresolved_messages') or context.get('reference_confirmation_required'):return None
+        side={'BUY':'ofr','SELL':'bid'}.get(context.get('our_side'))
+        if side is None:return None
+        quote=context['quotes'].get(side) or {};own=context.get('our_quote') or {}
+        if (quote.get('assertion')!='QUOTE' or quote.get('validity')!='ACTIVE'
+                or quote.get('confirmed_day')!=context.get('trade_day')
+                or type(quote.get('revision')) is not int or quote['revision']<1
+                or _decimal(quote.get('volume_wan'))<=0 or own.get('verified_sent') is not True
+                or any(not isinstance(own.get(key),str) or not own[key] for key in ('command_id','message_id','native_id'))):return None
+        def comparable(price):
+            if price.get('kind')=='YIELD':return _decimal(price.get('value'))
+            if (price.get('kind') in ('NET_PRICE','DIRTY_PRICE') and price.get('settlement_date')
+                    and isinstance(price.get('calculation_ref'),str) and price['calculation_ref']):
+                return _decimal(price.get('computed_yield'))
+            return None
+        peer_yield=comparable(quote.get('price') or {});own_yield=comparable(own.get('price') or {})
+        boundary=context.get('boundary') or {}
+        if peer_yield is None or own_yield is None or peer_yield!=own_yield or boundary.get('kind')!='YIELD':return None
+        limit=_decimal(boundary.get('value'))
+        if context['our_side']=='BUY' and peer_yield<limit or context['our_side']=='SELL' and peer_yield>limit:return None
+        rows=context.get('context',[])
+        if not rows or any(type(row.get('ingest_revision')) is not int for row in rows):return None
+        latest=max(rows,key=lambda row:row['ingest_revision'])
+        def current(row):
+            return (row.get('thread_id')==context.get('thread_id') and row.get('trade_day')==context.get('trade_day')
+                    and row.get('kind','message')=='message' and not row.get('historical'))
+        if (not current(latest) or latest.get('direction')!='in' or not latest.get('message_id')
+                or latest.get('occurred_at',-1)<own.get('sent_at',0)):return None
+        evidence={row['message_id']:row for row in context.get('handoff_evidence',rows)}
+        for field in ('price','volume_wan'):
+            refs=(quote.get('evidence') or {}).get(field)
+            if (not isinstance(refs,list) or not refs or len(refs)>30
+                    or any(ref not in evidence or not current(evidence[ref]) for ref in refs)
+                    or not any(evidence[ref].get('direction')=='in' for ref in refs)):return None
+        return {'side':side,'quote_revision':quote['revision'],'own_command_id':own['command_id'],
+                'source_ids':[latest['message_id']]}
+    except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError):return None
+
+
+def validate_handoff_notice_text(text):
+    if (not isinstance(text,str) or not text.strip() or len(text)>1500
+            or re.search(r'[{}\d%％?？]',numeric_spelling(text))
+            or re.search(r'[零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟萬億]+\s*(?:万|亿|元|点|BP|基点|厘|[%％])',text,re.I)):
+        raise ValueError('Handoff notice must be non-economic confirmation text')
+    error=public_language_error(text)
+    if error:raise ValueError(error)
+
+
 def reply_requirements(context):
-    """Project existing decision prerequisites without narrowing the price grid."""
+    """Project current prerequisites without selecting an action or wording."""
     if context.get('reference_confirmation_required'):
         return {'allowed_kinds':['CLARIFY'],'question':'ASK_CURRENT_QUOTE','reason':'REFERENCE_CONFIRMATION_REQUIRED'}
     if context.get('unresolved_messages'):
         return {'allowed_kinds':['CLARIFY'],'question':'NONE','reason':'BOND_SCOPE_CLARIFICATION_REQUIRED'}
     if context.get('reconfirm_day'):
+        if context.get('reconfirmation_waiting'):
+            return {'allowed_kinds':['RECONFIRM','CLARIFY','SOCIAL'],'question':None,
+                    'reason':'CURRENT_DAY_CONFIRMATION_PENDING'}
         return {'allowed_kinds':['RECONFIRM','CLARIFY'],'question':'ASK_CURRENT_QUOTE','reason':'CURRENT_DAY_CONFIRMATION_REQUIRED'}
     side='ofr' if context.get('our_side')=='BUY' else 'bid'
     peer=(context.get('quotes') or {}).get(side) or {}
@@ -174,106 +286,281 @@ def reply_requirements(context):
         current=(peer.get('validity')=='ACTIVE' and peer.get('assertion')=='QUOTE' and peer.get('confirmed_day')==context.get('trade_day'))
         return {'allowed_kinds':['CLARIFY'],'question':'ASK_SETTLEMENT' if current else 'ASK_CURRENT_QUOTE',
                 'reason':'CASH_BASIS_CONFIRMATION_REQUIRED'}
-    return {'allowed_kinds':['REPLY','ASK_VOLUME','CLARIFY','SOCIAL'],'question':None,'reason':None}
+    allowed=['REPLY','ASK_VOLUME','CLARIFY','SOCIAL']
+    if handoff_notice_source(context) is not None:allowed.append('HANDOFF_NOTICE')
+    return {'allowed_kinds':allowed,'question':None,'reason':None}
 
 
 def render_reply_plan(context, plan):
-    allowed={'kind','quote_value','quote_index','include_volume','information_ids','question','lead','tail','tone','context_ref'}
-    if not isinstance(plan,dict) or set(plan)-allowed:raise ValueError('Unknown reply plan fields')
-    if 'quote_index' in plan and 'quote_value' in plan:
-        raise ValueError('Select a quote index or a literal value, not both')
-    bound={key:context.get(key) for key in ('member_id','thread_id','bond_code','our_side','trade_day','basis','quotes','quote_constraints')}
+    """Bind facts only: the model owns sentence structure and negotiation tone."""
+    if not isinstance(plan,dict) or set(plan)-{'kind','quote_value','text','question','context_ref','acceptance'}:
+        raise ValueError('Unknown natural reply plan fields')
+    bound={key:context.get(key) for key in ('member_id','thread_id','bond_code','our_side','trade_day',
+        'basis','quotes','our_quote','quote_constraints')}
     context_ref=hashlib.sha256(json.dumps(bound,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
     if 'context_ref' in plan and plan['context_ref']!=context_ref:
         raise ValueError('Reply plan belongs to another member, side or facts version')
     plan={**plan,'context_ref':context_ref}
-    kind=plan.get('kind')
-    if kind not in ('REPLY','RECONFIRM','ASK_VOLUME','CLARIFY','SOCIAL'):raise ValueError('Unsupported reply plan kind')
-    requirements=reply_requirements(context)
+    kind=plan.get('kind');requirements=reply_requirements(context)
+    if kind not in ('REPLY','RECONFIRM','ASK_VOLUME','CLARIFY','SOCIAL','HANDOFF_NOTICE'):
+        raise ValueError('Unsupported reply plan kind')
     if kind not in requirements['allowed_kinds']:
         raise ValueError(requirements['reason'] or 'Reply kind does not satisfy this flow decision prerequisite')
-    if requirements['question'] and requirements['question']!='NONE' and plan.get('question')!=requirements['question']:
+    question=plan.get('question','NONE')
+    if question not in ('NONE','NEGOTIATE','ASK_SETTLEMENT','ASK_CURRENT_QUOTE','ASK_MORE_VOLUME'):
+        raise ValueError('Unknown reply question')
+    if requirements['question'] and question!=requirements['question']:
         raise ValueError('Reply plan must ask the required confirmation question')
-    information=plan.get('information_ids',[])
-    if not isinstance(information,list) or len(information)>30 or any(not isinstance(x,str) for x in information) or len(set(information))!=len(information):
-        raise ValueError('Invalid source information selection')
-    lookup={row['id']:row for row in public_information(context)}
-    if any(value not in lookup for value in information):raise ValueError('Public information source is missing or stale')
-    parts=[dict(lookup[key]) for key in information]
-    tone=plan.get('tone','NEUTRAL')
-    if tone not in ('NEUTRAL','POLITE'):raise ValueError('Unknown public tone')
-    if tone=='POLITE':parts.append({'role':'FREE_TEXT','text':'您好。'})
-    for field in ('lead','tail'):
-        if not isinstance(plan.get(field,''),str) or len(plan.get(field,''))>300:
-            raise ValueError('Unbounded free wording')
-    if plan.get('lead'):parts.append({'role':'FREE_TEXT','text':plan['lead']})
-    price=None
-    quote_value=plan.get('quote_value')
+    if ((question=='NEGOTIATE' and kind!='REPLY') or (question=='ASK_SETTLEMENT' and kind!='CLARIFY')
+            or (question=='ASK_CURRENT_QUOTE' and kind not in ('CLARIFY','RECONFIRM'))
+            or (question=='ASK_MORE_VOLUME' and kind!='ASK_VOLUME')):
+        raise ValueError('Question does not match the reply kind')
+    template=plan.get('text')
+    if not isinstance(template,str) or not 1<=len(template.strip())<=1500:
+        raise ValueError('Natural reply text must contain 1..1500 characters')
+    if kind=='HANDOFF_NOTICE':
+        if plan.get('acceptance')!={'meaning':'ACCEPTED_CURRENT_QUOTE','source':'LATEST_INBOUND'} or question!='NONE':
+            raise ValueError('Handoff notice requires explicit current-quote acceptance')
+        validate_handoff_notice_text(template)
+    elif 'acceptance' in plan:raise ValueError('Acceptance is reserved for handoff notices')
     peer_side='ofr' if context.get('our_side')=='BUY' else 'bid'
     peer=(context.get('quotes') or {}).get(peer_side) or {}
-    bond=str(context.get('bond_code',''))
-    include=plan.get('include_volume',False)
-    if type(include) is not bool:raise ValueError('include_volume must be boolean')
+    price=None
     if kind=='REPLY':
-        if 'quote_index' in plan:
-            grid=quote_grid(context);index=plan['quote_index']
-            if grid['status']!='AVAILABLE' or type(index) is not int or not 0<=index<grid['count']:
-                raise ValueError('Selected index is outside the complete authorized grid')
-            quote_value=format(_decimal(grid['first_yield_pct'])+index*Decimal('0.01'),'.2f')
-        value=_decimal(quote_value)
+        value=_decimal(plan.get('quote_value'))
         domain=context.get('quote_constraints') or {}
-        if domain.get('status')!='AVAILABLE':raise ValueError('No authorized quote domain')
-        lower=_decimal(domain['min_yield_pct']);upper=_decimal(domain['max_yield_pct']);tick=_decimal(domain['tick_size'])
-        if tick!=Decimal('0.01') or not lower<=value<=upper or value%tick:
-            raise ValueError('Selected quote is outside the complete authorized grid')
-        spelling=format(value.quantize(Decimal('0.01')),'.2f')
-        price={'kind':'YIELD','value':spelling}
-        side={'BUY':'收','SELL':'出'}.get(context.get('our_side'))
-        if side is None:raise ValueError('Missing authorized side')
-        text=bond+' '+spelling+'%'+side
-        if include:
-            amount=peer.get('volume_wan')
-            if amount is None:raise ValueError('Cannot render an unknown peer lot')
-            if _decimal(str(amount))<=0:raise ValueError('Invalid peer lot')
-            text+='，'+str(amount)+'万报价'
-        parts.append({'role':'OWN_QUOTE','text':text+'。','source':{'member_id':context.get('member_id'),'basis':context.get('basis')}})
-    elif quote_value is not None or 'quote_index' in plan or include:
-        raise ValueError('Nonquote plan cannot insert an own price or lot')
-    question=plan.get('question','NONE')
+        if domain.get('status')!='AVAILABLE' or domain.get('tick_size')!='0.01' or value%Decimal('0.01'):
+            raise ValueError('No authorized exact-tick quote domain')
+        for key,below in (('min_yield_pct',True),('max_yield_pct',False)):
+            limit=domain.get(key)
+            if limit is not None and (value<_decimal(limit) if below else value>_decimal(limit)):
+                raise ValueError('Selected quote is outside the authorized final boundary')
+        price={'kind':'YIELD','value':format(value,'.2f')}
+    elif 'quote_value' in plan or '{own_quote}' in template:
+        raise ValueError('Nonquote plan cannot insert an own price')
+    own_side={'BUY':'收','SELL':'出'}.get(context.get('our_side'))
+    if own_side is None:raise ValueError('Missing authorized side')
+    information={row['id']:row for row in public_information(context)}
+    def public_quote(quote, direction):
+        raw=quote.get('price') or {}
+        if raw.get('kind') not in ('YIELD','NET_PRICE','DIRTY_PRICE'):
+            raise ValueError('Referenced quotation has no supported price')
+        label={'YIELD':'','NET_PRICE':'净价','DIRTY_PRICE':'全价'}[raw['kind']]
+        return label+format(_decimal(raw.get('value')),'f')+('%' if raw['kind']=='YIELD' else '')+direction
+    def fragment(key):
+        if key=='bond':return {'role':'PUBLIC_INFO_OR_CALC','text':str(context.get('bond_code',''))}
+        if key=='own_quote':
+            if price is None:raise ValueError('Own quote is unavailable')
+            return {'role':'OWN_QUOTE','text':price['value']+'%'+own_side,
+                    'source':{'member_id':context.get('member_id'),'basis':context.get('basis')}}
+        if key=='requested_volume':
+            request=requested_quantity_source(context) if kind=='REPLY' else None
+            if request is None:raise ValueError('Unknown or unavailable public fact slot')
+            return {'role':'OWN_REQUESTED_QUANTITY_OFFER','text':request['text'],'source':request['source']}
+        if key in ('peer_quote','peer_volume'):
+            if peer.get('validity')=='WITHDRAWN' or peer.get('assertion')!='QUOTE':
+                raise ValueError('Counterparty reference is not an actual quotation')
+            if kind=='REPLY' and (peer.get('validity')!='ACTIVE' or peer.get('confirmed_day')!=context.get('trade_day')):
+                raise ValueError('Counterparty reference is not current')
+            field='price' if key=='peer_quote' else 'volume_wan'
+            if not (peer.get('evidence') or {}).get(field):raise ValueError('Counterparty reference has no field evidence')
+            if key=='peer_quote':text=public_quote(peer,'出' if peer_side=='ofr' else '收')
+            else:
+                amount=_decimal(str(peer.get('volume_wan')))
+                if amount<=0:raise ValueError('Referenced whole lot is unavailable')
+                text=format(amount,'f')+'万'
+            return {'role':'COUNTERPARTY_REFERENCE' if key=='peer_quote' or kind!='REPLY' else 'OWN_QUOTE',
+                    'text':text,'source':{'member_id':context.get('member_id'),'side':peer_side,
+                    'revision':peer.get('revision'),'evidence':peer.get('evidence')}}
+        if key=='our_last_quote':
+            actual=context.get('our_quote') or {}
+            if not actual.get('verified_sent') or not all(actual.get(k) for k in ('native_id','command_id','message_id')):
+                raise ValueError('Previous own quotation is not a verified current native send')
+            loaded=[row for row in context.get('context',[]) if row.get('message_id')==actual['message_id']]
+            if loaded and (len(loaded)!=1 or loaded[0].get('direction')!='out'
+                    or loaded[0].get('native_id')!=actual['native_id']
+                    or loaded[0].get('thread_id',context.get('thread_id'))!=context.get('thread_id')
+                    or loaded[0].get('trade_day')!=context.get('trade_day')):
+                raise ValueError('Loaded own quotation conflicts with its verified native source')
+            return {'role':'OWN_HISTORY_REFERENCE','text':public_quote(actual,own_side),
+                    'source':{'member_id':context.get('member_id'),'command_id':actual['command_id'],
+                              'message_id':actual['message_id'],'native_id':actual['native_id']}}
+        if key=='settlement_options' and question=='ASK_SETTLEMENT':
+            return {'role':'SETTLEMENT_QUESTION','text':'T+0、T+1或具体日期'}
+        if key.startswith('info:') and key[5:] in information:return dict(information[key[5:]])
+        raise ValueError('Unknown or unavailable public fact slot')
+    # Input sugar is admitted only when it can be represented by the existing
+    # fact macros. Keep the original plan text for audit and run the virtual
+    # macro plan through the same role, speaker and final economic checks.
+    lot=None;peer_literal=None
+    current_peer=(bool(context.get('trade_day')) and peer.get('assertion')=='QUOTE'
+                  and peer.get('validity')=='ACTIVE' and peer.get('confirmed_day')==context.get('trade_day'))
+    if current_peer:
+        try:
+            fragment('peer_volume')
+            lot=_decimal(str(peer.get('volume_wan')))
+        except (ValueError,TypeError,ArithmeticError):pass
+        peer_kind=(peer.get('price') or {}).get('kind')
+        if peer_kind=='YIELD' or kind=='CLARIFY' and question=='ASK_SETTLEMENT' and peer_kind in ('NET_PRICE','DIRTY_PRICE'):
+            try:peer_literal=fragment('peer_quote')['text']
+            except (ValueError,TypeError,ArithmeticError):pass
+    patterns=[]
+    if price is not None:
+        patterns.append(r'(?<![A-Za-z0-9_.+%-])(?<!净价)(?<!全价)(?P<own>-?[0-9]{1,12}(?:\.[0-9]{1,8})?)[ \t]*(?:%[ \t]*)?'
+                        +re.escape(own_side)+r'(?=$|[0-9\s，,。.!！?？;；:：、{])')
+    if peer_literal:
+        bond_prefix=('(?P<bond_prefix>'+re.escape(context['bond_code'])+')?'
+                     if peer_kind in ('NET_PRICE','DIRTY_PRICE') and context.get('bond_code') else '')
+        patterns.append(r'(?<![A-Za-z0-9_.+-])'+bond_prefix+r'(?P<peer>'+re.escape(peer_literal)+r')(?![A-Za-z_.])')
+    if lot is not None:
+        patterns.append(r'(?<![A-Za-z0-9_.+-])(?P<amount>[0-9]{1,12}(?:\.[0-9]{1,8})?)\s*(?P<unit>万|亿)(?![A-Za-z0-9_.十百千万亿拾佰仟萬億元])')
+    if patterns or information:
+        literal=re.compile('|'.join(patterns)) if patterns else None
+        # Protect complete verified public facts before recognizing quotation
+        # components; their embedded numbers retain the original public source.
+        public_text={}
+        for identity,row in information.items():
+            if row.get('text'):public_text.setdefault(row['text'],identity)
+        public_literal=re.compile('|'.join(re.escape(text) for text in sorted(public_text,key=len,reverse=True))) if public_text else None
+        def bind_free(text):
+            def replace(match):
+                if match.groupdict().get('own') is not None:
+                    if re.search(r'(净价|全价)\s*$',match.string[:match.start()]):return match[0]
+                    return '{own_quote}' if _decimal(match['own'])==value else match[0]
+                if match.groupdict().get('peer') is not None:return (match.groupdict().get('bond_prefix') or '')+'{peer_quote}'
+                amount=_decimal(match['amount'])*(Decimal(10000) if match['unit']=='亿' else Decimal(1))
+                return '{peer_volume}' if amount==lot else match[0]
+            def economic(piece):return literal.sub(replace,piece) if literal else piece
+            if public_literal is None:return economic(text)
+            pieces=[];end=0
+            for fact in public_literal.finditer(text):
+                pieces.extend((economic(text[end:fact.start()]),'{info:'+public_text[fact[0]]+'}'));end=fact.end()
+            pieces.append(economic(text[end:]));return ''.join(pieces)
+        pieces=[];end=0
+        for macro in re.finditer(r'\{([^{}]+)\}',template):
+            canonical='{info:'+macro[1]+'}' if macro[1] in information else macro[0]
+            if re.fullmatch(r'info:[a-f0-9]{24}',macro[1]) and 'info-'+macro[1][5:] in information:
+                canonical='{info:info-'+macro[1][5:]+'}'
+            pieces.extend((bind_free(template[end:macro.start()]),canonical));end=macro.end()
+        pieces.append(bind_free(template[end:]));template=''.join(pieces)
+    if kind=='REPLY' and '{own_quote}' not in template:
+        raise ValueError('A quote reply must bind its own structured quotation')
+    # Fold only redundant components supplied by a verified adjacent field.
+    # Separators keep ordinary words outside this operation; ambiguous joined
+    # words and contradictory units/directions are never repaired by deletion.
+    def separated(text):
+        return not text or text[0].isspace() or text[0] in '，,。.!！?？;；:：、' or text.startswith('{')
+    pieces=[];end=0
+    for macro in re.finditer(r'\{([^{}]+)\}',template):
+        key=macro[1];before=template[end:macro.start()];after=template[macro.end():];consume=0
+        if key=='own_quote' and re.search(r'(?:收|出|买入?|卖出?)\s*$',before):
+            raise ValueError('Own quote slot repeats or conflicts with an adjacent direction')
+        if key in ('own_quote','peer_quote','our_last_quote'):
+            bound=fragment(key)['text']
+            prefix=re.search(r'(净价|全价)([ \t]*)$',before)
+            if prefix and bound.startswith(('净价','全价')):
+                if prefix[1]!=bound[:2]:raise ValueError('Cash quote basis prefix conflicts with verified field')
+                before=before[:prefix.start()]+prefix[2]
+            direction=re.match(r'([%％]?)(收|出|买|卖)',after)
+            if direction:
+                suffix=direction[2]
+                tail=after[direction.end():]
+                offer_noun=(suffix=='出' and bound.endswith('出') and tail.startswith('盘')
+                            and (separated(tail[1:]) or tail[1:].startswith('为')))
+                if not separated(tail) and not offer_noun:raise ValueError('Ambiguous adjacent quote direction word')
+                if direction[1] and not bound.endswith(('%收','%出')):
+                    raise ValueError('Quote percent suffix conflicts with verified price kind')
+                expected='bid' if bound.endswith('收') else 'ofr'
+                if ('bid' if suffix in ('收','买') else 'ofr')!=expected:
+                    raise ValueError('Quote direction suffix conflicts with verified field')
+                if offer_noun:
+                    clause=re.split(r'[，,。;；\n]',''.join(pieces)+before)[-1]
+                    speaker=re.search(r'(我(?:们|方|这边)?|本方|你(?:们|方|这边)?|您(?:方)?|贵方|对方)'
+                        r'(?:现在|这次|刚才|之前|那边|这边|已经|也|再|就|还是|先|愿意|可以|能|目前|的|上次|曾经){0,5}\s*$',clause)
+                    if speaker:
+                        prefix=clause[:speaker.start()]
+                        negated=bool(re.search(r'(?:不是|并非)\s*(?:说\s*)?$',prefix)
+                            and not re.search(r'(?:不是|并非|不可能|不能|不会)\s*(?:说\s*)?(?:不是|并非)\s*(?:说\s*)?$',prefix))
+                        if not negated and speaker[1].startswith(('我','本方'))!=(key!='peer_quote'):
+                            raise ValueError('Public reference is attributed to the wrong speaker')
+                consume=direction.end()
+            elif after.startswith(('%','％')):
+                raise ValueError('Ambiguous adjacent quote percent component')
+        elif key in ('peer_volume','requested_volume'):
+            fragment(key)
+            if after.startswith('万'):
+                if not (separated(after[1:]) or after[1:].startswith(('可以','是否','是不是','能否','可否','的'))):
+                    raise ValueError('Ambiguous adjacent quantity unit word')
+                consume=1
+            elif after[:1] in '十百千亿拾佰仟萬億' and after:
+                raise ValueError('Quantity unit suffix conflicts with verified whole lot')
+        elif key.startswith('info:'):
+            bound=fragment(key)['text']
+            if bound.endswith(('。','.')) and after.startswith(bound[-1]):consume=1
+        pieces.extend((before,macro[0]));end=macro.end()+consume
+    pieces.append(template[end:]);template=''.join(pieces)
+    template=re.sub(r'(\{(?:own_quote|peer_quote|our_last_quote|peer_volume|requested_volume)\})(?:\1)+',r'\1',template)
+    if len(template)>1500:raise ValueError('Equivalent fact-macro text exceeds 1500 characters')
+    parts=[];cursor=0
+    for match in re.finditer(r'\{([^{}]+)\}',template):
+        if match.start()>cursor:parts.append({'role':'FREE_TEXT','text':template[cursor:match.start()]})
+        if match[1] in ('peer_quote','our_last_quote','own_quote','requested_volume'):
+            clause=re.split(r'[，,。;；\n]',template[:match.start()])[-1]
+            # Bind an explicit quotation assertion, not ordinary perception or
+            # a polite request such as "I saw your quote" / "please consider".
+            assertion=(r'(?:报(?:价|量)?|量(?:为|是)|出(?:价)?|收|买|卖|给(?:你|您)?|让到|调整到|改为|是)'
+                       if match[1]=='requested_volume' else r'(?:报(?:价)?|出(?:价)?|收|买|卖|给(?:你|您)?|让到|调整到|改为|是)')
+            temporal=None;negated_temporal=False
+            if match[1] in ('own_quote','our_last_quote','peer_quote'):
+                temporal=re.search(r'(我(?:们|方|这边)?|本方|你(?:们|方|这边)?|您(?:方)?|贵方|对方)'
+                    r'\s*(?:之前|刚才|上次|曾经)\s*(?:的)?\s*(?:'+assertion+r'(?:过)?)?\s*$',clause)
+                if temporal:
+                    prefix=clause[:temporal.start()]
+                    negated_temporal=bool(re.search(r'(?:不是|并非)\s*(?:说\s*)?$',prefix)
+                        and not re.search(r'(?:不是|并非|不可能|不能|不会)\s*(?:说\s*)?(?:不是|并非)\s*(?:说\s*)?$',prefix))
+                    if not negated_temporal:
+                        own=temporal[1].startswith(('我','本方'))
+                        if own!=(match[1]!='peer_quote'):
+                            raise ValueError('Public reference is attributed to the wrong speaker')
+                        if match[1]=='own_quote':
+                            raise ValueError('Current quotation cannot be described as historical')
+            speaker=re.search(r'(我(?:们|方|这边)?|本方|你(?:们|方|这边)?|您(?:方)?|贵方|对方)'
+                r'(?:现在|这次|刚才|之前|那边|这边|已经|也|再|就|还是|先|愿意|可以|能|目前|的|上次|曾经){0,5}'
+                +assertion+r'\s*$',clause) if not negated_temporal else None
+            if speaker:
+                own=speaker[1].startswith(('我','本方'))
+                if own!=(match[1]!='peer_quote'):
+                    raise ValueError('Public reference is attributed to the wrong speaker')
+        parts.append(fragment(match[1]));cursor=match.end()
+    if cursor<len(template):parts.append({'role':'FREE_TEXT','text':template[cursor:]})
+    if any(part['role']=='OWN_REQUESTED_QUANTITY_OFFER' for part in parts):
+        if re.search(r'(?:你|您|贵方|对方).{0,8}(?:已(?:经)?(?:确认|确定)|(?:确认|确定)的|实报|已报|最终(?:报价|报量|可做|能做))',template):
+            raise ValueError('Public reference is attributed to the wrong speaker')
+    for part in parts:
+        if part['role']=='FREE_TEXT':
+            free=part['text'].replace(str(context.get('bond_code','')),'') if context.get('bond_code') else part['text']
+            if (re.search(r'[{}\d]',free)
+                    or re.search(r'(?<![A-Za-z0-9_])(?:NaN|[+-]?Inf(?:inity)?)\s*(?:万|亿|[%％])',free,re.I)
+                    or re.search(r'(?:净价|全价)\s*[+-]?(?:NaN|Inf(?:inity)?)',free,re.I)
+                    or re.search(r'[零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟萬億]+点[零〇一二三四五六七八九壹贰叁肆伍陆柒捌玖]+'
+                                 r'|[零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟萬億]+\s*(?:BP|基点|个点|厘|万|亿|元|[%％])'
+                                 r'|(?:百分之|千分之)[零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟萬億]+',free,re.I)):
+                raise ValueError('Economic numbers and facts must use verified slots')
+    text=''.join(part['text'] for part in parts)
+    if not 1<=len(text.strip())<=1500:raise ValueError('Bound reply must contain 1..1500 characters')
     if question=='ASK_SETTLEMENT':
-        cash=peer.get('price') or {}
-        if (kind!='CLARIFY' or cash.get('kind') not in ('NET_PRICE','DIRTY_PRICE')
-                or peer.get('validity')!='ACTIVE' or peer.get('assertion')!='QUOTE'
-                or peer.get('confirmed_day')!=context.get('trade_day')):
-            raise ValueError('Settlement clarification needs a current active counterpart cash quote')
-        label='净价' if cash['kind']=='NET_PRICE' else '全价'
-        value=format(_decimal(cash['value']),'f')
-        parts.append({'role':'COUNTERPARTY_REFERENCE','text':bond+' 你刚才报的'+label+value+'，结算是T+0、T+1还是具体日期？',
-                      'source':{'member_id':context.get('member_id'),'side':peer_side,'revision':peer.get('revision'),'evidence':peer.get('evidence')}})
-    elif question=='ASK_CURRENT_QUOTE':
-        if kind not in ('CLARIFY','RECONFIRM'):raise ValueError('Current quote question requires clarification or reconfirmation')
-        recorded=peer.get('price') or {}
-        if peer.get('validity')!='WITHDRAWN' and peer.get('assertion')=='QUOTE' and recorded.get('kind') in ('YIELD','NET_PRICE','DIRTY_PRICE'):
-            label={'YIELD':'收益率','NET_PRICE':'净价','DIRTY_PRICE':'全价'}[recorded['kind']]
-            value=format(_decimal(recorded['value']),'f')+('%' if recorded['kind']=='YIELD' else '')
-            side='出' if peer_side=='ofr' else '收'
-            text=bond+' 上次记录你方'+label+value+side
-            if peer.get('volume_wan') is not None:text+=str(peer['volume_wan'])+'万'
-            parts.append({'role':'COUNTERPARTY_REFERENCE','text':text+'，现在仍是这个报价和数量吗？',
-                          'source':{'member_id':context.get('member_id'),'side':peer_side,'revision':peer.get('revision'),'evidence':peer.get('evidence')}})
-        else:
-            parts.append({'role':'FREE_TEXT','text':bond+' 请确认当前报价和数量。'})
-    elif question=='ASK_MORE_VOLUME':
-        if kind!='ASK_VOLUME':raise ValueError('Additional size needs the ASK_VOLUME action')
-        parts.append({'role':'FREE_TEXT','text':bond+' 请问还能提供多少量？'})
-    elif question=='NEGOTIATE':
-        if kind!='REPLY':raise ValueError('Negotiation question requires a quote')
-        parts.append({'role':'FREE_TEXT','text':'请问这个报价还能调整吗？'})
-    elif question!='NONE':raise ValueError('Unknown reply question')
-    if plan.get('tail'):parts.append({'role':'FREE_TEXT','text':plan['tail']})
-    text='\n'.join(part['text'] for part in parts)
-    if not 1<=len(text)<=1500:raise ValueError('Rendered reply must contain 1..1500 characters')
+        has_options=any(part['role']=='SETTLEMENT_QUESTION' for part in parts)
+        settlement_topic=has_options or re.search(r'结算|交割|交收',text)
+        asks_question=re.search(r'请|吗|么|？|\?|多少|能否|是否|什么|怎么|还是',text)
+        asks_date=has_options or re.search(r'日期|时间|日子|哪天|何时|什么时候|几号|(?:结算|交割|交收)日|(?:今|明|后)[天日]|当天|当日|次日',text)
+        mechanism_only=re.search(r'(?:现金|实物)(?:结算|交割|交收)',text) and not asks_date
+        if not settlement_topic or not asks_question or mechanism_only:
+            raise ValueError('Settlement clarification must actually ask for settlement')
+    if question=='ASK_CURRENT_QUOTE' and not re.search(r'请|确认|吗|么|？|\?|多少|能否|是否',text):
+        raise ValueError('Current quotation clarification must actually request confirmation')
     proposal={'kind':kind,'text':text,'render_plan':plan}
     if price:proposal['our_price']=price
-    economic='\n'.join(part['text'] for part in parts if part['role'] in ('OWN_QUOTE','FREE_TEXT'))
+    economic=''.join(part['text'] for part in parts if part['role'] in ('OWN_QUOTE','OWN_REQUESTED_QUANTITY_OFFER','FREE_TEXT'))
+    language_error=public_language_error(text)
+    if language_error:raise ValueError(language_error)
     return {'proposal':proposal,'economic_text':economic,'parts':parts}

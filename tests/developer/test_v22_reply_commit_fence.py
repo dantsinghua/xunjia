@@ -14,7 +14,7 @@ def candidate(tmp_path):
         tx.execute("INSERT INTO xj2_reply_job(job_id,member_id,request_id,basis_json,state,lease_token,lease_until,attempts,result_json,created_at) VALUES(?,?,?,?,'RUNNING',?,?,1,'{}',?)",
             ('synthetic-job', member, 'synthetic-request', encoded(basis), 'synthetic-token',
              store.clock() + 60, store.clock()))
-    kwargs = dict(basis=basis, request_id='synthetic-request', proposal=response()['proposal'],
+    kwargs = dict(basis=basis, request_id='synthetic-request', proposal=response(context)['proposal'],
         validator=lambda proposal: engine._validate_reply(context, proposal), expires_at=store.clock()+120,
         reply_job_id='synthetic-job', reply_lease_token='synthetic-token')
     return store, engine.commands, member, kwargs

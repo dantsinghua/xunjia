@@ -6,6 +6,7 @@ import pytest
 
 import server.negotiation.engine as engine_module
 from server.negotiation.engine import Engine
+from server.negotiation.reply_render import render_reply_plan
 from test_production_flow import OWNER, desk, raw
 from test_acceptance_contract import current, observation
 from test_private_history_requests import history_desk, request, scope_only
@@ -41,8 +42,8 @@ def test_360_second_budget_preserves_lease_after_181_seconds_and_history_round(d
         assert 0 < context["_stage_budget_seconds"] <= 179.001
         if stage == "analysis":
             return final_analysis(context)
-        return {"schema_version": "2.2", "action": "SEND", "proposal": {
-            "kind": "REPLY", "text": "3.19%收500万", "our_price": {"kind": "YIELD", "value": "3.19"}}}
+        return {"schema_version": "2.2", "action": "SEND", "proposal": render_reply_plan(context,
+            {"kind": "REPLY", "quote_value": "3.19", "text": "{own_quote}{peer_volume}"})["proposal"]}
     setattr(flows, "analyze" if stage == "analysis" else "decide", call)
     engine = configured(app, flows, 360)
     # This two-round lease regression explicitly replays the old fetch policy.

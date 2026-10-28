@@ -1,6 +1,7 @@
 """Literal spelling and reply sections may change syntax, never trade facts."""
 from copy import deepcopy
 import json
+import traceback
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,10 @@ from test_acceptance_contract import current, observation, parser, setup_groups
 from test_model_wire_adapter import sample, paired, SyntheticDify, feedback_context
 from test_reply_text_repair import response as legacy_reply
 from test_reply_text_repair import reply_case, run as run_reply, replies, unchanged_facts
+from server.negotiation.reply_render import public_information
+from server.negotiation.prices import InvalidFact
+from test_dify_output_contract_recovery import http_error
+from test_rendered_reply_plan_revision import context as reply_context, public_record
 
 
 def literal_sample(literal):
@@ -100,29 +105,42 @@ def parts_response(information, negotiation, *, kind='REPLY'):
     ('', 'SYN-A 3.19%收500万。', 'REPLY'),
     ('发行主体为SYN-ISSUER。', '', 'SOCIAL'),
 ])
-def test_reply_parts_join_only_nonempty_strings_in_order_without_trimming(information, negotiation, kind):
+def test_retired_split_parts_are_rejected_instead_of_joined_or_reinterpreted(information, negotiation, kind):
     wire = parts_response(information, negotiation, kind=kind)
     original = deepcopy(wire)
-    result = node_code.decode_stage_result(wire, {'schema_version': '2.2', 'stage': 'reply'}, 'reply')
-    expected = deepcopy(wire)
-    expected['proposal'].pop('information_text')
-    expected['proposal'].pop('negotiation_text')
-    expected['proposal']['text'] = '\n'.join(part for part in (information, negotiation) if part != '')
-    assert result == expected and wire == original
+    with pytest.raises(ValueError):
+        node_code.decode_stage_result(wire, {'schema_version': '2.2', 'stage': 'reply'}, 'reply')
+    assert wire == original
 
 
-def test_two_model_sections_create_one_exact_message_through_generated_code_and_real_engine(desk, monkeypatch):
+def sourced_model(case, monkeypatch, *, kind='REPLY'):
+    record = public_record('issuer_info')
+    monkeypatch.setattr(case.app.state.bond_tools, 'invoke', lambda name, arguments: deepcopy(record['result']))
+    expected = []
+    def model(context):
+        if not context.get('tool_results'):
+            return {'schema_version': '2.2', 'tool_requests': [record['request']]}
+        information = public_information(context)[0]
+        text = '{info:'+information['id']+'}'
+        selection = {'kind': kind, 'text': text}
+        suffix = ''
+        if kind == 'REPLY':
+            suffix = '\nSYN-A {own_quote}{peer_volume}。'
+            selection.update(quote_value='3.19', text=text+suffix)
+        expected.append(information['text']+suffix.replace('{own_quote}', '3.19%收').replace('{peer_volume}', '500万'))
+        return {'schema_version': '2.2', 'reply_plan': selection, 'trader_view': {}}
+    return SyntheticDify('reply', model), expected
+
+
+def test_natural_source_bound_sections_create_one_exact_message_through_generated_code_and_real_engine(desk, monkeypatch):
     case = reply_case(desk)
-    # Explicit historical-wire compatibility; shared production desk stays current.
-    monkeypatch.setattr(case.app.state.negotiation_engine, 'context_policy_revision', 'explicit_anchors_v0')
-    information, negotiation = '发行主体为SYN-ISSUER。', 'SYN-A 3.19%收500万。'
-    endpoint = SyntheticDify('reply', lambda _context: parts_response(information, negotiation))
+    endpoint, expected = sourced_model(case, monkeypatch)
     case.flows.decide = endpoint.client.call
     result = run_reply(case)
-    assert result['state'] == 'QUEUED' and len(endpoint.calls) == 1
+    assert result['state'] == 'QUEUED' and len(endpoint.calls) == 2
     assert len(replies(case)) == 1
     body = json.loads(replies(case)[0]['body_json'])
-    assert body['text'] == information+'\n'+negotiation
+    assert body['text'] == expected[0] and 'Synthetic Issuer' in body['text']
     assert body['our_price']['value'] == '3.19'
     unchanged_facts(case)
     assert len(case.native.sent) == 1
@@ -144,9 +162,10 @@ def test_reply_parts_are_strictly_paired_exclusive_strings_with_one_combined_len
         node_code.decode_stage_result(wire, {'schema_version': '2.2', 'stage': 'reply'}, 'reply')
 
 
-def test_one_nonempty_reply_part_can_use_the_original_exact_1500_character_limit():
-    wire = parts_response('资'*1500, '', kind='SOCIAL')
-    result = node_code.decode_stage_result(wire, {'schema_version': '2.2', 'stage': 'reply'}, 'reply')
+def test_natural_social_reply_can_use_the_original_exact_1500_character_limit():
+    wire = {'schema_version': '2.2', 'reply_plan': {'kind': 'SOCIAL', 'text': '资'*1500}}
+    context = {**reply_context(), 'schema_version': '2.2', 'stage': 'reply'}
+    result = node_code.decode_stage_result(wire, context, 'reply')
     assert result['proposal']['text'] == '资'*1500
     assert 'our_price' not in result['proposal']
 
@@ -221,51 +240,75 @@ def test_decoder_never_repairs_wrong_operation_or_old_typed_price_from_reason_or
     assert len(native.sent) == 1
 
 
-@pytest.mark.parametrize('information', [
-    '贵方3.10%出500万，所问价差为10BP。',
-    'SYN-A 3.19%出500万。',
-    '本次600万。',
-    '确认成交。',
-    '内部底价3.19%。',
+@pytest.mark.parametrize('information,expected_state', [
+    ('贵方3.10%出500万，所问价差为10BP。', 'RETRY'),
+    ('SYN-A 3.19%出500万。', 'RETRY'),
+    ('本次600万。', 'RETRY'),
+    ('确认成交。', 'RETRY'),
+    ('内部底价3.19%。', 'RETRY'),
 ])
-def test_information_section_does_not_bypass_the_original_full_public_text_guard(desk, information, monkeypatch):
+def test_natural_information_wording_does_not_bypass_verified_slots_or_public_policy(desk, information, expected_state):
     case = reply_case(desk)
-    monkeypatch.setattr(case.app.state.negotiation_engine, 'context_policy_revision', 'explicit_anchors_v0')
-    first = parts_response(information, 'SYN-A 3.19%收500万。')
+    first = {'schema_version': '2.2', 'reply_plan': {'kind': 'REPLY', 'quote_value': '3.19',
+             'text': information+'\nSYN-A {own_quote}{peer_volume}。'}}
+    modes = []
     def model(context):
-        if context.get('validation_feedback'):
-            return deepcopy(context['validation_feedback']['original_response'])
+        feedback = context.get('validation_feedback')
+        if feedback:
+            modes.append(feedback['mode'])
+            if feedback['mode'] == 'OUTPUT_CONTRACT':
+                assert feedback['previous_output'] == first
+                return deepcopy(feedback['previous_output'])
+            assert feedback['mode'] == 'TEXT_ONLY'
+            return deepcopy(feedback['original_response'])
         return deepcopy(first)
-    endpoint = SyntheticDify('reply', model)
+    class RejectingCodeDify(SyntheticDify):
+        def open(self, request, timeout):
+            try:
+                return super().open(request, timeout)
+            except ValueError:
+                # Dify returns the real generated Code failure as invalid_param
+                # HTTP 400, allowing the production client to enforce its cap.
+                raise http_error({'code':'invalid_param', 'status':400,
+                    'message':'Run failed: '+traceback.format_exc()+'error: exit status 255\n'}) from None
+    endpoint = RejectingCodeDify('reply', model)
     case.flows.decide = endpoint.client.call
     result = run_reply(case)
-    assert result['state'] == 'REJECTED' and not replies(case)
+    assert result['state'] == expected_state and not replies(case)
+    assert len(endpoint.calls) == 2 and modes == ['OUTPUT_CONTRACT']
+    assert endpoint.client.last_evidence['request_attempts'] == 2
+    assert endpoint.client.last_evidence['error_code'] in {'DIFY_MODEL_CONTRACT_SLOTS', 'DIFY_MODEL_CONTRACT_PUBLIC_SCOPE'}
+    assert not endpoint.outputs, 'Repeating the same violation must never yield a validated candidate'
+    if information == '确认成交。':
+        with pytest.raises(InvalidFact, match='^Reply promises execution or reserves a counterparty lot$'):
+            case.app.state.negotiation_engine._validate_reply(endpoint.calls[0], {
+                'kind':'REPLY', 'text':'SYN-A 3.19%收500万，确认成交。',
+                'our_price':{'kind':'YIELD','value':'3.19'}})
     unchanged_facts(case)
     assert len(case.native.sent) == 1
 
 
 def test_real_pure_information_reply_keeps_the_existing_no_price_permission(desk, monkeypatch):
     case = reply_case(desk)
-    monkeypatch.setattr(case.app.state.negotiation_engine, 'context_policy_revision', 'explicit_anchors_v0')
-    info = '公开主体为Synthetic Issuer。'
-    endpoint = SyntheticDify('reply', lambda _context: parts_response(info, '', kind='SOCIAL'))
+    endpoint, expected = sourced_model(case, monkeypatch, kind='SOCIAL')
     case.flows.decide = endpoint.client.call
     result = run_reply(case)
-    assert result['state'] == 'QUEUED' and len(endpoint.calls) == 1
+    assert result['state'] == 'QUEUED' and len(endpoint.calls) == 2
     command = case.app.state.inquiry.commands_core.get(OWNER, result['command_id'])
     body = json.loads(command['body_json'])
-    assert body['kind'] == 'SOCIAL' and body['text'] == info and 'our_price' not in body
+    assert body['kind'] == 'SOCIAL' and body['text'] == expected[0] and 'our_price' not in body
+    assert 'Synthetic Issuer' in body['text']
     unchanged_facts(case)
     assert len(case.native.sent) == 1
 
 
-def test_whitespace_only_joined_message_still_fails_the_original_whole_message_gate(desk, monkeypatch):
+def test_whitespace_only_natural_message_fails_before_any_candidate_is_created(desk):
     case = reply_case(desk)
-    monkeypatch.setattr(case.app.state.negotiation_engine, 'context_policy_revision', 'explicit_anchors_v0')
-    endpoint = SyntheticDify('reply', lambda _context: parts_response(' \t', '', kind='SOCIAL'))
+    endpoint = SyntheticDify('reply', lambda _context: {'schema_version': '2.2',
+        'reply_plan': {'kind': 'SOCIAL', 'text': ' \t'}})
     case.flows.decide = endpoint.client.call
     result = run_reply(case)
-    assert endpoint.outputs[0]['proposal']['text'] == ' \t', 'Do not trim or invent content during decoding'
-    assert result['state'] == 'REJECTED' and result.get('command_id') is None
+    assert not endpoint.outputs, 'Do not trim whitespace or substitute a local sentence'
+    assert result['state'] == 'RETRY' and result.get('command_id') is None
     unchanged_facts(case)
     assert len(case.native.sent) == 1

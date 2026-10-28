@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "source_id": "QT_INSTITUTION_SOURCE",
+  "account_owners": {
+    "REPLACE_OWN_QT_NO": "REPLACE_PORTAL_USER_ID"
+  },
+  "timezone": "Asia/Shanghai",
+  "journal_path": "/home/xunjia/state/qt-input/quotes.jsonl"
+}

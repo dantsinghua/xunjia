@@ -8,6 +8,7 @@ import pytest
 from server.app import create_app
 from server.auth import AuthConfig
 from server.negotiation.prices import LimitPolicy
+from server.negotiation.reply_render import render_reply_plan
 from server.reference_data import ReferenceSnapshot
 
 
@@ -124,7 +125,8 @@ def test_omitted_quote_still_permits_a_non_economic_clarification(tmp_path):
         tx.execute('UPDATE xj2_peer SET send_allowed=1 WHERE member_id=?', (mid,))
     app.state.negotiation_engine.client.decide = lambda context: {
         'schema_version': '2.2', 'action': 'SEND',
-        'proposal': {'kind': 'CLARIFY', 'text': '请确认这只券当前的报价和可出数量。'}}
+        'proposal': render_reply_plan(context, {'kind': 'CLARIFY',
+            'text': '请确认这只券当前的报价和可出数量。'})['proposal']}
     saved = app.state.negotiation_engine.decide_member(OWNER, mid)
     assert saved['state'] == 'QUEUED'
     with store.db.transaction(write=False) as tx:

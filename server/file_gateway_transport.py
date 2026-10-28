@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import time
-from relay.file_gateway import FileGatewayClient, FileGatewayError, GatewayAuth
+from relay.file_gateway import FileGatewayClient, FileGatewayError, GatewayAuth, timing_event
 from relay.protocol import ProtocolError, canonical, digest
 from .receiver_ledger import account_lock
 from .transports import _Transport, TransportUnavailable
@@ -55,6 +55,8 @@ class FileGatewayTransport(_Transport):
             if row and row[0] in ("UPLOADING", "UNKNOWN"):
                 raise FileGatewayError("FILE_UPLOAD_OUTCOME_UNKNOWN", ambiguous=True)
             db.execute("INSERT INTO fg_upload VALUES(?,?,?,?,?) ON CONFLICT(scope,id) DO UPDATE SET state=excluded.state,code=excluded.code", (self.store.scope, identity, "UPLOADING", "", ""))
+        started = time.monotonic()
+        timing_event('upload_started', role=self.role, blob_sha256=identity)
         try:
             result = self.outbound.upload("xunjia-v22-" + data["kind"] + "-" + identity[:32] + ".bin", blob)
         except Exception as exc:
@@ -62,9 +64,13 @@ class FileGatewayTransport(_Transport):
             code = exc.code if isinstance(exc, FileGatewayError) else "FILE_UPLOAD_OUTCOME_UNKNOWN"
             with self.store.db() as db:
                 db.execute("UPDATE fg_upload SET state=?,code=? WHERE scope=? AND id=?", ("UNKNOWN" if ambiguous else "REJECTED", code, self.store.scope, identity))
+            timing_event('upload_completed', role=self.role, blob_sha256=identity,
+                         elapsed_ms=round((time.monotonic()-started)*1000,3), code=code, ambiguous=ambiguous)
             raise FileGatewayError(code, status=getattr(exc,"status",None), ambiguous=ambiguous) from None
         with self.store.db() as db:
             db.execute("UPDATE fg_upload SET state=?,file_key=?,code=? WHERE scope=? AND id=?", ("UPLOADED", result["file_key"], "", self.store.scope, identity))
+        timing_event('upload_completed', role=self.role, blob_sha256=identity,
+                     elapsed_ms=round((time.monotonic()-started)*1000,3), code='UPLOADED', ambiguous=False)
 
     def _publish_event(self, data, blob):
         self._publish(data, blob)
@@ -82,6 +88,9 @@ class FileGatewayTransport(_Transport):
                 if data["kind"] not in self.incoming_kinds:
                     raise ProtocolError("FILE_QUEUE_DIRECTION_MISMATCH")
                 self.store.stage(self.stream, "v1", row["seq"], data)
+                timing_event('download_staged', role=self.role, download_seq=row['seq'],
+                             blob_sha256=hashlib.sha256(bytes(row['blob'])).hexdigest(),
+                             message_ref=hashlib.sha256(data['message_id'].encode()).hexdigest())
             except ProtocolError:
                 with self.store.db() as db:
                     db.execute("UPDATE fg_download SET state=?,code=? WHERE seq=? AND scope=?", ("QUARANTINED", "FILE_QUEUE_ENVELOPE_REJECTED", row["seq"], self.store.scope))
@@ -121,6 +130,9 @@ class FileGatewayTransport(_Transport):
             raise FileGatewayError(code, status=getattr(exc,"status",None), ambiguous=ambiguous) from None
         with self.store.db() as db:
             db.execute("UPDATE fg_download SET state=?,name=?,blob=?,received_at=? WHERE seq=? AND scope=?", ("EMPTY" if value is None else "STORED", value.name if value else "", value.content if value else None, self.clock() if value else None, seq, self.store.scope))
+        if value is not None:
+            timing_event('download_stored', role=self.role, download_seq=seq,
+                         blob_sha256=hashlib.sha256(value.content).hexdigest())
         return value
 
     def poll(self, limit=50, *, control_intake=False, allow_pending_intake=False):

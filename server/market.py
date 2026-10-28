@@ -101,12 +101,13 @@ def matches(row,f):
 
 
 class MarketService:
-    def __init__(self,repository,*,rows_provider=None,static_provider=None,detail_provider=None,brokers_provider=None):
+    def __init__(self,repository,*,rows_provider=None,static_provider=None,detail_provider=None,brokers_provider=None,qt_provider=None):
         self.repo=repository
         self.rows_provider=rows_provider
         self.static_provider=static_provider
         self.detail_provider=detail_provider
         self.brokers_provider=brokers_provider
+        self.qt_provider=qt_provider
 
     MAX_SELECTION = 100000
 
@@ -131,7 +132,7 @@ class MarketService:
             result.append(row)
         return result
 
-    def _query(self,owner,f,*,before=0,before_uni=0,limit=50,codes=None,excluded=()):
+    def _public_query(self,owner,f,*,before=0,before_uni=0,limit=50,codes=None,excluded=()):
         if f['channel'] in ('qt','mm') or self.rows_provider is None:return [],0
         status,floors=self._overlays(owner)
         provider=getattr(self.rows_provider,'__self__',None)
@@ -151,6 +152,15 @@ class MarketService:
             rows=[r for r in rows if (r.get('flowId') or 0)<before or ((r.get('flowId') or 0)==before and before_uni and str(r['bondUniCode'])<str(before_uni))]
         return rows[:limit],total
 
+    def _query(self,owner,f,*,before=0,before_uni=0,limit=50,codes=None,excluded=()):
+        if f['channel']=='qt':
+            from .qt_market import details
+            return details(self,owner,f,before=before,before_uni=before_uni,limit=limit,codes=codes,excluded=excluded)
+        if f['channel']=='best' and self.qt_provider is not None:
+            from .qt_market import combined
+            return combined(self,owner,f,before=before,before_uni=before_uni,limit=limit,codes=codes,excluded=excluded)
+        return self._public_query(owner,f,before=before,before_uni=before_uni,limit=limit,codes=codes,excluded=excluded)
+
     def rows(self,owner,f):
         rows,total=self._query(owner,f,limit=self.MAX_SELECTION+1)
         if total>self.MAX_SELECTION:raise ValueError('选择或导出超过10万行，请缩小范围')
@@ -161,16 +171,39 @@ class MarketService:
         if type(limit) is not int or not 1<=limit<=500:raise ValueError('每页须1至500行')
         rows,total=self._query(owner,f,before=before,before_uni=before_uni,limit=limit+1)
         picked=rows[:limit]
-        reason={'qt':'QT意向报价尚未接入','mm':'做市商报价尚未接入'}.get(f['channel'])
-        if self.rows_provider is None:reason='行情数据源尚未配置'
-        return {'ok':True,'data':picked,'total':total,'hasMore':len(rows)>limit,'nextBefore':picked[-1]['flowId'] if picked else 0,
-                'nextUni':picked[-1]['bondUniCode'] if picked else 0,'limit':limit,'emptyReason':reason,'source':'public' if self.rows_provider else 'not_configured','groups':f['groups']}
+        from .qt_quotes import COLUMNS
+        qt=f['channel']=='qt'
+        reason=None
+        if qt and self.qt_provider is None:reason='QT报价接入尚未配置；不显示模拟数据'
+        elif qt and not getattr(self.qt_provider,'configured',True):reason='QT配置无效，私有报价未启用；公共行情不受影响'
+        elif qt and not self.qt_provider.status(owner).get('mapped',True):reason='当前用户尚未配置本方QT号映射；未展示其他用户数据'
+        elif f['channel']=='mm':reason='做市商报价尚未接入'
+        elif not qt and self.rows_provider is None and (self.qt_provider is None or not getattr(self.qt_provider,'configured',True)):reason='行情数据源尚未配置'
+        source=('qt_private' if qt else 'public_with_private_qt' if f['channel']=='best' and self.qt_provider is not None and getattr(self.qt_provider,'configured',True)
+                else 'public' if self.rows_provider else 'not_configured')
+        return {'ok':True,'data':picked,'total':total,'hasMore':len(rows)>limit,
+                'nextBefore':picked[-1]['flowId'] if picked else 0,
+                'nextUni':(picked[-1].get('pageKey') or picked[-1].get('bondUniCode') or picked[-1]['code']) if picked else 0,
+                'limit':limit,'emptyReason':reason,'source':source,'groups':f['groups'],
+                'qtColumns':COLUMNS if qt else [],'privateCombined':source=='public_with_private_qt',
+                'qtStatus':self.qt_provider.status(owner) if self.qt_provider is not None else {'configured':False},
+                'sourceNotice':('QT意向：本人对话报价明细；底价来自本人已保存策略，不是QT报价。'
+                    if qt else '最优报价按同券、到期收益率及可比清算口径合并；QT不参与公共广播。'
+                    if source=='public_with_private_qt' else '')}
+
 
     def resolve(self,owner,selection):
         if not isinstance(selection,dict):raise ValueError('选择条件无效')
         f=parse_filter(selection.get('filter') or {'groups':selection.get('groups') or ['bond-all']})
         excluded=selection.get('except',[])
         if not isinstance(excluded,list) or len(excluded)>self.MAX_SELECTION or any(not isinstance(x,str) for x in excluded):raise ValueError('排除列表无效')
+        row_ids=selection.get('rowIds')
+        if row_ids is not None:
+            if f['channel']!='qt' or not isinstance(row_ids,list) or len(row_ids)>500 or any(not isinstance(x,str) or not x.startswith('qt-') or len(x)>80 for x in row_ids):
+                raise ValueError('QT明细选择无效')
+            rows,_=self._query(owner,f,limit=self.MAX_SELECTION+1)
+            wanted=set(row_ids)
+            return [row for row in rows if row.get('rowId') in wanted]
         if selection.get('selectAll') is True:
             rows,total=self._query(owner,f,excluded=excluded,limit=self.MAX_SELECTION+1)
             if total>self.MAX_SELECTION:raise ValueError('选择或导出超过10万行，请缩小范围')

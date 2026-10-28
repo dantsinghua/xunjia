@@ -20,6 +20,30 @@ def snapshot(directory: Path | None = None) -> dict[str,str]:
     with _LOCK:
         folder=directory or config_dir()
         return {key:_read(folder,key) for key in _FILES}
+def resolve_device_id(cookie: str, device_id: str, *, explicit: bool = True) -> str:
+    """A Cookie device overrides an implicit saved value, never an explicit conflict."""
+    found=None;seen=set()
+    for part in cookie.split(';'):
+        name,separator,value=part.strip().partition('=')
+        name=name.strip()
+        if not separator:
+            if name=='device_id':raise ValueError('Cookie 中设备标识格式无效，请重新复制 Cookie')
+            continue
+        if name in seen:raise ValueError('Cookie 中存在重复字段，请重新复制 Cookie')
+        seen.add(name)
+        if name!='device_id':continue
+        value=value.strip()
+        if len(value)>=2 and value.startswith('"') and value.endswith('"'):value=value[1:-1]
+        # Cookie octets are ASCII; preserve the actual salt without URL decoding.
+        if not value or len(value)>256 or any(ord(c)<33 or ord(c)>126 or c in '",;\\' for c in value):
+            raise ValueError('Cookie 中设备标识格式无效，请重新复制 Cookie')
+        found=value
+    device_id=device_id.strip()
+    if found is not None:
+        if explicit and device_id and found!=device_id:
+            raise ValueError('填写的设备标识与 Cookie 不一致，请使用同一次登录的凭据')
+        return found
+    return device_id
 def merged(body: Any, directory: Path | None = None) -> dict[str,str]:
     if not isinstance(body,dict) or set(body)-set(_FILES):
         raise ValueError('行情配置只接受账号、SID、Cookie和设备标识')
@@ -32,6 +56,8 @@ def merged(body: Any, directory: Path | None = None) -> dict[str,str]:
         if len(value.encode('utf-8'))>(32768 if key=='cookie' else 4096 if key=='sid' else 256):
             raise ValueError('行情配置字段过长')
         if key not in _SECRETS or value: result[key]=value
+    explicit=isinstance(body.get('device_id'),str) and bool(body['device_id'].strip())
+    result['device_id']=resolve_device_id(result['cookie'],result['device_id'],explicit=explicit)
     return result
 def _write(directory: Path, key: str, value: str) -> None:
     directory.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -48,12 +74,14 @@ def public_view(directory: Path | None = None) -> dict[str,Any]:
     values=snapshot(directory)
     return {'account':values['account'],**{key+'_set':bool(values[key]) for key in _SECRETS}}
 def load_for_probe(directory: Path | None = None) -> tuple[str,str,str]:
-    values=snapshot(directory)
+    values=merged({},directory)
     return values['cookie'],values['device_id'],values['sid']
 def save_quote(body: Any, directory: Path | None = None) -> dict[str,Any]:
     with _LOCK:
         values=merged(body,directory)  # Validate all fields before any write.
         folder=directory or config_dir()
-        for key in body:
-            if key not in _SECRETS or body[key] and str(body[key]).strip(): _write(folder,key,values[key])
+        keys=[key for key in body if key not in _SECRETS or body[key] and str(body[key]).strip()]
+        if values['device_id'] and values['device_id']!=_read(folder,'device_id') and 'device_id' not in keys:
+            keys.append('device_id')
+        for key in keys:_write(folder,key,values[key])
         return public_view(folder)

@@ -16,7 +16,7 @@ from typing import Callable
 class AuthConfig:
     sso_secret: str = field(default="", repr=False)
     session_secret: str = field(default="", repr=False)
-    token_ttl_seconds: int = 3600
+    token_ttl_seconds: int = 86400
     sso_skew_seconds: int = 60
     clock: Callable[[], float] = field(default=time.time, repr=False)
 

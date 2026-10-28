@@ -6,8 +6,9 @@ import { App as AntApp, ConfigProvider } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import { useRoute, useRouter } from 'vue-router'
 import { antdTheme } from './theme'
-import { clearImState, setImBinding } from './lib/imLink'
+import { clearImState, imBoundAccount, setImBinding } from './lib/imLink'
 import { authToken, requestJson, setAuthToken, setAuthUserId } from './lib/http'
+import { appPath } from './lib/appBase'
 
 import LoginGate from "./components/LoginGate.vue"
 import { consumeSsoLocation, type SsoProof } from "./lib/sso"
@@ -87,7 +88,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
 
         <header class="mast">
           <div class="brand">
-            <img src="/logo.png" alt="南银理财" class="logo" />
+            <img :src="appPath('/logo.png')" alt="南银理财" class="logo" />
             <span class="divider" />
             <span class="title">询价工作台</span>
           </div>
@@ -114,7 +115,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
         <main class="pane">
           <router-view v-if="authReady" />
         <LoginGate v-else :busy="authBusy" :error="authError" :portal-failure="portalFailure" @login="authenticate" @retry="authenticate()" @reset="logout" />
-        <p v-if="authReady && !identity?.account_uid" role="alert" style="text-align:center">当前本人账号尚未绑定企点，发送功能不可用。</p>
+        <p v-if="authReady && !imBoundAccount?.account_uid" role="alert" style="text-align:center">当前本人账号尚未绑定企点，发送功能不可用。</p>
         </main>
       </div>
     </AntApp>

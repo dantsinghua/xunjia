@@ -54,8 +54,8 @@ def proposal(side='BUY'):
             'our_price': {'kind': 'YIELD', 'value': value}}
 
 
-@pytest.mark.parametrize('change', [{'finality': 'NEGOTIABLE'}, {'validity': 'UNCONFIRMED'}, {'assertion': 'INDICATIVE'}])
-def test_nonfinal_or_not_confirmed_peer_fact_does_not_create_final_price_guard(change):
+@pytest.mark.parametrize('change', [{'validity': 'UNCONFIRMED'}, {'assertion': 'INDICATIVE'}])
+def test_unconfirmed_or_indicative_peer_fact_does_not_create_current_price_guard(change):
     value = context()
     value['quotes']['ofr'].update(change)
     assert Engine.__new__(Engine)._validate_reply(value, proposal())['our_price']['value'] == '3.18'
@@ -64,7 +64,7 @@ def test_nonfinal_or_not_confirmed_peer_fact_does_not_create_final_price_guard(c
 def test_counterparty_other_side_cannot_constrain_this_reply_direction():
     value = context()
     value['quotes']['bid'] = deepcopy(value['quotes']['ofr'])
-    value['quotes']['ofr']['finality'] = 'UNKNOWN'
+    value['quotes']['ofr']['validity'] = 'UNCONFIRMED'
     assert Engine.__new__(Engine)._validate_reply(value, proposal())['our_price']['value'] == '3.18'
 
 
@@ -78,3 +78,14 @@ def test_verified_comparable_cash_fact_uses_its_yield_for_final_price_guard(side
         'calculation_ref': 'synthetic-verified-calculation'}
     with pytest.raises(InvalidFact):
         Engine.__new__(Engine)._validate_reply(value, proposal(side))
+
+
+@pytest.mark.parametrize('side', ['BUY', 'SELL'])
+@pytest.mark.parametrize('finality', ['UNKNOWN', 'NEGOTIABLE', 'FINAL'])
+def test_current_eligible_quote_protects_price_without_claiming_finality(side, finality):
+    value = context(side)
+    value['quotes']['ofr' if side == 'BUY' else 'bid']['finality'] = finality
+    before = deepcopy(value)
+    with pytest.raises(InvalidFact, match='current eligible price'):
+        Engine.__new__(Engine)._validate_reply(value, proposal(side))
+    assert value == before

@@ -7,6 +7,8 @@ import pytest
 from dify.negotiation_v22 import node_code
 from dify.negotiation_v22.build import build
 from server.negotiation.chatflow import ChatflowClient
+from server.negotiation.reply_render import render_reply_plan
+from test_rendered_reply_plan_revision import context as sourced_reply_context
 from test_production_flow import OWNER, desk
 from test_acceptance_contract import current
 from test_analysis_evidence_repair import (
@@ -271,21 +273,41 @@ def test_text_patch_has_no_authority_over_any_nontext_field(failure):
         decode(patch, ctx, 'reply')
 
 
-@pytest.mark.parametrize('mode', ['valid_patch', 'invalid_direction', 'legacy_changed_price'])
-def test_real_reply_keeps_facts_economics_and_original_guard_after_wire_decoding(desk, mode, monkeypatch):
+@pytest.mark.parametrize('field,value', [
+    ('kind', 'SOCIAL'), ('quote_value', '3.18'), ('question', 'ASK_CURRENT_QUOTE'),
+    ('context_ref', 'different-member-basis'), ('our_price', {'kind': 'YIELD', 'value': '3.18'}),
+    ('action', 'WAIT'), ('tool_requests', []), ('basis', {'member_version': 99}),
+])
+def test_bound_text_repair_rejects_attempts_to_replace_any_nontext_authority(field, value):
+    ctx = {**sourced_reply_context(), 'schema_version': '2.2', 'stage': 'reply'}
+    original = {'schema_version': '2.2', 'action': 'SEND', 'proposal': render_reply_plan(ctx,
+        {'kind': 'REPLY', 'quote_value': '3.19', 'text': 'SYN-A {own_quote}，出{peer_volume}。'})['proposal']}
+    ctx['validation_feedback'] = {'mode': 'TEXT_ONLY', 'attempt': 1, 'max_attempts': 1,
+        'reason': 'Reply direction differs from our authorized side', 'original_response': original}
+    before = deepcopy(ctx)
+    patch = {'schema_version': '2.2', 'text_repair': {'text': 'SYN-A {own_quote}{peer_volume}，再看看？', field: value}}
+    with pytest.raises(ValueError):
+        decoder()(patch, ctx, 'reply')
+    assert ctx == before, 'Rejecting an overreaching patch must not mutate the trusted original or basis'
+
+
+@pytest.mark.parametrize('mode', ['valid_patch', 'invalid_direction', 'changed_price'])
+def test_real_reply_keeps_facts_economics_and_original_guard_after_wire_decoding(desk, mode):
     decoder()
     case = reply_case(desk)
-    # This archived free-proposal wire remains supported only explicitly;
-    # the current policy's ordinary SEND requires a source-bound reply_plan.
-    monkeypatch.setattr(case.app.state.negotiation_engine, 'context_policy_revision', 'explicit_anchors_v0')
+    repaired_template = 'SYN-A {own_quote}{peer_volume}，烦请继续沟通。'
     def model(ctx):
-        if not ctx.get('validation_feedback'): return response()
-        if mode == 'legacy_changed_price':
-            value = response(); value['proposal']['our_price']['value'] = '3.18'
+        if not ctx.get('validation_feedback'):
+            return {'schema_version': '2.2', 'reply_plan': {'kind': 'REPLY', 'quote_value': '3.19',
+                'text': 'SYN-A {own_quote}，出{peer_volume}。'},
+                'trader_view': {'reason': 'Synthetic unchanged decision'}}
+        if mode == 'changed_price':
+            value = deepcopy(ctx['validation_feedback']['original_response'])
+            value['proposal']['our_price']['value'] = '3.18'
             value['proposal']['text'] = 'SYN-A 3.18%收500万'
             return value
         return {'schema_version': '2.2', 'text_repair': {
-            'text': FIXED_TEXT if mode == 'valid_patch' else 'SYN-A 3.19%出500万'}}
+            'text': repaired_template if mode == 'valid_patch' else 'SYN-A {own_quote}，出{peer_volume}。'}}
     endpoint = SyntheticDify('reply', model)
     case.flows.decide = endpoint.client.call
     result = run_reply(case)
@@ -295,8 +317,13 @@ def test_real_reply_keeps_facts_economics_and_original_guard_after_wire_decoding
         assert len(replies(case)) == 1
         body = json.loads(replies(case)[0]['body_json'])
         assert body['text'] == FIXED_TEXT and body['our_price']['value'] == '3.19'
-        expected = response(); expected['proposal']['text'] = FIXED_TEXT
-        assert endpoint.outputs[1] == expected
+        before, after = deepcopy(endpoint.outputs[0]), deepcopy(endpoint.outputs[1])
+        assert after['proposal']['render_plan']['text'] == repaired_template
+        assert before['proposal']['our_price'] == after['proposal']['our_price']
+        for value in (before, after):
+            value['proposal'].pop('text')
+            value['proposal']['render_plan'].pop('text')
+        assert before == after, 'A text repair cannot change decision, price, source binding or tools'
         assert run_reply(case) is None
     else:
         assert result['state'] == 'REJECTED' and not replies(case)

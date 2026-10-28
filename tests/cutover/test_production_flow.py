@@ -12,6 +12,7 @@ from server.app import create_app
 from server.auth import AuthConfig
 from server.negotiation.settings import Aggregation
 from server.negotiation.prices import Price
+from server.negotiation.reply_render import render_reply_plan
 NOW=datetime(2026,10,17,10,tzinfo=ZoneInfo('Asia/Shanghai')).timestamp()
 OWNER='cutover-test-owner'
 class User:
@@ -36,8 +37,13 @@ class FakeFlows:
     def decide(self,context):
         self.reply_calls.append(deepcopy(context))
         if self.on_reply:self.on_reply(context)
-        price='3.19';text='3.99%收，500万' if self.bad_reply else '3.19%收，500万'
-        return {'schema_version':'2.2','action':'SEND','proposal':{'kind':'REPLY','text':text,'our_price':Price('YIELD',price).dump()},'trader_view':{'reason':'synthetic fixture'}}
+        proposal=render_reply_plan(context,{'kind':'REPLY','quote_value':'3.19',
+            'text':'{own_quote}，{peer_volume}'})['proposal']
+        if self.bad_reply:
+            # Deliberately corrupt a bound candidate; the application must
+            # reject it rather than trust a forged Code/model public body.
+            proposal['text']='3.99%收，500万'
+        return {'schema_version':'2.2','action':'SEND','proposal':proposal,'trader_view':{'reason':'synthetic fixture'}}
 class FakeNative:
     supports_v22=True
     def __init__(self):self.sent=[];self.cancelled=[];self.adapters={}

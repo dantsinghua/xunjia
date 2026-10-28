@@ -12,6 +12,7 @@ from dify.negotiation_v22.prompts import CALC_EXAMPLE
 from server.bond_tools import BondTools
 from server.negotiation.application_store import ApplicationStore
 from server.negotiation.engine import Engine
+from server.negotiation.reply_render import render_reply_plan, public_information
 from server.negotiation.prices import InvalidFact, LimitPolicy
 from server.negotiation.service import Inquiry
 from test_production_flow import OWNER, desk, raw
@@ -106,9 +107,11 @@ def test_real_public_results_survive_fact_commit_and_a_new_engine_uses_them(desk
         assert_source(context, row, expected)
         assert context['tool_results'] == [], 'A inheritance must not consume the B stage request array'
         issuer = context['analysis_tool_results'][0]['result']['data']['identity']['full_name']
-        return {'schema_version': '2.2', 'action': 'SEND', 'proposal': {'kind': 'REPLY',
-            'text': 'SYN-A 3.19%收500万；公开主体名称为'+issuer+'。',
-            'our_price': {'kind': 'YIELD', 'value': '3.19'}}, 'trader_view': {'public_issuer': issuer}}
+        info=next(row for row in public_information(context) if issuer in row['text'])
+        return {'schema_version': '2.2', 'action': 'SEND', 'proposal': render_reply_plan(context,{
+            'kind': 'REPLY','quote_value':'3.19',
+            'text': '{bond} {own_quote}{peer_volume}；{info:'+info['id']+'}。'})['proposal'],
+            'trader_view': {'public_issuer': issuer}}
     engine, b_tools = reopen(case, decide)
     result = engine.decide_member(OWNER, case.peer['member_id'])
     assert result['state'] == 'QUEUED' and len(seen) == 1

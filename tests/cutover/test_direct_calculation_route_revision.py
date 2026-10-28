@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from test_verified_literal_fact_binding import canonical_analysis_view
+
 from dify.negotiation_v22 import node_code, prompts
 from dify.negotiation_v22.build import build
 from server.negotiation import slots
@@ -153,6 +155,7 @@ def test_generated_direct_route_preserves_raw_twenty_history_candidates_and_one_
     assert direct_system() in output['system_prompt'] and prompts.ANALYSIS not in output['system_prompt']
     projected = json.loads(output['context'])
     assert projected == node_code.compact_context(value)
+    projected = canonical_analysis_view(value, projected)
     assert projected['messages'] == value['messages']
     assert projected['members'][0]['context'] == value['members'][0]['context']
     assert len(projected['members'][0]['context']) == 20

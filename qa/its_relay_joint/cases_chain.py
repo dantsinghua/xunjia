@@ -14,10 +14,10 @@ def chain(tmp_path,monkeypatch):
 def test_mock_contract_auth_fifo_names_and_institution_isolation(tmp_path):
     now=time.time()
     with MockPathGateway(tmp_path,[AUTH,AUTH_B],lambda:now,max_bytes=100) as g:
-        a=FileGatewayClient(g.base,AUTH,path='same',allow_http=True,clock=lambda:now)
-        b=FileGatewayClient(g.base,AUTH_B,path='same',allow_http=True,clock=lambda:now)
-        bad=FileGatewayClient(g.base,GatewayAuth('bad',AUTH.sm4_key),path='same',allow_http=True,clock=lambda:now)
-        late=FileGatewayClient(g.base,AUTH,path='same',allow_http=True,clock=lambda:now-61)
+        a=FileGatewayClient(g.base,AUTH,path='same',ssl_context=g.client_context,clock=lambda:now)
+        b=FileGatewayClient(g.base,AUTH_B,path='same',ssl_context=g.client_context,clock=lambda:now)
+        bad=FileGatewayClient(g.base,GatewayAuth('bad',AUTH.sm4_key),path='same',ssl_context=g.client_context,clock=lambda:now)
+        late=FileGatewayClient(g.base,AUTH,path='same',ssl_context=g.client_context,clock=lambda:now-61)
         for rejected in (bad,late):
             with pytest.raises(FileGatewayError) as e:rejected.pending()
             assert e.value.status==401
@@ -57,7 +57,8 @@ def test_live_message_crosses_native_host_http_and_real_business_store(chain):
 def test_sixty_second_offline_blocks_send_and_recovers(chain):
     c=chain;c.select();c.now[0]+=61
     r=c.api.post('/api/im/send',json={'uin':'peer-10001','text':'synthetic','request_id':'off'})
-    assert r.status_code==403,r.text
+    assert r.status_code==503 and r.json()['submitted'] is False,r.text
+    assert r.json()['code']=='COLLECTOR_HEARTBEAT_STALE'
     assert c.bus.calls==[]
     c.advertise();assert c.runtime.online('wb-a','10001')
     assert c.api.get('/api/im/history').status_code==200
@@ -203,7 +204,7 @@ def test_message_to_actual_chatflow_client_reply_command_receipt(chain):
     assert outcome['analyzed']==1,outcome
     assert [x['stage'] for x in c.model.calls]==['analysis','reply'],c.model.calls
     assert len(c.bus.calls)==2,[x.args for x in c.bus.calls]
-    assert c.bus.calls[-1].args['text']=='3.19%\u6536\uff0c500\u4e07'
+    assert c.bus.calls[-1].args['text']=='3.19%收，你再看看？'
     assert all(x['state']=='SENT' for x in c.app.state.inquiry.commands('owner-a'))
 
 def test_invalid_model_reply_does_not_erase_valid_parsed_quote(chain):
@@ -231,7 +232,9 @@ def test_offline_account_change_before_native_claim_is_not_executed(chain):
     c.native.rows[0]['state']='login_required';c.advertise();c.pump(3)
     assert not c.bus.calls
     assert not c.runtime.online('wb-a','10001')
-    assert c.api.post('/api/im/send',json={'uin':'peer-10001','text':'synthetic','request_id':'offline-now'}).status_code==403
+    rejected=c.api.post('/api/im/send',json={'uin':'peer-10001','text':'synthetic','request_id':'offline-now'})
+    assert rejected.status_code==503 and rejected.json()['submitted'] is False,rejected.text
+    assert rejected.json()['code']=='COLLECTOR_NOT_READY'
     c.native.rows[0]['state']='running';c.advertise();c.pump(2)
     assert c.runtime.online('wb-a','10001') and not c.bus.calls
 
@@ -247,3 +250,17 @@ def test_query_reconciles_unknown_from_native_evidence_without_reexecution(chain
     c.now[0]+=31;c.pump(4)
     assert c.app.state.inquiry.commands('owner-a')[0]['state']=='SENT'
     assert len(c.bus.calls)==1
+
+@pytest.mark.parametrize('mode',['missing-client-certificate','untrusted-server','wrong-hostname'])
+def test_mutual_tls_failure_never_reaches_file_queue(tmp_path,mode):
+    import ssl
+    with MockPathGateway(tmp_path,[AUTH],time.time) as gateway:
+        context=ssl.create_default_context(cafile=gateway.tls_files['ca_file'])
+        base=gateway.base
+        if mode=='untrusted-server':context=ssl.create_default_context()
+        elif mode=='wrong-hostname':
+            context.load_cert_chain(gateway.tls_files['client_cert_file'],gateway.tls_files['client_key_file'])
+            base=base.replace('127.0.0.1','localhost')
+        client=FileGatewayClient(base,AUTH,path='negative_tls',ssl_context=context,timeout=2)
+        with pytest.raises(FileGatewayError):client.pending()
+        assert gateway.calls==[] and gateway.count(AUTH.key,'negative_tls')==0

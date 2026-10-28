@@ -1,4 +1,4 @@
-"""A rendered plan may separate sourced roles, never expand economic authority."""
+"""Natural model sentences bind proven facts without expanding authority."""
 from copy import deepcopy
 from decimal import Decimal
 import importlib
@@ -29,7 +29,7 @@ def renderer():
 
 
 def context():
-    return {'member_id': 'peer-a', 'thread_id': 'thread-a', 'bond_code': 'SYN-A',
+    result = {'member_id': 'peer-a', 'thread_id': 'thread-a', 'bond_code': 'SYN-A',
         'our_side': 'BUY', 'trade_day': DAY, 'reconfirm_day': None, 'unresolved_messages': [],
         'basis': {'member_id': 'peer-a', 'member_version': 2, 'observed_watermark': 21},
         'boundary': {'kind': 'YIELD', 'value': '3.12'},
@@ -38,20 +38,25 @@ def context():
         'group_summary': {'reported_shortfall_wan': '19500', 'goal_ready': False},
         'quotes': {'ofr': {'side': 'ofr', 'price': {'kind': 'YIELD', 'value': '3.10'},
             'volume_wan': '500', 'assertion': 'QUOTE', 'validity': 'ACTIVE', 'finality': 'UNKNOWN',
-            'confirmed_day': DAY, 'revision': 2, 'evidence': {'price': ['peer-a-message']}}},
+            'confirmed_day': DAY, 'revision': 2,
+            'evidence': {'price': ['peer-a-message'], 'volume_wan': ['peer-a-message']}}},
         'context': [{'message_id': 'peer-a-message', 'direction': 'in', 'text': 'SYN-A 3.10出500万',
             'trade_day': DAY, 'ingest_revision': 21, 'historical': False}],
-        'quote_constraints': {'status': 'AVAILABLE', 'price_kind': 'YIELD', 'tick_size': '0.01',
-            'min_yield_pct': '3.18', 'max_yield_pct': '3.22', 'base_yield_pct': '3.20',
-            'base_source': 'LAST_SENT', 'max_step_bp': '2', 'reason': None},
         'analysis_tool_results': [], 'analysis_tool_source': None, 'tool_results': []}
+    result['quote_constraints'] = Engine._quote_constraints(result)
+    return result
 
 
 def plan(**changes):
-    value = {'kind': 'REPLY', 'quote_value': '3.18', 'include_volume': False,
-             'information_ids': [], 'question': 'NONE', 'lead': '', 'tail': ''}
+    value = {'kind': 'REPLY', 'quote_value': '3.18', 'text': 'SYN-A {own_quote}。', 'question': 'NONE'}
     value.update(changes)
+    if value['kind'] != 'REPLY' and value.get('quote_value') is None:
+        value.pop('quote_value', None)
     return value
+
+
+def information_text(records, suffix='SYN-A {own_quote}。'):
+    return ''.join('{info:'+row['id']+'}' for row in records)+suffix
 
 
 def render(ctx, value):
@@ -126,7 +131,7 @@ def with_public(name, *, inherited=True):
 
 
 @pytest.mark.parametrize('value', ['3.18', '3.19', '3.20', '3.21', '3.22'])
-def test_all_five_authorized_grid_prices_reach_the_real_reply_validator(value):
+def test_reference_neighborhood_prices_reach_the_real_reply_validator(value):
     ctx = context()
     body = accepted(ctx, render(ctx, plan(quote_value=value)))
     assert body['our_price']['value'] == value
@@ -135,11 +140,11 @@ def test_all_five_authorized_grid_prices_reach_the_real_reply_validator(value):
 
 def test_large_authorized_domain_preserves_every_interior_price_not_just_recommendations():
     ctx = context()
+    ctx['quotes'] = {}  # No current peer offer: exercise the entire authorized domain.
     ctx['boundary']['value'] = '1.00'
     ctx['our_quote']['price']['value'] = '3.00'
     ctx['plan'].update(opening_yield_pct='3.00', step_bp='200')
-    ctx['quote_constraints'].update(min_yield_pct='1.00', max_yield_pct='5.00',
-                                    base_yield_pct='3.00', max_step_bp='200')
+    ctx['quote_constraints'] = Engine._quote_constraints(ctx)
     seen = set()
     for tick in range(100, 501):
         value = format(Decimal(tick)/100, '.2f')
@@ -148,7 +153,7 @@ def test_large_authorized_domain_preserves_every_interior_price_not_just_recomme
     assert seen == {format(Decimal(tick)/100, '.2f') for tick in range(100, 501)}
 
 
-@pytest.mark.parametrize('value', ['3.17', '3.23', '3.185', '3.18e0', 'NaN', 3.18, True, None])
+@pytest.mark.parametrize('value', ['3.11', '3.185', '3.18e0', 'NaN', 3.18, True, None])
 def test_illegal_or_non_grid_choice_is_rejected_without_clamping(value):
     with pytest.raises((InvalidFact, ValueError)):
         render(context(), plan(quote_value=value))
@@ -157,7 +162,7 @@ def test_illegal_or_non_grid_choice_is_rejected_without_clamping(value):
 @pytest.mark.parametrize('inherited', [False, True])
 def test_sourced_similarity_numbers_coexist_with_the_authorized_own_quote(inherited):
     ctx, info = with_public('similar_bonds', inherited=inherited)
-    result = render(ctx, plan(information_ids=[row['id'] for row in info]))
+    result = render(ctx, plan(text=information_text(info)))
     body = accepted(ctx, result)
     for value in ('SYN-B', '2.9872', '335', '365', '30', '3.18%'):
         assert value in body['text'], 'Do not obtain acceptance by deleting the requested comparison'
@@ -170,7 +175,7 @@ def test_sourced_similarity_numbers_coexist_with_the_authorized_own_quote(inheri
 @pytest.mark.parametrize('tool', ['bond_info', 'issuer_info', 'bond_calc'])
 def test_actual_tool_facts_are_rendered_and_calculation_does_not_echo_its_inputs(tool):
     ctx, info = with_public(tool)
-    result = render(ctx, plan(information_ids=[row['id'] for row in info]))
+    result = render(ctx, plan(text=information_text(info)))
     body = accepted(ctx, result)
     if tool == 'bond_info': assert 'SYN-ISSUER' in body['text']
     elif tool == 'issuer_info':
@@ -184,8 +189,8 @@ def test_actual_tool_facts_are_rendered_and_calculation_does_not_echo_its_inputs
 def test_unknown_information_id_and_previous_source_version_do_not_authorize_public_numbers():
     ctx, info = with_public('issuer_info')
     with pytest.raises((InvalidFact, ValueError)):
-        render(ctx, plan(information_ids=['not-an-actual-information-id']))
-    old_plan = plan(information_ids=[row['id'] for row in info])
+        render(ctx, plan(text='{info:not-an-actual-information-id}{own_quote}'))
+    old_plan = plan(text=information_text(info))
     changed = deepcopy(ctx)
     changed['analysis_tool_results'][0]['result']['snapshot_id'] = 'synthetic-reply-render-v2'
     with pytest.raises((InvalidFact, ValueError)):
@@ -195,7 +200,7 @@ def test_unknown_information_id_and_previous_source_version_do_not_authorize_pub
 @pytest.mark.parametrize('mutation', ['text', 'price', 'plan', 'economic_text', 'parts'])
 def test_engine_rebuilds_the_plan_instead_of_trusting_client_rendered_fields(mutation):
     ctx, info = with_public('similar_bonds')
-    result = render(ctx, plan(information_ids=[row['id'] for row in info]))
+    result = render(ctx, plan(text=information_text(info)))
     body = deepcopy(result['proposal'])
     if mutation == 'text': body['text'] += ' 另收800万。'
     elif mutation == 'price': body['our_price']['value'] = '3.12'
@@ -206,17 +211,18 @@ def test_engine_rebuilds_the_plan_instead_of_trusting_client_rendered_fields(mut
         Engine.__new__(Engine)._validate_reply(ctx, body)
 
 
-@pytest.mark.parametrize('position', ['lead', 'tail'])
+@pytest.mark.parametrize('position', ['before', 'after'])
 @pytest.mark.parametrize('text', ['另收800万。', '公开估值2.9872%。', '我方底价是3.12。', '500万可以成交，请确认。'])
 def test_free_text_never_obtains_numeric_or_execution_permission_from_its_position(position, text):
     ctx = context()
     with pytest.raises((InvalidFact, ValueError)):
-        accepted(ctx, render(ctx, plan(**{position: text})))
+        natural = text+'{own_quote}' if position == 'before' else '{own_quote}'+text
+        accepted(ctx, render(ctx, plan(text=natural)))
 
 
 def test_qualitative_quote_confirmation_is_allowed_without_promising_execution():
     ctx = context()
-    result = render(ctx, plan(lead='您好，', tail='请确认报价。', include_volume=True))
+    result = render(ctx, plan(text='您好，{own_quote}，{peer_volume}，请确认报价。'))
     body = accepted(ctx, result)
     assert '您好' in body['text'] and '请确认报价' in body['text']
     assert '500' in body['text'] and '成交' not in body['text']
@@ -235,7 +241,8 @@ def cash_context(*, member='peer-a', value='34.19'):
 
 
 def settlement_plan():
-    return plan(kind='CLARIFY', quote_value=None, question='ASK_SETTLEMENT')
+    return plan(kind='CLARIFY', quote_value=None, question='ASK_SETTLEMENT',
+                text='你刚才{peer_quote}，请确认结算日期？')
 
 
 def test_same_peer_current_cash_reference_can_ask_settlement_without_becoming_a_new_quote():
@@ -254,7 +261,8 @@ def test_withdrawn_old_day_or_reported_cash_is_not_revived_as_current_settlement
     ctx['quotes']['ofr'].update(change)
     with pytest.raises((InvalidFact, ValueError)):
         render(ctx, settlement_plan())
-    result = render(ctx, plan(kind='CLARIFY', quote_value=None, question='ASK_CURRENT_QUOTE'))
+    result = render(ctx, plan(kind='CLARIFY', quote_value=None, question='ASK_CURRENT_QUOTE',
+                             text='请确认现在的报价和数量？'))
     body = accepted(ctx, result)
     assert body.get('our_price') is None
     if '34.19' in body['text']:
@@ -290,7 +298,7 @@ def test_partial_tool_keeps_available_identity_without_inventing_missing_rating(
     assert info
     texts = ' '.join(row['text'] for row in info)
     assert 'Synthetic Issuer' in texts and 'AAA' not in texts and 'None' not in texts
-    accepted(ctx, render(ctx, plan(information_ids=[row['id'] for row in info])))
+    accepted(ctx, render(ctx, plan(text=information_text(info))))
 
 
 @pytest.mark.parametrize('change', ['member', 'thread', 'basis', 'quote_revision', 'constraints'])
@@ -304,7 +312,7 @@ def test_bound_plan_cannot_replay_after_its_member_or_fact_basis_changes(change)
     elif change == 'thread': newer['thread_id'] = 'other-thread'
     elif change == 'basis': newer['basis']['member_version'] += 1
     elif change == 'quote_revision': newer['quotes']['ofr']['revision'] += 1
-    else: newer['quote_constraints']['max_yield_pct'] = '3.21'
+    else: newer['quote_constraints']['min_yield_pct'] = '3.13'
     with pytest.raises((InvalidFact, ValueError)):
         renderer().render_reply_plan(newer, bound)
     with pytest.raises((InvalidFact, ValueError)):
@@ -338,7 +346,7 @@ def test_sell_domain_preserves_all_five_prices_and_the_authorized_direction():
     ctx['quotes']['bid']['side'] = 'bid'
     ctx['our_quote']['price']['value'] = '3.00'
     ctx['plan']['opening_yield_pct'] = '3.00'
-    ctx['quote_constraints'].update(min_yield_pct='2.98', max_yield_pct='3.02', base_yield_pct='3.00')
+    ctx['quote_constraints'] = Engine._quote_constraints(ctx)
     for value in ('2.98', '2.99', '3.00', '3.01', '3.02'):
         body = Commands._body(accepted(ctx, render(ctx, plan(quote_value=value))))
         assert body['our_price']['value'] == value and value+'%出' in body['text']
@@ -346,11 +354,11 @@ def test_sell_domain_preserves_all_five_prices_and_the_authorized_direction():
 
 def test_an_authorized_domain_crossing_zero_keeps_negative_zero_and_positive_prices():
     ctx = context()
+    ctx['quotes'] = {}  # No current peer offer: negative/zero/positive domain only.
     ctx['boundary']['value'] = '-0.10'
     ctx['our_quote']['price']['value'] = '0.00'
     ctx['plan'].update(opening_yield_pct='0.00', step_bp='10')
-    ctx['quote_constraints'].update(min_yield_pct='-0.10', max_yield_pct='0.10',
-                                    base_yield_pct='0.00', max_step_bp='10')
+    ctx['quote_constraints'] = Engine._quote_constraints(ctx)
     actual = set()
     for tick in range(-10, 11):
         value = format(Decimal(tick)/100, '.2f')
@@ -372,14 +380,14 @@ def test_controlled_plan_cannot_skip_required_cash_clarification_by_selecting_a_
         if missing in ('all', field): cash[field] = None
     before = deepcopy(ctx)
     assert ctx['quote_constraints']['status'] == 'AVAILABLE'
-    assert (ctx['quote_constraints']['min_yield_pct'], ctx['quote_constraints']['max_yield_pct']) == ('3.18', '3.22')
+    assert (ctx['quote_constraints']['min_yield_pct'], ctx['quote_constraints']['max_yield_pct']) == ('3.12', None)
     with pytest.raises((InvalidFact, ValueError)):
         accepted(ctx, render(ctx, plan(quote_value='3.19')))
     assert ctx == before, 'Required clarification must not shrink the authorized numeric domain or revise facts'
 
 
 @pytest.mark.parametrize('price_kind,value,label', [('NET_PRICE', '34.19', '净价'), ('DIRTY_PRICE', '99.32', '全价')])
-def test_controlled_cash_clarification_and_legacy_independent_yield_permission_remain_distinct(
+def test_cash_clarification_remains_required_before_a_natural_yield_reply(
         price_kind, value, label):
     ctx = cash_context(value=value)
     ctx['quotes']['ofr']['price']['kind'] = price_kind
@@ -387,11 +395,8 @@ def test_controlled_cash_clarification_and_legacy_independent_yield_permission_r
     body = Commands._body(accepted(ctx, result))
     assert body['kind'] == 'CLARIFY' and value in body['text'] and label in body['text']
     assert body.get('our_price') is None
-    # The newly authorized decision rule is a controlled-plan requirement.
-    # Preserve the explicitly retained old bare-proposal independent-yield contract.
-    legacy = {'kind': 'REPLY', 'text': 'SYN-A 3.18%收',
-              'our_price': {'kind': 'YIELD', 'value': '3.18'}}
-    assert Engine.__new__(Engine)._validate_reply(ctx, legacy)['our_price']['value'] == '3.18'
+    with pytest.raises((InvalidFact, ValueError)):
+        accepted(ctx, render(ctx, plan()))
 
 
 @pytest.mark.parametrize('price_kind,value', [('NET_PRICE', '34.19'), ('DIRTY_PRICE', '99.32')])
@@ -432,7 +437,7 @@ def test_generated_reply_nodes_preserve_source_catalog_and_enforce_cash_requirem
             assert projected['quotes'] == ctx['quotes']
             assert projected['quote_constraints'] == ctx['quote_constraints']
             if catalog:
-                selection = {**selection, 'information_ids': [row['id'] for row in catalog]}
+                selection = {**selection, 'text': information_text(catalog, selection['text'])}
             else:
                 assert projected['reply_requirements']['allowed_kinds'] == ['CLARIFY']
                 assert projected['reply_requirements']['question'] == 'ASK_SETTLEMENT'
@@ -455,7 +460,7 @@ def test_generated_reply_nodes_preserve_source_catalog_and_enforce_cash_requirem
             assert ctx == before
 
 
-def test_latest_policy_cannot_fall_back_to_bare_or_split_text_send_but_legacy_contract_remains():
+def test_current_generated_contract_rejects_bare_and_split_text_in_every_history_policy():
     bare = {'kind': 'REPLY', 'text': 'SYN-A 3.18%收',
             'our_price': {'kind': 'YIELD', 'value': '3.18'}}
     split = {key: value for key, value in bare.items() if key != 'text'}
@@ -464,17 +469,9 @@ def test_latest_policy_cannot_fall_back_to_bare_or_split_text_send_but_legacy_co
         _, decode = generated_reply_nodes(version)
         for proposal in (bare, split):
             response = {'schema_version': '2.2', 'action': 'SEND', 'proposal': proposal}
-            latest = wire_context(cash_context())
-            with pytest.raises(ValueError):
-                decode(json.dumps(response), json.dumps(latest))
-            legacy = wire_context(cash_context(), 'explicit_anchors_v0')
-            decoded = json.loads(decode(json.dumps(response), json.dumps(legacy))['result'])
-            assert decoded['proposal'] == bare
-            body = Commands._body(Engine.__new__(Engine)._validate_reply(legacy, decoded['proposal']))
-            assert body['kind'] == bare['kind'] and body['text'] == bare['text']
-            assert body['our_price']['kind'] == 'YIELD' and body['our_price']['value'] == '3.18'
-            assert all(body['our_price'].get(field) is None for field in
-                       ('settlement_date', 'computed_yield', 'calculation_ref'))
+            for policy in ('latest_quote_confirmation_v1', 'explicit_anchors_v0'):
+                with pytest.raises(ValueError):
+                    decode(json.dumps(response), json.dumps(wire_context(cash_context(), policy)))
 
 
 def test_latest_policy_keeps_non_sending_decisions_and_rejects_foreign_bound_plans():

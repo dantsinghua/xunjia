@@ -7,7 +7,7 @@ import re
 import shlex
 import stat
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 class DeployError(RuntimeError):
     def __init__(self, code: str, detail: str = ''):
         self.code = code
@@ -133,6 +133,16 @@ def effective_env(values: dict, prefix: Path, app: Path) -> dict[str, str]:
         env['XUNJIA_WEB_DIST'] = str(app/'frontend/dist')
     if env.get('XUNJIA_STATE_DIR', '') in ('', '/home/xunjia/state'):
         env['XUNJIA_STATE_DIR'] = str(prefix/'state')
+    if env.get('XUNJIA_QUOTE_SOURCE')=='qb':
+        try:
+            db=urlsplit(env.get('XUNJIA_DATABASE_URL',''))
+            shared={'QB_MYSQL_HOST':db.hostname or '', 'QB_MYSQL_PORT':str(db.port or 3306),
+                    'QB_MYSQL_USER':unquote(db.username or ''),'QB_MYSQL_PASSWORD':unquote(db.password or ''),
+                    'QB_MYSQL_DB':db.path.lstrip('/')}
+        except ValueError:raise DeployError('CONFIG_DATABASE_URL_INVALID') from None
+        for key,value in shared.items():
+            if not env.get(key):env[key]=value
+        if not env.get('QB_CONFIG_DIR'):env['QB_CONFIG_DIR']=str(prefix/'config/innodealing')
     return env
 def validate_config(values: dict, *, ready=False) -> list[str]:
     missing = []

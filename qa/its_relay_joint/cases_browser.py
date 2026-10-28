@@ -55,7 +55,7 @@ def test_browser_receives_authenticated_history_image_file_and_offline_status(tm
             page.screenshot(path=str(O/'mock-browser-online.png'),full_page=True)
             c.now[0]+=61
             page.get_by_test_id('collector-refresh').click()
-            expect(page.get_by_test_id('collector-current')).to_contain_text('\u5df2\u79bb\u7ebf')
+            expect(page.get_by_test_id('collector-current')).to_contain_text('采集通道心跳过期或未就绪')
             for button in history.get_by_role('button',name='\u4e0b\u8f7d\u539f\u6587\u4ef6').all():expect(button).to_be_disabled()
             page.screenshot(path=str(O/'mock-browser-offline.png'),full_page=True)
             assert not errors,errors

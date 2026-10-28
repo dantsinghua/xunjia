@@ -16,14 +16,15 @@ import sys
 import tempfile
 
 ROOT=Path(__file__).resolve().parents[1]
-FILES=('relay/__init__.py','relay/protocol.py','relay/collector_bridge.py',
+FILES=('relay/__init__.py','relay/protocol.py','relay/collector_bridge.py','relay/site_egress.py',
        'relay/qtrade_native_port.py','server/__init__.py',
        'server/receiver_ledger.py','server/transports.py',
        'relay/file_gateway.py','server/file_gateway_transport.py',
        'relay/file_gateway_connection.py',
        'relay/gateway_paths.py','relay/institution_codec.py',
        'relay/institution_directory.py','relay/institution_archive.py',
-       'server/institution_transport.py')
+       'server/institution_transport.py','relay/wechat_capture.py',
+       'server/wechat_capture_transport.py')
 
 
 def build(output, wheelhouse):
@@ -42,9 +43,9 @@ def build(output, wheelhouse):
             target=stage/name;target.parent.mkdir(exist_ok=True)
             shutil.copyfile(root/name,target)
         (stage/'server/_collector_build.py').write_text(
-            'VERSION = "2.2.11"\nSOURCE_HASHES = '+repr(hashes)+'\n',encoding='utf8')
+            'VERSION = "2.2.12"\nSOURCE_HASHES = '+repr(hashes)+'\n',encoding='utf8')
         (stage/'pyproject.toml').write_text('[build-system]\nrequires=["setuptools==80.9.0","wheel==0.45.1"]\nbuild-backend="setuptools.build_meta"\n')
-        (stage/'setup.py').write_text('from setuptools import setup\nsetup(name="xunjia-collector-runtime",version="2.2.11",packages=["relay","server"],python_requires=">=3.11",install_requires=["cryptography>=50.0.2","PyYAML>=6"])\n')
+        (stage/'setup.py').write_text('from setuptools import setup\nsetup(name="xunjia-collector-runtime",version="2.2.12",packages=["relay","server"],python_requires=">=3.11",install_requires=["cryptography>=50.0.2","PyYAML>=6"])\n')
         subprocess.run([sys.executable,'-m','pip','wheel','--no-deps','--no-index',
                         '--find-links',str(wheelhouse),'--wheel-dir',str(output),str(stage)],check=True,timeout=180)
     if hashes!={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in FILES}:

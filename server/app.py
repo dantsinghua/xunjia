@@ -17,7 +17,7 @@ from .negotiation.runtime import Inbox,Dispatcher
 from .negotiation.settings import Settings,Aggregation
 def create_app(*,database_url=None,auth_config=None,enable_background=None,transport=None,
                chat_client=None,chatflows=None,market=None,reference_provider=None,calendar=None,
-               agent_service_token=None,aggregation=None,stage_budget_seconds=None,quote_control=None,quote_source=None,submission_guard=None):
+               agent_service_token=None,aggregation=None,stage_budget_seconds=None,quote_control=None,quote_source=None,submission_guard=None,qt_source=None):
     retired=[name for name in ('XUNJIA_TRANSPORT_CONFIG','XUNJIA_MQ_CONNECTION_CONFIG')
              if os.environ.get(name,'').strip()]
     if retired:
@@ -59,6 +59,12 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     quote_control=quote_control or QuoteControl(reader=source)
     market=market or MarketService(store)
     market.repo=store
+    from .qt_control import QtControl,qt_router
+    qt_config=Path(os.environ.get('XUNJIA_QT_CONFIG') or (quote_control.directory.parent/'qtrade'/'connection.json'))
+    qt_control=QtControl(qt_config,state_dir or qt_config.parent/'state',clock=auth.config.clock,require_existing=bool(os.environ.get('XUNJIA_QT_CONFIG')))
+    if qt_source is None and getattr(market,'qt_provider',None) is None:qt_source=qt_control
+    if qt_source is not None:market.qt_provider=qt_source
+    qt_source=getattr(market,'qt_provider',None)
     client=chatflows or chat_client
     if client is not None and not all(callable(getattr(client,k,None)) for k in ('analyze','decide')):
         raise ValueError('V2.2 requires analysis/reply Chatflows, not the legacy AgentTurn client')
@@ -144,10 +150,12 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
                 tasks.append(asyncio.create_task(repeated('day_rollover',rollover_once,refresh_seconds)))
             if source:tasks.append(asyncio.create_task(market_loop()))
             await quote_control.startup()
+            if qt_source is not None:await qt_source.startup()
             yield
         finally:
             try:
                 await quote_control.shutdown()
+                if qt_source is not None:await qt_source.shutdown()
             finally:
                 for worker in runtime['workers'].values():worker['running']=False
                 for task in tasks:task.cancel()
@@ -167,6 +175,8 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     app.state.session_reset=session_reset
     app.state.business_engine='v22';app.state.rollover_once=rollover_once
     app.state.quote_control=quote_control
+    app.state.qt_control=qt_control
+    app.include_router(qt_router(qt_control))
     from .institution_settings import connection_settings_router
     from .institution_runtime import InstitutionSettings
     mq_settings=InstitutionSettings(institution)

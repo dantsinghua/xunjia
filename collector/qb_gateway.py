@@ -17,6 +17,7 @@ import pathlib
 import httpx
 
 from collector.qb_sign import sign_params
+from relay.site_egress import httpx_request
 
 CFG = pathlib.Path.home() / ".config" / "qb"
 API = os.environ.get("QB_API_BASE", "https://rest.innodealing.com")
@@ -57,9 +58,11 @@ def authenticate(cookie: str, device_id: str) -> dict:
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"),
     }
+    url, headers, extensions = httpx_request(url, headers)
+    request_options = {'extensions': extensions} if extensions else {}
     with httpx.Client(proxy=None, timeout=15, verify=True, trust_env=False) as c:
         r = c.post(url, params=params, headers=headers,
-                   content=json.dumps({"cm": {}}))
+                   content=json.dumps({"cm": {}}), **request_options)
         r.raise_for_status()
         body = r.json()
     data = body.get("data") if isinstance(body, dict) else None
