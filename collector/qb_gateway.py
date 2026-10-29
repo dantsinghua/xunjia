@@ -1,7 +1,7 @@
 """QB(羿珩 DM)行情自建连接器 —— 完全脱离浏览器/篡改猴,程序直连。
 
 链路(逆自 quote-web bundle):
-  1. 登录 cookie(含 sid)+ device_id(sign 盐)取自安琳本人浏览器,存 ~/.config/qb/{cookie.txt,device_id.txt}(600)
+  1. 登录 cookie(含 sid)+ device_id(sign 盐)由用户名密码 HTTP 登录写入 ~/.config/qb/(600)；也可沿用已保存会话
   2. POST rest.innodealing.com/onshore-auth-service/api/token/v1/web/authenticate?…&sign=
      body {"cm":{}} → 返回 {"data":{"t":<token>,"ea":<过期ms>}}
   3. 连 wss://bosh2.innodealing.com/onshore-ws-gateway-apollo,token 走 Sec-WebSocket-Protocol(subprotocol)

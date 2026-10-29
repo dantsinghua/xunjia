@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 interface SourceState {
-  account?: string; sid_set?: boolean; cookie_set?: boolean; device_id_set?: boolean
+  account?: string; password_set?: boolean; sid_set?: boolean; cookie_set?: boolean; device_id_set?: boolean
   configured?: boolean; reader_configured?: boolean
   collector_state?: string; collector_active?: boolean; note?: string; code?: string
   stats?: { quotes_received?:number; quotes_written?:number; trades_written?:number; decode_errors?:number; last_quote_at?:number|null }
@@ -11,12 +11,12 @@ interface SourceState {
 }
 interface Probe {ok:boolean;wss_open:boolean;note:string;database?:{ok:boolean;note:string};saved?:boolean}
 const state=ref<SourceState|null>(null)
-const form=reactive({account:'',sid:'',cookie:'',device_id:''})
+const form=reactive({account:'',password:''})
 const busy=ref(false),loading=ref(false),error=ref(''),notice=ref('')
 const tested=ref<Probe|null>(null)
 let timer:number|undefined,disposed=false,loaded=false
 const labels:Record<string,string>={stopped:'已停止',starting:'正在启动',connecting:'正在连接',streaming:'已连接',retrying:'断线重试中',auth_failed:'认证失效',error:'启动失败'}
-function clearSecrets(){form.sid='';form.cookie='';form.device_id=''}
+function clearSecrets(){form.password=''}
 function when(value?:number|null){return value?new Date(value*1000).toLocaleString():'尚未收到'}
 async function refresh(quiet=false){
   if(loading.value || busy.value)return
@@ -57,7 +57,7 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);clearSecrets()}
 <template>
   <section class="quote-source" aria-labelledby="inno-title" data-testid="inno-config">
     <h3 id="inno-title">Innodealing 实时报价数据源</h3>
-    <p>沿用原行情账号、SID、Cookie 和设备标识。此处管理公共行情，与企点／QQ／微信收发通道、工作台登录密钥无关。配置和启停状态由登录用户共用，开启后关页或退出登录不停止后台采集。</p>
+    <p>填写 Innodealing 用户名和密码即可。服务端自行登录并维护会话，无需再粘贴 Cookie、SID 或设备标识。此处管理公共行情，与企点／QQ／微信收发通道、工作台登录密钥无关。配置和启停状态由登录用户共用，开启后关页或退出登录不停止后台采集。</p>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <p v-if="notice" role="status">{{ notice }}</p>
     <template v-if="state">
@@ -70,12 +70,10 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);clearSecrets()}
       <p v-if="!state.reader_configured" class="warning">行情读取尚未接入。服务端须配置 XUNJIA_QUOTE_SOURCE=qb、QB_MYSQL_* 和 XUNJIA_QUOTE_CACHE；连接测试通过不等于行情已进入工作台。</p>
       <form @submit.prevent="act('save')" autocomplete="off">
         <fieldset :disabled="busy || !!state.collector_active">
-          <label>Innodealing 账号（配置标记）<input v-model="form.account" name="inno-account" maxlength="256" autocomplete="off" /></label>
-          <label>SID<input v-model="form.sid" name="inno-sid" type="password" autocomplete="new-password" :placeholder="state.sid_set ? '已保存，留空不修改' : '可选；Cookie已包含sid时无需重复填写'" /></label>
-          <label class="wide">Cookie<input v-model="form.cookie" name="inno-cookie" type="password" autocomplete="new-password" :placeholder="state.cookie_set ? '已保存，留空不修改' : '填写Innodealing已登录会话的Cookie'" /></label>
-          <label class="wide">设备标识 device_id<input v-model="form.device_id" name="inno-device" type="password" autocomplete="new-password" :placeholder="state.device_id_set ? '已保存，留空不修改' : '填写该行情登录会话对应的设备标识'" /></label>
+          <label>Innodealing 用户名<input v-model="form.account" name="inno-account" maxlength="256" autocomplete="off" /></label>
+          <label>密码<input v-model="form.password" name="inno-password" type="password" autocomplete="new-password" :placeholder="state.password_set ? '已保存，留空不修改' : '填写 Innodealing 登录密码'" /></label>
         </fieldset>
-        <p class="hint">凭据只写入服务端受保护配置，不回显、不存入浏览器。运行中修改凭据须先停止采集；测试新凭据不会覆盖已保存配置。</p>
+        <p class="hint">用户名和密码只写入服务端受保护配置，不回显、不存入浏览器。保存时会登录并换取会话；会话失效后后台会自动重新登录。运行中修改凭据须先停止采集；测试新密码不会覆盖已保存配置。</p>
         <div class="controls">
           <button class="btn-primary" type="submit" :disabled="busy || !!state.collector_active" data-testid="inno-save">保存配置</button>
           <button class="btn-ghost" type="button" :disabled="busy" @click="act('test')" data-testid="inno-test">测试连接</button>

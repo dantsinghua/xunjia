@@ -21,14 +21,17 @@ class QuoteSourceTest(unittest.TestCase):
                 "sid": _SID,
                 "cookie": _COOKIE,
                 "device_id": _DEVICE,
+                "password": "unit-test-password",
             }, folder)
             dumped = str(saved)
             self.assertNotIn(_COOKIE, dumped)
             self.assertNotIn(_SID, dumped)
             self.assertNotIn(_DEVICE, dumped)
+            self.assertNotIn("unit-test-password", dumped)
             self.assertEqual(saved["account"], "tester")
-            self.assertTrue(saved["sid_set"] and saved["cookie_set"] and saved["device_id_set"])
-            again = save_quote({"account": "tester-2", "cookie": ""}, folder)
+            self.assertTrue(saved["sid_set"] and saved["cookie_set"] and saved["device_id_set"] and saved["password_set"])
+            again = save_quote({"account": "tester-2", "cookie": "", "password": ""}, folder)
             self.assertEqual(again["account"], "tester-2")
-            self.assertTrue(again["cookie_set"])
+            self.assertTrue(again["cookie_set"] and again["password_set"])
             self.assertEqual((folder / "cookie.txt").read_text(encoding="utf-8").strip(), _COOKIE)
+            self.assertEqual((folder / "password.txt").read_text(encoding="utf-8").strip(), "unit-test-password")

@@ -5,8 +5,8 @@ from pathlib import Path
 import tempfile
 import threading
 from typing import Any
-_FILES = {'account':'account.txt','sid':'sid.txt','cookie':'cookie.txt','device_id':'device_id.txt'}
-_SECRETS = ('sid','cookie','device_id')
+_FILES = {'account':'account.txt','sid':'sid.txt','cookie':'cookie.txt','device_id':'device_id.txt','password':'password.txt'}
+_SECRETS = ('sid','cookie','device_id','password')
 _LOCK = threading.RLock()
 def config_dir() -> Path:
     raw = os.environ.get('QB_CONFIG_DIR', '').strip()
@@ -46,14 +46,14 @@ def resolve_device_id(cookie: str, device_id: str, *, explicit: bool = True) -> 
     return device_id
 def merged(body: Any, directory: Path | None = None) -> dict[str,str]:
     if not isinstance(body,dict) or set(body)-set(_FILES):
-        raise ValueError('行情配置只接受账号、SID、Cookie和设备标识')
+        raise ValueError('行情配置只接受账号、密码、SID、Cookie和设备标识')
     result=snapshot(directory)
     for key,raw in body.items():
         if raw is None and key in _SECRETS: continue
         if not isinstance(raw,str): raise ValueError('行情配置字段必须是文本')
         if any(ord(c)<32 or ord(c)==127 for c in raw): raise ValueError('行情配置不能包含换行或控制字符')
         value=raw.strip()
-        if len(value.encode('utf-8'))>(32768 if key=='cookie' else 4096 if key=='sid' else 256):
+        if len(value.encode('utf-8'))>(32768 if key=='cookie' else 4096 if key in ('sid','password') else 256):
             raise ValueError('行情配置字段过长')
         if key not in _SECRETS or value: result[key]=value
     explicit=isinstance(body.get('device_id'),str) and bool(body['device_id'].strip())

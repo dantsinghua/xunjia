@@ -599,10 +599,10 @@ export const api = {
   startQtSource: (revision:string) => jpost<Resp<QtSourceState>>('/api/im/qt-quote/start',{expected_revision:revision}),
   stopQtSource: (revision:string) => jpost<Resp<QtSourceState>>('/api/im/qt-quote/stop',{expected_revision:revision}),
   testQtSource: (revision:string) => jpost<Resp<{ok:boolean;note:string;saved:boolean;reused?:boolean;code?:string}>>('/api/im/qt-quote/test',{expected_revision:revision}),
-  quoteSource: () => jget<{ ok: boolean; hint?: string; data: { account: string; sid_set: boolean; cookie_set: boolean; device_id_set: boolean } }>('/api/im/quote'),
-  saveQuoteSource: (body: { account: string; sid: string; cookie: string; device_id: string }) =>
+  quoteSource: () => jget<{ ok: boolean; hint?: string; data: { account: string; password_set: boolean } }>('/api/im/quote'),
+  saveQuoteSource: (body: { account: string; password: string }) =>
     requestJson('/api/im/quote', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
-  testQuoteSource: (body: { account: string; sid: string; cookie: string; device_id: string }) =>
+  testQuoteSource: (body: { account: string; password: string }) =>
     requestJson('/api/im/quote/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   imReceipt: (cmdId: string) => jget<{ ok: boolean; hint?: string; data: { cmd_id: string; status: string; ok: boolean; code: string; reason: string } }>('/api/im/receipts/' + encodeURIComponent(cmdId)),
 

@@ -9,6 +9,7 @@ import time
 from contextlib import suppress
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
+import uuid
 from server.quote_credentials import config_dir, public_view, merged, save_quote
 _REQUIRED=('QB_MYSQL_HOST','QB_MYSQL_USER','QB_MYSQL_PASSWORD','QB_MYSQL_DB')
 def _runtime_unavailable():
@@ -72,10 +73,11 @@ class _Lease:
     def release(self):
         if self.file is not None:self.file.close();self.file=None
 class QuoteControl:
-    def __init__(self,*,directory=None,reader=None,probe=None,session=None,db_check=None):
+    def __init__(self,*,directory=None,reader=None,probe=None,session=None,db_check=None,login=None):
         self.directory=Path(directory) if directory else config_dir()
         self.reader=reader
-        self._probe=probe;self._session=session;self._db_check=db_check or (lambda:check_database(getattr(getattr(self.reader,"source",None),"connection_options",None)))
+        self._probe=probe;self._session=session;self._login=login
+        self._db_check=db_check or (lambda:check_database(getattr(getattr(self.reader,"source",None),"connection_options",None)))
         self._lock=asyncio.Lock();self._task=None;self._lease=None
         self._state='stopped';self._note='采集尚未启动';self._code='QUOTE_STOPPED'
         self._stats={'quotes_received':0,'quotes_written':0,'trades_written':0,'decode_errors':0,'last_quote_at':None,'last_frame_at':None}
@@ -89,17 +91,33 @@ class QuoteControl:
     def status(self,user):
         data=public_view(self.directory)
         active=self._task is not None and not self._task.done()
-        return {**data,'configured':bool((data['cookie_set'] or data['sid_set']) and data['device_id_set']),
+        return {**data,'configured':bool(data['password_set'] or ((data['cookie_set'] or data['sid_set']) and data['device_id_set'])),
                 'managed':True,'source':'innodealing',
                 'reader_configured':self.reader is not None,'collector_state':self._state,'collector_active':active,
                 'note':self._note,'code':self._code,'stats':dict(self._stats),
                 'database':self._database,'reader':dict(self._reader_health),'last_test':self._last_probe}
     def reader_result(self,*,ok,note):
         self._reader_health={'ok':ok,'note':note,'last_poll_at':time.time()}
+    def _signin(self):
+        if self._login is not None:return self._login
+        from collector.qb_login import signin
+        return signin
+    def _refresh_login(self,values):
+        from collector.qb_login import QuoteLoginError
+        account,password=values.get('account','').strip(),values.get('password','').strip()
+        if not account or not password:raise ValueError('请先保存有效的用户名和密码')
+        try:session=self._signin()(account,password)
+        except QuoteLoginError as exc:raise ValueError(str(exc)) from exc
+        device=values.get('device_id','').strip() or uuid.uuid4().hex
+        save_quote({'account':account,'password':password,'cookie':session['cookie'],
+                    'sid':session.get('sid') or '','device_id':device},self.directory)
+        return merged({},self.directory)
     async def save(self,user,body):
         async with self._lock:
             if self._task and not self._task.done():raise ValueError('请先停止采集，再修改行情凭据；保存不会隐式启动采集')
-            save_quote(body,self.directory)
+            supplied=isinstance(body,dict) and isinstance(body.get('password'),str) and bool(body['password'].strip())
+            if supplied:self._refresh_login(merged(body,self.directory))
+            else:save_quote(body,self.directory)
             self._last_probe=None
             return self.status(user)
     async def test(self,user,body):
@@ -109,6 +127,12 @@ class QuoteControl:
                     raise ValueError('采集正在运行，请先停止再测试新的凭据')
                 return {'ok':self._state=='streaming','wss_open':self._state=='streaming','note':'已复用当前采集状态，未再建立第二条行情连接','database':self._database}
             values=merged(body,self.directory)
+            if isinstance(body,dict) and isinstance(body.get('password'),str) and body['password'].strip():
+                from collector.qb_login import QuoteLoginError
+                try:session=self._signin()(values['account'].strip(),body['password'].strip())
+                except QuoteLoginError as exc:raise ValueError(str(exc)) from exc
+                values={**values,'cookie':session['cookie'],'sid':session.get('sid') or '',
+                        'device_id':values['device_id'] or uuid.uuid4().hex}
             if self._probe:
                 result=await self._probe(values)
             else:
@@ -134,7 +158,9 @@ class QuoteControl:
         async with self._lock:
             if self._task and not self._task.done():return self.status(user)
             values=merged({},self.directory)
-            if not (values['cookie'] or values['sid']) or not values['device_id']:raise ValueError('请先保存有效的 Cookie／SID 和设备标识')
+            if (not (values['cookie'] or values['sid']) or not values['device_id']) and values['password'] and values['account']:
+                values=self._refresh_login(values)
+            if not (values['cookie'] or values['sid']) or not values['device_id']:raise ValueError('请先保存有效的用户名和密码')
             if self.reader is None:raise ValueError('行情读取未配置：须启用 XUNJIA_QUOTE_SOURCE=qb、行情数据库和 XUNJIA_QUOTE_CACHE；仅连接WebSocket不能让报价进入工作台')
             self._dictionary_resolver=None
             if os.environ.get('QB_DICTIONARY_SOURCE') or os.environ.get('QB_DICTIONARY_CONFIG'):
@@ -182,7 +208,7 @@ class QuoteControl:
         if 'state' in values:self._state=values['state']
         if self._state=='streaming':self._code='QUOTE_STREAM_OPEN';self._note='行情连接已打开；是否收到报价请查看实际入库计数'
     async def _supervise(self,values):
-        attempt=0
+        attempt=0;logins=0
         try:
             while True:
                 try:
@@ -202,10 +228,25 @@ class QuoteControl:
                     import httpx
                     denied=isinstance(exc,httpx.HTTPStatusError) and exc.response.status_code in (401,403)
                     rejected=denied or type(exc).__name__=='QuoteAuthenticationError'
-                    self._code='QUOTE_AUTH_REJECTED' if rejected else 'QUOTE_CONNECTION_FAILED'
-                    self._note='行情认证失效，请更新Cookie／SID和设备标识后重试' if rejected else '行情连接或入库中断，正在有界退避重连；错误详情不含凭据'
-                    self._state='auth_failed' if rejected else 'retrying'
-                    if rejected:return
+                    if rejected:
+                        fresh=merged({},self.directory)
+                        if logins<3 and fresh.get('password') and fresh.get('account'):
+                            try:
+                                logins+=1
+                                self._state='connecting';self._note='行情认证失效，正在重新登录'
+                                values=await asyncio.to_thread(self._refresh_login,fresh)
+                                if os.environ.get('QB_DICTIONARY_SOURCE') or os.environ.get('QB_DICTIONARY_CONFIG'):
+                                    from collector.bond_dictionary import resolver_from_env
+                                    from collector.qb_gateway import merge_sid
+                                    self._dictionary_resolver=resolver_from_env(merge_sid(values['cookie'],values['sid']),values['device_id'])
+                                continue
+                            except Exception:
+                                pass
+                        self._code='QUOTE_AUTH_REJECTED';self._note='行情认证失效，请检查用户名和密码后重试'
+                        self._state='auth_failed';return
+                    self._code='QUOTE_CONNECTION_FAILED'
+                    self._note='行情连接或入库中断，正在有界退避重连；错误详情不含凭据'
+                    self._state='retrying'
                     attempt+=1
                     await asyncio.sleep((5,10,30,60)[min(attempt-1,3)])
         finally:

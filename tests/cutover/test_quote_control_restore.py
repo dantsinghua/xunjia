@@ -8,7 +8,7 @@ from server.quote_credentials import save_quote,snapshot
 from server.auth import AuthConfig,AuthUser
 from server.app import create_app
 from server.quote_control import QuoteControl,check_database
-CREDS={'account':'synthetic-market','cookie':'sid=synthetic-cookie','sid':'synthetic-sid','device_id':'synthetic-device'}
+CREDS={'account':'synthetic-market','cookie':'sid=synthetic-cookie','sid':'synthetic-sid','device_id':'synthetic-device','password':''}
 @pytest.fixture
 def setup(tmp_path):
     seen={'probe':0,'session':0,'closed':0}
