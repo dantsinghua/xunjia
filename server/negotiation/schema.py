@@ -51,7 +51,7 @@ def statements(mysql: bool = False) -> list[str]:
         text {text} NOT NULL, native_id VARCHAR(160), target_id VARCHAR(64),
         occurred_at DOUBLE NOT NULL, received_at DOUBLE NOT NULL,
         trade_day VARCHAR(10) NOT NULL,
-        historical INTEGER NOT NULL, UNIQUE(thread_id,event_id),
+        historical INTEGER NOT NULL, reply_json {text}, UNIQUE(thread_id,event_id),
         UNIQUE(thread_id,ingest_revision))""",
         """CREATE TABLE IF NOT EXISTS xj2_scope (
         message_id VARCHAR(64) NOT NULL, member_id VARCHAR(64) NOT NULL,

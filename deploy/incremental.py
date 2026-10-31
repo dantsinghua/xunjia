@@ -1,4 +1,4 @@
-"""Offline incremental capsule. Reuses verified assets; never executes database DDL.
+"""Offline incremental capsule. Reuses verified assets and bounded migration plans.
 
 The builder fills CAPSULE/PAYLOAD. Default mode prepares and checks, --apply
 switches the dedicated Xunjia release and mounts /xunjia/ transactionally.
@@ -151,27 +151,133 @@ def materialize(base, destination=None):
         os.rename(stage, target)
     return target
 
-def discover_base():
-    roots = [Path.cwd(), Path(__file__).absolute().parent]
-    for parent in (Path('/home'), Path('/root')):
-        for pattern in ('*new-20261026/xunjia-agent-batch1-*', '*new-20261026/update-ready',
-                        'xunjia-agent-batch1-*', 'xunjia*/xunjia-agent-batch1-*', 'xunjia*/update-ready'):
-            roots.extend(parent.glob(pattern))
+DISCOVERY_ROOTS = (Path('/home'), Path('/root'))
+
+
+def bundle_candidates(prefix=Path('/home/xunjia')):
+    """Bounded, read-only discovery; remembered locations are hints, never proof."""
+    prefix = Path(prefix).absolute()
+    found = {}
+    def add(value):
+        if not isinstance(value, (str, Path)) or not str(value):
+            return
+        try:
+            path = Path(value).expanduser().absolute()
+            if path.resolve() == path and path.is_dir():
+                found.setdefault(str(path), path)
+        except (OSError, ValueError, RuntimeError):
+            pass
+    add(os.environ.get('XUNJIA_UPGRADE_BASE_HINT', ''))
+    try:
+        config = prefix / 'config/upgrade-channel.json'
+        if not config.is_symlink() and config.is_file() and config.stat().st_size <= 32768:
+            value = json.loads(config.read_text())
+            if isinstance(value, dict):add(value.get('base_bundle'))
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        import sqlite3
+        journal = prefix / 'state/upgrade/upgrades.db'
+        if journal.resolve() == journal and journal.is_file():
+            with contextlib.closing(sqlite3.connect(journal.as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
+                row = db.execute("SELECT value FROM setting WHERE key='base_bundle'").fetchone()
+                if row and len(row[0]) <= 8192:add(json.loads(row[0]))
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        pass
+    add(Path.cwd())
+    add(Path(__file__).absolute().parent)
+    cache = prefix / 'state/upgrade/bundles'
+    add(cache)
+    try:
+        if cache.resolve() == cache and cache.is_dir():
+            for child in sorted(cache.iterdir())[:512]:add(child)
+    except OSError:
+        pass
+    visited = 0
+    def product_directory(name):
+        name = name.lower()
+        return name.startswith(('xunjia', 'xj-', 'xjbridge')) or name in ('loginfix', 'update-ready', 'unpack', 'verified', 'remote')
+    def scan(parent, depth):
+        nonlocal visited
+        if depth < 0 or visited >= 2048:
+            return
+        try:
+            if parent.resolve() != parent or not parent.is_dir():return
+            children = sorted(parent.iterdir())[:512]
+        except (OSError, RuntimeError):
+            return
+        for child in children:
+            visited += 1
+            if visited > 2048:return
+            if not product_directory(child.name):continue
+            add(child)
+            # A bundle's contents are verified later, not recursively searched.
+            if not (child / 'SHA256SUMS.txt').is_file():scan(child, depth - 1)
+    for parent in DISCOVERY_ROOTS:scan(Path(parent).absolute(), 3)
+    return list(found.values())
+
+
+def installed_build(prefix):
+    try:
+        current = json.loads((Path(prefix) / 'app/VERSION.json').read_text()).get('build_id')
+    except (OSError, ValueError, AttributeError):
+        raise IncrementalError('INSTALLED_BUILD_UNPROVEN') from None
+    if not isinstance(current, str) or not current:
+        raise IncrementalError('INSTALLED_BUILD_UNPROVEN')
+    if current not in set(CAPSULE['baselines'].values()) | {CAPSULE['build_id']}:
+        raise IncrementalError('INSTALLED_BUILD_NOT_SUPPORTED')
+    return current
+
+
+def discover_base(prefix=Path('/home/xunjia')):
+    current = installed_build(prefix)
     matches = []
-    for root in dict.fromkeys(roots):
-        if not (root / 'SHA256SUMS.txt').is_file():
-            continue
+    for root in bundle_candidates(prefix):
         try:
             sha = digest(root / 'SHA256SUMS.txt')
-            if sha in CAPSULE['baselines']:
-                matches.append(root.absolute())
+            build = CAPSULE['baselines'].get(sha)
+            if build is not None:matches.append((build != current, str(root), root))
         except OSError:
             continue
-    if len(matches) != 1:
-        raise IncrementalError('EXACT_BASE_NOT_UNIQUE_USE_BUNDLE')
-    return matches[0]
+    # Every supported base has an authenticated manifest and the capsule carries
+    # all differences needed to reconstruct exactly the same target. Prefer the
+    # running version, then use another verified supported base when necessary.
+    for _, _, root in sorted(matches):
+        try:
+            return supported_base(root)
+        except (IncrementalError, OSError, ValueError):
+            continue
+    raise IncrementalError('NO_INTACT_SUPPORTED_BASE_BUNDLE')
 
-def deploy(bundle, prefix, *, apply=False, manager_factory=None, mount_function=None, nginx_config=None):
+
+def prepare_automatic(prefix):
+    """Keep the next exact baseline in a stable managed cache, not next to a ZIP."""
+    prefix = Path(prefix).absolute()
+    if prefix.resolve() != prefix or len(prefix.parts) < 3:
+        raise IncrementalError('UNSAFE_PREFIX')
+    current = installed_build(prefix)
+    if current == CAPSULE['build_id']:
+        for candidate in bundle_candidates(prefix):
+            try:
+                verify_tree(candidate, CAPSULE['build_id'], CAPSULE['manifest_sha256'])
+                return candidate
+            except (IncrementalError, OSError, ValueError):
+                continue
+    base = discover_base(prefix)
+    cache = prefix / 'state/upgrade/bundles'
+    if cache.resolve() != cache:
+        raise IncrementalError('UNSAFE_TARGET_PATH')
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return materialize(base, cache / ('xunjia-update-' + CAPSULE['build_id'][:16]))
+
+def verify_installed_files(prefix, build):
+    import common
+    expected = CAPSULE.get('installed_files', {}).get(build)
+    if not expected or common.snapshot_payload(Path(prefix) / 'app') != expected:
+        raise IncrementalError('INSTALLED_FILES_DO_NOT_MATCH_REVIEWED_BASELINE')
+
+def deploy(bundle, prefix, *, apply=False, manager_factory=None, mount_function=None, nginx_config=None,
+           database_function=None, qa_history_function=None):
     meta = checked_capsule()
     verify_tree(bundle, meta['build_id'], meta['manifest_sha256'])
     sys.dont_write_bytecode = True
@@ -189,14 +295,32 @@ def deploy(bundle, prefix, *, apply=False, manager_factory=None, mount_function=
     current_build = json.loads(installed.read_text())['build_id']
     if current_build not in set(meta['baselines'].values()) | {meta['build_id']}:
         raise IncrementalError('INSTALLED_BUILD_NOT_SUPPORTED')
+    automatic = meta.get('automatic_reply_migration', False)
+    qa_history = meta.get('automatic_qa_history_migration', False)
+    if automatic or qa_history:
+        verify_installed_files(prefix, current_build)
     factory = manager_factory or manager.Manager
     ctl = factory(Path(bundle), prefix)
     plan = ctl.preflight()
+    if automatic or qa_history:
+        current = ctl.current()
+        if current is None or ctl.validate_release(current).get('build_id') != current_build:
+            raise IncrementalError('INSTALLED_RELEASE_METADATA_MISMATCH')
+        ctl.verify_installed(liveness=True)
     config_root = Path('/etc/nginx') if nginx_config is None else Path(nginx_config)
     mount_xunjia.plan(config_root, Path(bundle) / 'deploy')
     before = common.config_fingerprint(cfg)
     report = {'build_id': meta['build_id'], 'preflight': plan, 'database_ddl_executed': False,
-              'config_preserved': True, 'dify_publish_required': True, 'external_live_acceptance': 'NOT_PERFORMED'}
+              'config_preserved': True, 'dify_publish_required': True, 'external_live_acceptance': 'NOT_PERFORMED',
+              'optional_database_migrations': meta.get('optional_database_migrations', [])}
+    if automatic:
+        from incremental_database import run as migrate_database
+        database_function = database_function or migrate_database
+        report['database'] = database_function(prefix, apply=False)
+    if qa_history:
+        from qa_history_migration import run as migrate_qa_history
+        qa_history_function = qa_history_function or migrate_qa_history
+        report['qa_history'] = qa_history_function(prefix, apply=False)
     if not apply:
         return {**report, 'status': 'CHECK_PASSED_NO_SERVICE_CHANGES'}
     if not ctl.service.active():
@@ -214,10 +338,60 @@ def deploy(bundle, prefix, *, apply=False, manager_factory=None, mount_function=
             raise IncrementalError('INSTALLED_RELEASE_CHANGED_DURING_CHECK')
         result = None
         try:
+            if automatic:
+                with ctl.lock():
+                    ctl.ensure_idle()
+                    verify_installed_files(prefix, current_build)
+                    if common.config_fingerprint(cfg) != before:
+                        raise IncrementalError('CONFIG_CHANGED_DURING_CHECK')
+                    ctl.service.validate()
+                    if not ctl.service.active():
+                        raise IncrementalError('SERVICE_CHANGED_BEFORE_MIGRATION')
+                    needs_ddl = database_function(prefix, apply=False)['status'] == 'MIGRATION_REQUIRED'
+                    try:
+                        if needs_ddl:
+                            ctl.service.stop()
+                            if ctl.service.active():
+                                raise IncrementalError('SERVICE_NOT_STOPPED_FOR_MIGRATION')
+                        report['database'] = database_function(prefix, apply=True)
+                        report['database_ddl_executed'] = report['database']['ddl_executed']
+                    finally:
+                        if needs_ddl:
+                            ctl.service.start()
             if current_build == meta['build_id']:
+                if qa_history and report['qa_history']['status']!='ALREADY_APPLIED':
+                    with ctl.lock():
+                        ctl.ensure_idle()
+                        ctl.service.stop()
+                        try:
+                            if ctl.service.active():raise IncrementalError('SERVICE_NOT_STOPPED_FOR_QA_MIGRATION')
+                            report['qa_history'] = qa_history_function(prefix, apply=True)
+                            report['database_ddl_executed'] |= report['qa_history']['ddl_executed']
+                        finally:ctl.service.start()
                 ctl.verify_installed()
             else:
-                result = ctl.install()
+                if qa_history:
+                    # Manager owns stop/switch/recovery. Run the migration at its
+                    # actual stop boundary so the old SQLite writer cannot run
+                    # again between the copy and the current-pointer switch.
+                    stop = ctl.service.stop
+                    attempted = False
+                    def migrate_after_stop():
+                        nonlocal attempted
+                        stop()
+                        if attempted:return
+                        attempted = True
+                        if ctl.service.active():raise IncrementalError('SERVICE_NOT_STOPPED_FOR_QA_MIGRATION')
+                        if common.config_fingerprint(cfg)!=before:raise IncrementalError('CONFIG_CHANGED_BEFORE_QA_MIGRATION')
+                        report['qa_history'] = qa_history_function(prefix, apply=True)
+                        report['database_ddl_executed'] |= report['qa_history']['ddl_executed']
+                    ctl.service.stop = migrate_after_stop
+                    try:
+                        result = ctl.install()
+                        if not attempted:raise IncrementalError('QA_HISTORY_MIGRATION_STOP_BOUNDARY_NOT_REACHED')
+                    finally:ctl.service.stop = stop
+                else:
+                    result = ctl.install()
             if common.config_fingerprint(cfg) != before:
                 raise IncrementalError('CONFIG_CHANGED_DURING_UPGRADE')
             if mount_function is not None:
@@ -256,12 +430,36 @@ def main():
         raise IncrementalError('CONFLICTING_OPTIONS')
     if args.apply and os.geteuid() != 0:
         raise IncrementalError('ROOT_REQUIRED_FOR_APPLY')
-    base = args.bundle if args.bundle is not None else discover_base()
-    target = materialize(base)
+    target = materialize(args.bundle) if args.bundle is not None else prepare_automatic(args.prefix)
     if args.prepare_only:
         result = {'status': 'PREPARED_NO_SERVICE_CHANGES', 'bundle': str(target), 'build_id': CAPSULE['build_id']}
     else:
-        result = deploy(target, args.prefix, apply=args.apply)
+        legacy_stage = None
+        job_id = Path(__file__).absolute().parent.name
+        expected_stage = Path(args.prefix) / 'state/upgrade/jobs' / job_id
+        if (args.apply and re.fullmatch('[0-9a-f]{32}',job_id) and Path(__file__).absolute().parent == expected_stage
+                and (target/'deploy/upgrade_log_return.py').is_file()):
+            sys.path[:0] = [str(target/'app'),str(target/'deploy')]
+            try:
+                from upgrade_log_return import arm as arm_log_return
+                arm_log_return(args.prefix,target,job_id)
+            except Exception:pass  # Diagnostic delivery cannot stop a business upgrade.
+        if (args.apply and not os.environ.get('XUNJIA_UPGRADE_JOB_ID') and re.fullmatch('[0-9a-f]{32}',job_id)
+                and Path(__file__).absolute().parent == expected_stage):
+            sys.path[:0] = [str(target/'app'),str(target/'deploy')]
+            from upgrade_monitor import arm
+            legacy_stage = arm(args.prefix,target,job_id)
+            os.environ['XUNJIA_UPGRADE_JOB_ID'] = job_id
+        try:
+            result = deploy(target, args.prefix, apply=args.apply)
+        except BaseException:
+            if legacy_stage is not None:
+                import common
+                common.atomic_json(legacy_stage/'capsule-result.json',{'success':False})
+            raise
+        if legacy_stage is not None:
+            import common
+            common.atomic_json(legacy_stage/'capsule-result.json',{'success':True,'build_id':CAPSULE['build_id']})
         result['bundle'] = str(target)
     print(json.dumps(result, ensure_ascii=True))
 
@@ -269,6 +467,7 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        code = str(exc) if re.fullmatch('[A-Z_]+', str(exc)) else 'INCREMENTAL_FAILED_' + type(exc).__name__
+        raw_code = getattr(exc, 'code', str(exc))
+        code = raw_code if isinstance(raw_code, str) and re.fullmatch('[A-Z_]+', raw_code) else 'INCREMENTAL_FAILED_' + type(exc).__name__
         print(code, file=sys.stderr)
         raise SystemExit(2)

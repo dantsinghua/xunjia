@@ -5,6 +5,7 @@ import math
 import re
 
 from fastapi import APIRouter, Body, HTTPException, Request
+from .qa_workflow import QAWorkflow, WorkflowError, TOOL_PATH
 
 
 HELP = '暂不支持此问题。可使用：查券 简称或代码、报价 完整代码、我的在谈概要。成交趋势、自由统计及操作指令尚未接入。'
@@ -24,11 +25,117 @@ def _number(value):
         return None
 
 
-def qa_router(service, market, tools):
+def qa_router(service, market, tools, workflow=None):
     router = APIRouter(prefix='/api')
+    workflow = workflow or QAWorkflow(market)
+    from .qa_history import QAHistory, OceanBaseHistory
+    database=getattr(getattr(service,'store',None),'db',None)
+    state=workflow.path.parent.parent/'state' if getattr(workflow,'path',None) is not None else None
+    if database is not None and database.mysql:
+        history=OceanBaseHistory(database,receipt_source=state/'qa-workflow.sqlite3' if state else None)
+    else:
+        history=QAHistory(state/'qa-history.db') if state else None
+
+    def logged_in(request):
+        user = getattr(request.state, 'user', None)
+        if user is None:raise HTTPException(401, '请先登录')
+        return user.user_id
+
+    @router.get('/qa/workflow')
+    def workflow_status(request: Request):
+        logged_in(request)
+        return {'ok': True, 'data': workflow.status()}
+
+    @router.put('/qa/workflow')
+    def workflow_config(request: Request, body: dict = Body(default_factory=dict)):
+        logged_in(request)
+        try:return {'ok': True, 'data': workflow.save(body)}
+        except (ValueError, WorkflowError) as exc:raise HTTPException(400, str(exc)) from None
+
+    @router.get('/qa/workflow/dsl')
+    def workflow_dsl(request: Request):
+        logged_in(request)
+        from pathlib import Path
+        from fastapi.responses import FileResponse
+        path=Path(__file__).resolve().parents[1]/'dify/qa_workflow/workflow.yml'
+        if not path.is_file() or path.is_symlink():raise HTTPException(404,'工作流文件尚未随版本安装')
+        return FileResponse(path,media_type='application/yaml',filename='xunjia-qa-workflow.yml')
+
+    # The extra /query segment avoids the existing A/B /agent/tools/{name}
+    # catch-all. Middleware permits this path; capability validation is mandatory.
+    @router.post(TOOL_PATH.removeprefix('/api'))
+    def workflow_market(request: Request, body: dict = Body(default_factory=dict)):
+        authorization = request.headers.get('Authorization', '')
+        if not authorization.startswith('Bearer '):raise HTTPException(403, '只读查询凭证缺失')
+        try:return workflow.read_market(authorization[7:], body)
+        except WorkflowError as exc:
+            if str(exc) in ('QA_MARKET_UNAVAILABLE', 'QA_QUOTE_CAPACITY_EXCEEDED'):
+                raise HTTPException(503, '当日行情明细不可用或超过查询容量；未生成报价') from None
+            raise HTTPException(403, '只读查询凭证无效、已过期或查询额度已用完') from None
+        except ValueError as exc:raise HTTPException(400, str(exc)) from None
 
     @router.post('/qa')
     def answer(request: Request, body: dict = Body(default_factory=dict)):
+        owner = logged_in(request)
+        if set(body)-{'question','session_id','request_id'} or not isinstance(body.get('question'), str) or not 1 <= len(body['question'].strip()) <= 200:
+            raise HTTPException(400, '仅支持1至200字的question，不接受身份或查询参数')
+        sid=body.get('session_id');rid=body.get('request_id')
+        if sid is None and rid is None:return perform_answer(request,{'question':body['question']})
+        if history is None:raise HTTPException(503,'会话存储尚未配置')
+        if not isinstance(sid,str) or not isinstance(rid,str):raise HTTPException(400,'会话和请求标识必须同时提供')
+        try:tid,saved=history.claim(owner,sid,rid,body['question'].strip())
+        except LookupError:raise HTTPException(404,'会话不存在') from None
+        except BlockingIOError as exc:raise HTTPException(409,str(exc)) from None
+        if saved is not None:return {'ok':True,'data':saved}
+        try:
+            result=perform_answer(request,{'question':body['question']})
+            result['data']['session_id']=sid
+            history.finish(owner,tid,result['data'])
+            return result
+        except Exception:
+            history.finish(owner,tid)
+            raise
+
+    @router.get('/qa/sessions')
+    def sessions(request:Request,before:str=''):
+        owner=logged_in(request)
+        if history is None:raise HTTPException(503,'会话存储尚未配置')
+        notice=''
+        try:history.restore_receipts(owner,workflow)
+        except Exception:notice='部分旧查询回执暂未恢复；已保存的新会话仍可读取。'
+        try:return {'ok':True,'data':{**history.list(owner,before or None),'notice':notice}}
+        except LookupError:raise HTTPException(404,'会话游标不存在') from None
+
+    @router.post('/qa/sessions')
+    def new_session(request:Request,body:dict=Body(default_factory=dict)):
+        owner=logged_in(request)
+        if body:raise HTTPException(400,'新会话不接受身份参数')
+        if history is None:raise HTTPException(503,'会话存储尚未配置')
+        return {'ok':True,'data':history.create(owner)}
+
+    @router.get('/qa/sessions/{session_id}')
+    def session_detail(request:Request,session_id:str):
+        owner=logged_in(request)
+        if history is None:raise HTTPException(503,'会话存储尚未配置')
+        try:return {'ok':True,'data':history.read(owner,session_id)}
+        except LookupError:raise HTTPException(404,'会话不存在') from None
+
+    def perform_answer(request,body):
+        owner=logged_in(request)
+        state = workflow.status()
+        if body['question'].strip() in ('我的在谈概要', '本人在谈概要'):
+            result = legacy_answer(request, body)
+            result['data'].update(workflow_enabled=state['enabled'], notice='本人会话摘要由应用账本直接提供。' if state['enabled'] else state['hint'])
+            return result
+        if state['enabled']:
+            try:return {'ok': True, 'data': workflow.answer(owner, body['question'].strip())}
+            except WorkflowError as exc:
+                raise HTTPException(502, '智能问答工作流未完成：' + str(exc) + '。未生成报价或发送询价。') from None
+        result = legacy_answer(request, body)
+        result['data'].update(workflow_enabled=False, notice=state['hint'])
+        return result
+
+    def legacy_answer(request: Request, body: dict):
         user = getattr(request.state, 'user', None)
         if user is None:
             raise HTTPException(401, '请先登录')

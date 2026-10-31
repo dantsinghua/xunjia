@@ -123,3 +123,25 @@ CREATE TABLE IF NOT EXISTS 不是旧表迁移，数据库升级另行审查。
 `XUNJIA_SEAL_KEY`、`XUNJIA_SIGN_KEY`、`XUNJIA_MQ_ALLOW_HTTP`，以及连接中的 `allow_http` 字段。
 旧采集启用开关和手工文件路径均已退役，不用于启用现役宿主或明文HTTP；正式 runtime 仍只读取共享配置文件，不继承外部 shell 的临时 `XUNJIA_*` 值。
 
+
+
+## 2026-10-29：保留数据的引用回复升级
+
+`reply_json` 是 R6-117 新增的可空列，不改变其它表、索引和原有消息。
+制作跨版本增量包时，构建器默认仍拒绝任何 schema 改动；仅在明确使用
+`--allow-optional-reply-migration` 且新旧 schema/生成器差异恰好为该列、
+004 仅包含规定的 ADD COLUMN 语句时允许出包。该开关不执行数据库操作。
+
+现场增量 `upgrade.py --check` 与 `--apply` 会列出 `optional_database_migrations`。
+升级脚本保留现有数据库、配置、游标及 UNKNOWN 账本，不自动执行 DDL，
+更不能改用 `fresh-install --apply`，后者是有意清库的全新安装入口。
+
+启用引用回复持久化前，由 DBA 在核实的询价业务库中先保存备份和
+`SHOW CREATE TABLE xj2_message`，再查询 `INFORMATION_SCHEMA.COLUMNS`。
+仅当 `reply_json` 不存在时执行 `sql/oceanbase/004_message_reply.sql`；
+核对其类型为 LONGTEXT、允许 NULL。列已存在且正确时不重复执行。
+旧 SQLite 测试库对应 `ALTER TABLE xj2_message ADD COLUMN reply_json TEXT;`。
+补列后需重启专用询价服务，使进程刷新列存在性缓存；可将此动作安排在本次升级重启之前。
+不补列时原有消息继续处理，但不保存新的引用上下文，健康接口带
+`OPTIONAL_COLUMN_MISSING:xj2_message.reply_json` 警告，不能宣称该功能已经完整启用。
+引用报价不是对手当轮新报价，不得将引用原文直接升级为新价格/数量授权。

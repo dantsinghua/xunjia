@@ -231,6 +231,7 @@ def test_unbound_user_reuses_server_auth_for_mtls_setup_discovery_selection_and_
         # Backend save/test remain pending-only, covered independently.
 
         expect(page.get_by_test_id('collector-workbench').locator('option')).to_have_count(3)
+        page.locator('#settings-nav-account').click()
         page.get_by_test_id('collector-workbench').select_option('wb-b')
         page.get_by_test_id('collector-account').select_option('account-c')
         page.get_by_test_id('collector-connect').click()

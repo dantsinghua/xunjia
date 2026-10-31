@@ -184,3 +184,25 @@ def test_broker_snapshot_filters_before_page_and_fails_explicitly_at_capacity(ma
     source.MAX_BROKER_BOOK = 102
     with pytest.raises(ValueError, match='容量'):
         service.page('a', filter_spec=spec)
+
+
+@pytest.mark.parametrize('selected_count',[1,20001])
+def test_broker_book_above_twenty_thousand_keeps_bounded_pages(market_sql,selected_count):
+    import datetime as dt
+    from server.qb_source import QBSource
+    service,source,*_=market_sql
+    source.source=QBSource()
+    now=dt.datetime(2026,10,30,10)
+    for i in range(1,20002):
+        source.source.dict[i]=(f'{i:06}.IB','经纪券'+str(i))
+        broker=2 if i<=selected_count else 3
+        source.source.book[i]={broker:dict(broker_id=broker,update_time=now,bid_quote_type=3,
+            ofr_quote_type=3,bid_yield=2.2,ofr_yield=2.1,bid_vol=100,ofr_vol=200,
+            bid_pending=0,ofr_pending=0,seq_ns=i)}
+    spec={'channel':'broker','broker':'2'}
+    first=service.page('a',filter_spec=spec,limit=50)
+    assert first['total']==selected_count and len(first['data'])==min(selected_count,50)
+    if selected_count>50:
+        second=service.page('a',filter_spec=spec,limit=50,before=first['nextBefore'],before_uni=first['nextUni'])
+        assert len(second['data'])==50
+        assert not {r['code'] for r in first['data']} & {r['code'] for r in second['data']}

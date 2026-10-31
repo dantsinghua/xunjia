@@ -123,10 +123,13 @@ def test_sql_status_filter_is_derived_only_from_authenticated_owners_sessions(sq
     own = client.get("/api/bonds", headers=headers(tokens["a"]), params={"filter": pending}).json()
     foreign = client.get("/api/bonds", headers=headers(tokens["b"]), params={"filter": pending, "user_id": "a"}).json()
     assert own["total"] == 1 and [row["code"] for row in own["data"]] == ["000001.IB"]
-    assert own["data"][0]["ib"] is None
+    assert own["data"][0]["ib"] == '2.40'
+    assert own["data"][0]["ibv"] == '1000'
+    assert own["data"][0]["io"] is None and own["data"][0]["iov"] is None
     assert foreign["total"] == 0 and foreign["data"] == []
     unfiltered = client.get("/api/bonds", headers=headers(tokens["b"])).json()
     assert {row["status"] for row in unfiltered["data"]} == {"待询价"}
+    assert all(row['ib'] is None and row['ibv'] is None for row in unfiltered['data'])
 
 
 def test_readonly_question_uses_real_market_values_and_omits_missing_chart_points(market_http):

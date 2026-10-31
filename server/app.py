@@ -68,14 +68,10 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     client=chatflows or chat_client
     if client is not None and not all(callable(getattr(client,k,None)) for k in ('analyze','decide')):
         raise ValueError('V2.2 requires analysis/reply Chatflows, not the legacy AgentTurn client')
-    if client is None and os.environ.get('XUNJIA_DIFY_URL'):
-        a=os.environ.get('XUNJIA_DIFY_ANALYSIS_APP_KEY');b=os.environ.get('XUNJIA_DIFY_REPLY_APP_KEY')
-        if bool(a)!=bool(b):raise ValueError('解析和回复两个已发布 Chatflow 的 App API Key 必须同时配置')
-        if a and b:
-            from .negotiation.chatflow import Chatflows,ChatflowClient
-            timeout=float(os.environ.get('XUNJIA_DIFY_TIMEOUT_SECONDS','90'))
-            client=Chatflows(ChatflowClient(os.environ['XUNJIA_DIFY_URL'],a,stage='analysis',timeout=timeout),
-                            ChatflowClient(os.environ['XUNJIA_DIFY_URL'],b,stage='reply',timeout=timeout))
+    from .dify_settings import DifySettings,ConfiguredChatflows,dify_settings_router
+    dify_settings=DifySettings()
+    if client is None and (dify_settings.path is not None or os.environ.get('XUNJIA_DIFY_URL')):
+        client=ConfiguredChatflows(dify_settings)
     institution=None
     if institution_config:
         from .transports import TransportRouter
@@ -96,6 +92,11 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     inbox=Inbox(service,transport)
     dispatcher=Dispatcher(service,transport)
     hub=QuoteHub();runtime={'engine':'v22','workers':{},'background_errors':{},'analysis_enabled':client is not None and aggregation is not None,'send_enabled':bool(enabled and transport is not None)}
+    def refresh_dify_readiness():
+        runtime['analysis_enabled']=bool(client is not None and getattr(client,'configured',True) and aggregation is not None)
+    refresh_dify_readiness()
+    from .upgrade_control import UpgradeControl,upgrade_router
+    upgrade=UpgradeControl()
     from .channel_readiness import ChannelAdmission
     admission=ChannelAdmission(service,institution,transport,enabled,runtime)
     service.submit_guard=admission if submission_guard is None else submission_guard
@@ -141,6 +142,10 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
             if enabled and not auth.configured:raise ValueError('后台处理启动前必须配置本系统登录密钥')
             if institution and enabled:await asyncio.to_thread(institution.start)
             if enabled:
+                try:await asyncio.to_thread(upgrade.resume)
+                except Exception as exc:service.diagnostics.record('upgrade_recovery',code='UPGRADE_RECOVERY_START_FAILED',error=exc)
+                tasks.append(asyncio.create_task(repeated('download_retention',upgrade.maintain,3600)))
+                tasks.append(asyncio.create_task(repeated('upgrade_schedule',upgrade.tick,30)))
                 if transport:
                     tasks.append(asyncio.create_task(repeated('inbox',inbox.poll_once,.5)))
                 # Expiry needs no transport; reconciliation continues while sending is paused.
@@ -176,6 +181,9 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     app.state.business_engine='v22';app.state.rollover_once=rollover_once
     app.state.quote_control=quote_control
     app.state.qt_control=qt_control
+    app.state.upgrade_control=upgrade
+    app.include_router(upgrade_router(upgrade))
+    app.include_router(dify_settings_router(dify_settings,refresh_dify_readiness))
     app.include_router(qt_router(qt_control))
     from .institution_settings import connection_settings_router
     from .institution_runtime import InstitutionSettings
@@ -217,7 +225,8 @@ def create_app(*,database_url=None,auth_config=None,enable_background=None,trans
     def report():
         result=health_report(store,auth,identity,enabled=enabled,transport=transport,chat=client)
         blockers=[]
-        if client is None:blockers.append('DIFY_V22_CHATFLOWS_NOT_CONFIGURED')
+        if client is None or not getattr(client,'configured',True):blockers.append('DIFY_V22_CHATFLOWS_NOT_CONFIGURED')
+        runtime['analysis_enabled']=bool(client is not None and getattr(client,'configured',True) and aggregation is not None)
         if aggregation is None:blockers.append('AGGREGATION_MEASUREMENT_REQUIRED')
         result.update(engine='v22',analysis_ready=not blockers,analysis_blockers=blockers,
                       context_messages=store.settings.context_messages,calendar_configured=calendar is not None,

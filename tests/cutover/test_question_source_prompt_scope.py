@@ -6,6 +6,7 @@ import pytest
 
 from test_direct_calculation_route_revision import context as full_context
 from test_prompt_modes import generated as generated_mode
+from test_qidian_reply_projection_r6117 import A_RULE, B_RULE
 import hashlib
 
 # External oracle: the approved one-call research instruction, not the implementation constant.
@@ -13,7 +14,7 @@ CLAUSE = '\nQUESTION选完候选后再自检一次：side、price所选原文及
 
 
 # Small external byte oracles produced from frozen candidate34, not old implementation code.
-ROLE_ORACLES = {'ordinary_A': {'system': 'fdacd7ba2af56ffa6a7cf6c39df1236ae93d78715f4ddafec00adfa5a00d1064', 'context': '4bc67952992020ee557347154bae1503a17e51f0221d6619132402e608eb32a5', 'user': 'ae9e0298f9bb0aedd05c17c7a6be028c68a40575f167244bc98f4bbea46e3974'}, 'ACK': {'system': '8fb9cdc994c22f86969247fa2ce035028281e8539391ed4a1c2d8b2f557f859b', 'context': '3c97960d911b4d1df4a07489c05b060cfda32b925b05a68851261fba711ec0eb', 'user': '6d3ba842ea1fdffbaa8abd479e8eef735ce527915edd1dcb97fe835abe81531f'}, 'directcalc': {'system': '4d690e44eb4b1ebbc79339eb83e80759e96133f3834695ffd7ed23d0a4ed300e', 'context': '3a9d3dbd9bebae4283488b3be8fc42b7ab3673660cc1c05b114892b9e242c132', 'user': 'e49022c79a8d6c51cbb40f263ab06884082b3a45ab4b920b89b0ec58f4a66934'}, 'A_repair': {'system': '84101f3bf2174640c74ee6e01107f3b9841ffa0fa68b66c62fc4ee73f39de087', 'context': 'a12b225d16a8759573f543fa7384d89c52d9409491c44b5a80f26b4ce5550148', 'user': '8e9f047414b408cd8dbd202e4bde0ea682dd2a036f1d754a0df6d3e7aa2bdaa4'}, 'ordinary_B': {'system': '5e399d03c74ab820efb104b5d8dbfcc681937ec84ae708445aa9720c278ad100', 'context': '47fef44f93a32320e0110b8c3d5e99815dbaaa752bfafd5669f81d763df10a89', 'user': '0f35463839e4338407bcb7d5ec7b0faf27ce79d7df9755b125e5d4ebbfc382f8'}, 'B_OUTPUT': {'system': '93f5bd55abf1ed410bc5b85be78a46826e97412b0dee77b91fe0a4ee4abd5be4', 'context': 'bc436e57250bee81ab4e85f69d9167d7d819ffb1aa80bc88788b771bfa739353', 'user': '172e77c6fc01fca555dde6f8a462b97197335eb4a6a797b62a41ba3258bebc55'}, 'B_TEXT': {'system': 'f1cac1b2fd3484ec1785c0e0bc6baf38e9926f179fb5b87dad7571cd856a5dd6', 'context': '5915c9fc15dad51ae1affaf5c686b5b15c50c3be42702ff65dff556fcb4ee6b7', 'user': 'ecc888cff2a4b1ceacae52faf268fe196d51a6c9ee6d1242ff1c6a4dbd1cadf4'}}
+ROLE_ORACLES = {'ordinary_A': {'system': 'fdacd7ba2af56ffa6a7cf6c39df1236ae93d78715f4ddafec00adfa5a00d1064', 'context': '4bc67952992020ee557347154bae1503a17e51f0221d6619132402e608eb32a5', 'user': 'ae9e0298f9bb0aedd05c17c7a6be028c68a40575f167244bc98f4bbea46e3974'}, 'ACK': {'system': '8fb9cdc994c22f86969247fa2ce035028281e8539391ed4a1c2d8b2f557f859b', 'context': '3c97960d911b4d1df4a07489c05b060cfda32b925b05a68851261fba711ec0eb', 'user': '6d3ba842ea1fdffbaa8abd479e8eef735ce527915edd1dcb97fe835abe81531f'}, 'directcalc': {'system': 'f1ee610b1a8cf502c4f69d62d711f19cfedd27f8bc9292b5ee1a7c26727b1290', 'context': '3a9d3dbd9bebae4283488b3be8fc42b7ab3673660cc1c05b114892b9e242c132', 'user': 'e49022c79a8d6c51cbb40f263ab06884082b3a45ab4b920b89b0ec58f4a66934'}, 'A_repair': {'system': '84101f3bf2174640c74ee6e01107f3b9841ffa0fa68b66c62fc4ee73f39de087', 'context': 'a12b225d16a8759573f543fa7384d89c52d9409491c44b5a80f26b4ce5550148', 'user': '8e9f047414b408cd8dbd202e4bde0ea682dd2a036f1d754a0df6d3e7aa2bdaa4'}, 'ordinary_B': {'system': '5e399d03c74ab820efb104b5d8dbfcc681937ec84ae708445aa9720c278ad100', 'context': '47fef44f93a32320e0110b8c3d5e99815dbaaa752bfafd5669f81d763df10a89', 'user': '0f35463839e4338407bcb7d5ec7b0faf27ce79d7df9755b125e5d4ebbfc382f8'}, 'B_OUTPUT': {'system': '93f5bd55abf1ed410bc5b85be78a46826e97412b0dee77b91fe0a4ee4abd5be4', 'context': 'bc436e57250bee81ab4e85f69d9167d7d819ffb1aa80bc88788b771bfa739353', 'user': '172e77c6fc01fca555dde6f8a462b97197335eb4a6a797b62a41ba3258bebc55'}, 'B_TEXT': {'system': 'f1cac1b2fd3484ec1785c0e0bc6baf38e9926f179fb5b87dad7571cd856a5dd6', 'context': '5915c9fc15dad51ae1affaf5c686b5b15c50c3be42702ff65dff556fcb4ee6b7', 'user': 'ecc888cff2a4b1ceacae52faf268fe196d51a6c9ee6d1242ff1c6a4dbd1cadf4'}}
 
 
 def dispatch(stage,version,context):
@@ -25,7 +26,23 @@ def dispatch(stage,version,context):
 # Frozen after reviewing the Oct-27 acceptance-vs-finality, retained-quantity and
 # short-language contract. Unaffected roles still use the original frozen34 oracle.
 # Semantic positive/negative coverage lives in test_handoff_notice_contract.py.
-APPROVED_20261027_ORACLES = {'ordinary_A': {'system': 'd3abc113a7e5b4e7b9a93ee4935c5af989df8c470d1028f5803c8ed0d090df96', 'context': '4bc67952992020ee557347154bae1503a17e51f0221d6619132402e608eb32a5', 'user': 'ae9e0298f9bb0aedd05c17c7a6be028c68a40575f167244bc98f4bbea46e3974'}, 'ordinary_B': {'system': '6287f716aa6dbf3cde150a213cfd520a5cdf1c6d263a7ec494fafeb76163d47f', 'context': '47fef44f93a32320e0110b8c3d5e99815dbaaa752bfafd5669f81d763df10a89', 'user': '0f35463839e4338407bcb7d5ec7b0faf27ce79d7df9755b125e5d4ebbfc382f8'}, 'B_OUTPUT': {'system': '28f9ce0a172cb765ff1ec263e19cc3edface3be4b28c81832d7e4cbefebd91a9', 'context': 'a60410e5a67229125a1b4155de465a9dcb5f3fc78ccb1993a8f89c1ebf1503f1', 'user': 'a7030dbc30737408c07d72b59da97872f31464b35df5c716f93a24c96ca7c0aa'}}
+APPROVED_20261027_ORACLES = {'ordinary_A': {'system': '0730dc04b0308b19509886c817b763777e6f7326a3402f5fd63872d2db787013', 'context': '4bc67952992020ee557347154bae1503a17e51f0221d6619132402e608eb32a5', 'user': 'ae9e0298f9bb0aedd05c17c7a6be028c68a40575f167244bc98f4bbea46e3974'}, 'ordinary_B': {'system': '3313fa390559de9053156071720b851a504dd1735706f70a5fd6cb68cfd6bfd1', 'context': '47fef44f93a32320e0110b8c3d5e99815dbaaa752bfafd5669f81d763df10a89', 'user': '0f35463839e4338407bcb7d5ec7b0faf27ce79d7df9755b125e5d4ebbfc382f8'}, 'B_OUTPUT': {'system': '563ad8ae56ccf0e1b4d822c33f66dc13cdcd70334d9f9958d50e390130ff49e4', 'context': 'a60410e5a67229125a1b4155de465a9dcb5f3fc78ccb1993a8f89c1ebf1503f1', 'user': 'a7030dbc30737408c07d72b59da97872f31464b35df5c716f93a24c96ca7c0aa'}}
+
+# R6-117 (2026-10-28): the only approved system delta is the contract section 7
+# quote rule, A rule on ordinary/direct analysis and B rule on reply protocol notes.
+# Removing it once must reproduce the pre-R6-117 snapshot exactly.
+PRE_R6117_SYSTEM = {'ordinary_A': 'd3abc113a7e5b4e7b9a93ee4935c5af989df8c470d1028f5803c8ed0d090df96',
+                    'directcalc': '4d690e44eb4b1ebbc79339eb83e80759e96133f3834695ffd7ed23d0a4ed300e',
+                    'ordinary_B': '6287f716aa6dbf3cde150a213cfd520a5cdf1c6d263a7ec494fafeb76163d47f',
+                    'B_OUTPUT': '28f9ce0a172cb765ff1ec263e19cc3edface3be4b28c81832d7e4cbefebd91a9'}
+R6117_RULE = {'ordinary_A': '\n'+A_RULE, 'directcalc': '\n'+A_RULE, 'ordinary_B': B_RULE+'\n', 'B_OUTPUT': B_RULE+'\n'}
+
+
+def assert_only_r6117_delta(label, system):
+    for rule in (A_RULE, B_RULE):
+        assert system.count(rule) == (1 if label in R6117_RULE and R6117_RULE[label].strip() == rule else 0)
+    if label in R6117_RULE:
+        assert sha(system.replace(R6117_RULE[label], '', 1)) == PRE_R6117_SYSTEM[label]
 
 def sha(value):return hashlib.sha256(value.encode()).hexdigest()
 
@@ -41,6 +58,7 @@ def test_real_generated_ordinary_analysis_adds_only_the_approved_source_selfchec
     expected=APPROVED_20261027_ORACLES['ordinary_A']
     assert '未再提数量就省略volume_wan并保留既有量' in result['system_prompt']
     assert '不为转人工伪造FINAL' in result['system_prompt']
+    assert_only_r6117_delta('ordinary_A',result['system_prompt'].replace(CLAUSE,'',1))
     assert sha(result['system_prompt'].replace(CLAUSE,'',1))==expected['system']
     assert sha(result['context'])==expected['context'] and sha(user)==expected['user']
 
@@ -87,6 +105,7 @@ def test_dispatches_match_reviewed_contract_and_unaffected_roles_remain_frozen34
         if label in ('ordinary_B','B_OUTPUT'):
             for clause in ('HANDOFF_NOTICE','ACCEPTED_CURRENT_QUOTE','LATEST_INBOUND','价格相等本身不是接受','确认消息真正SENT','语言采用交易聊天的短句'):
                 assert clause in result['system_prompt']
+        assert_only_r6117_delta(label,checked_system)
         expected=APPROVED_20261027_ORACLES.get(label,ROLE_ORACLES[label])
         assert {key:sha(value) for key,value in [('system',checked_system),
             ('context',result['context']),('user',user)]}==expected

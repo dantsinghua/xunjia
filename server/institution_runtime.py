@@ -10,8 +10,8 @@ import uuid
 from relay.file_gateway import GatewayAuth,FileGatewayError
 from relay.file_gateway_connection import connection_client,protected_auth_path,TLS_FIELDS,resolve_tls_files
 from relay.gateway_paths import CONTRACT,DIRECTORY_PATH,ORGANIZATION_PATH,OFFLINE_SECONDS,InstitutionKeys,account_paths
-from relay.institution_archive import InstitutionArchive
-from relay.institution_directory import InstitutionDirectory
+from .retained_archive import InstitutionArchive
+from .retained_directory import InstitutionDirectory
 from relay.protocol import token
 from .institution_transport import InstitutionTransport
 from .receiver_ledger import account_lock
@@ -25,6 +25,8 @@ class InstitutionRuntime:
         self.background_enabled=True
         self._factory=client_factory;self.config=None;self.auth=None;self.keys=None;self.directory=None;self.archive=None
         self.errors={};self._last_friends={};self._last_org_request=0;self.applied_revision="";self._last_archive_prune=0
+        self.download_retention={"retention_days":30,"state":"not_run"}
+        self._retention_after=""
         self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         if self.path.is_file():self.load()
 
@@ -191,8 +193,22 @@ class InstitutionRuntime:
 
     def _tick(self):
         if not self.configured:return
-        if self.archive is not None and self.clock()-self._last_archive_prune>=3600:
-            cleaned=self.archive.prune();self._last_archive_prune=self.clock()-(3600 if cleaned.get("more_pending") else 0)
+        if self.clock()-self._last_archive_prune>=3600:
+            # Cleanup is independent of current account selection and cannot
+            # suppress directory intake when a stale file is unavailable.
+            self._last_archive_prune=self.clock()
+            try:
+                from .download_retention import prune_known_downloads
+                self.directory.archive_old_inputs(limit=50)
+                cleaned=prune_known_downloads(self.root,directory_root=self.directory.path.parent.parent,
+                    now=self.clock(),after=self._retention_after,file_limit=8,row_limit=100)
+                self._retention_after=cleaned['next']
+                self.download_retention={**cleaned,"state":"attention" if cleaned['errors'] or cleaned['protected'] else "ok"}
+                if cleaned['errors']:self.errors['download_retention']='DOWNLOAD_CLEANUP_INCOMPLETE'
+                else:self.errors.pop('download_retention',None)
+            except Exception as exc:
+                self.download_retention={"retention_days":30,"state":"error","at":self.clock(),"code":type(exc).__name__}
+                self.errors['download_retention']='DOWNLOAD_CLEANUP_FAILED'
         # Institution lock covers consumption; per-account business adapters retain
         # their independent source journals and are consumed by the existing Inbox.
         try:
@@ -240,7 +256,7 @@ class InstitutionRuntime:
         revision=hashlib.sha256(self.path.read_bytes()).hexdigest() if self.path.is_file() else ""
         applied=bool(self.configured and self._thread and self._thread.is_alive()
             and revision==self.applied_revision and not self.errors.get("configuration"))
-        return {**{k:self.config[k] for k in TLS_FIELDS if self.config and k in self.config},"configured":self.configured,"backend":"file_gateway","contract":CONTRACT,"base_url":self.config.get("base_url","") if self.config else "","credentials_set":self.auth is not None,"background_enabled":self.background_enabled,"revision":revision,"applied":applied,"account_uid":binding.get("account_uid"),"workbench_id":binding.get("workbench_id"),"note":"配置已保存，但运行加载失败；请检查状态目录并重新保存重试。" if self.errors.get("configuration") else "机构目录共享；路径由系统内置，当前工作台一次选择一个企点号。"}
+        return {**{k:self.config[k] for k in TLS_FIELDS if self.config and k in self.config},"configured":self.configured,"backend":"file_gateway","contract":CONTRACT,"base_url":self.config.get("base_url","") if self.config else "","credentials_set":self.auth is not None,"background_enabled":self.background_enabled,"revision":revision,"applied":applied,"account_uid":binding.get("account_uid"),"workbench_id":binding.get("workbench_id"),"download_retention":dict(self.download_retention),"note":"配置已保存，但运行加载失败；请检查状态目录并重新保存重试。" if self.errors.get("configuration") else "机构目录共享；路径由系统内置，当前工作台一次选择一个企点号。"}
 
     def _candidate(self, body):
         if not isinstance(body,dict) or set(body)-{"base_url","config_yaml","expected_revision",*TLS_FIELDS}:raise ValueError("只允许服务地址和机构凭据，不允许编辑路径")

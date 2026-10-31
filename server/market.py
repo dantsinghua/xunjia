@@ -60,6 +60,46 @@ def maturity_years(days, term):
     return number(match.group(1)) if match else None
 
 
+def project_intent(row, floor):
+    """Owner group targets/limits, falling back to saved floors without a group."""
+    row.update(ib=None, io=None, ibv=None, iov=None)
+    row.update(has_active_intent=False, intent_conflicts=[], instructions=[])
+    row.pop('floor', None)
+    if not isinstance(floor, dict):return
+    row['floor'] = deepcopy(floor)
+    instructions=floor.get('instructions') or []
+    if instructions:
+        from .negotiation.prices import number as policy_number
+        row['instructions']=deepcopy(instructions)
+        row['has_active_intent']=True
+        for side,price,volume in (('BUY','ib','ibv'),('SELL','io','iov')):
+            own=[item for item in instructions if item.get('our_side')==side]
+            if len(own)>1:
+                row['intent_conflicts'].append(side)
+                continue
+            if not own:continue
+            instruction=own[0]
+            try:
+                amount=policy_number(instruction.get('target_volume'))
+                if amount>0:row[volume]=format(amount,'f')
+            except ValueError:pass
+            boundary=instruction.get('boundary') or {}
+            if boundary.get('kind')=='YIELD':
+                try:row[price]=format(policy_number(boundary.get('value')),'f')
+                except ValueError:pass
+        return
+    try:
+        value = decimal(floor.get('value'))
+        if floor.get('kind') == 'yield':
+            row['ib'] = row['io'] = format(value, 'f')
+        elif floor.get('kind') == 'bp':
+            valuation = decimal(row.get('val_yield'))
+            row['ib'] = format(valuation + value / 100, 'f')
+            row['io'] = format(valuation - value / 100, 'f')
+    except ValueError:
+        pass
+
+
 def matches(row,f):
     keyword=f['keyword'].strip().lower()
     if keyword and not any(keyword in str(row.get(k) or '').lower() for k in ('code','name','issuer')):return False
@@ -127,8 +167,7 @@ class MarketService:
             row.update(status=status.get(row['code'],'待询价'),ib=None,io=None,ibv=None,iov=None,scheme=None)
             vy,np=row['val_yield'],row['net_price']
             row['val']=f'{vy}/{np}' if vy is not None and np is not None else str(vy) if vy is not None else None
-            own=floors.get(row['code'])
-            if own:row['floor']=deepcopy(own)
+            project_intent(row, floors.get(row['code']))
             result.append(row)
         return result
 
@@ -165,6 +204,16 @@ class MarketService:
         rows,total=self._query(owner,f,limit=self.MAX_SELECTION+1)
         if total>self.MAX_SELECTION:raise ValueError('选择或导出超过10万行，请缩小范围')
         return rows
+
+    def detail(self, owner, code):
+        rows = self.resolve(owner, {'windcodes': [code]})
+        if not rows:return None
+        source = self.detail_provider(code) if self.detail_provider else None
+        source = source if isinstance(source, dict) else {}
+        # Detail adapters supply market history only. They cannot replace the
+        # authenticated bond overlay with a shared-cache intent or another owner.
+        return {'bond': rows[0], 'instructions': deepcopy(rows[0].get('instructions',[])),
+                **{key: source[key] for key in ('quotes', 'trades', 'intra', 'hist') if key in source}}
 
     def page(self,owner,*,filter_spec=None,before=0,before_uni=0,limit=50):
         f=parse_filter(filter_spec)

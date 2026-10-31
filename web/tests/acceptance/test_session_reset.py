@@ -43,6 +43,7 @@ def reset_ui(selector):
     page.route(base+'/api/im/session-reset**',handler)
     def open_page():
         open_selector(selector)
+        page.locator('#settings-nav-reset').click()
         expect(page.get_by_test_id('session-reset-settings')).to_be_visible()
         return page
     return SimpleNamespace(page=page,base=base,selection=selection,state=s,open=open_page,fulfill=fulfill)
@@ -129,8 +130,10 @@ def test_binding_switch_discards_old_response_and_invalidates_confirmation(reset
     assert c.state['held']
     held=c.state['held'].pop(0);old=deepcopy(c.selection['selected'])
     c.state['hold_get']=False;c.state['hold_post']=False
+    p.locator('#settings-nav-account').click()
     pick_b(p);p.get_by_test_id('collector-connect').click()
     expect(p.get_by_test_id('collector-current')).to_contain_text('wb-b')
+    p.locator('#settings-nav-reset').click()
     expect(panel.get_by_test_id('session-reset-confirmation')).not_to_be_visible()
     c.fulfill(held,{'ok':True,'data':dto(old,'complete')})
     expect(panel.get_by_test_id('session-reset-scope')).to_contain_text('wb-b')
@@ -180,7 +183,7 @@ def test_real_browser_api_and_signed_local_gateway_handshake_reach_same_complete
         route.fulfill(response=response)
     page.route('**/*',forward);page.route_web_socket('**/*',lambda ws:None)
     try:
-        page.goto(frontend_url+'/#/link');panel=page.get_by_test_id('session-reset-settings')
+        page.goto(frontend_url+'/#/link');page.locator('#settings-nav-reset').click();panel=page.get_by_test_id('session-reset-settings')
         expect(panel).to_be_visible(timeout=20000)
         expect(panel.get_by_test_id('session-reset-scope')).to_contain_text('wb-a')
         expect(panel.get_by_test_id('session-reset-scope')).to_contain_text('account-a')

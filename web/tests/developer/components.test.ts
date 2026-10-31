@@ -64,9 +64,38 @@ test('发送回执期间切对手不清新输入，不拼第二份聊天',async(
  assert.equal(vm.chatInput.value,'new draft');assert.equal(vm.chatMsgs.value.length,0);scope.stop()
 })
 test('单经纪商定时刷新使用本人选定broker并替换价格',async()=>{
- const {vm,scope}=setup(Quote);vm.chanTab.value=2;vm.brokerPick.value='9';const base=buildBonds()[0];let url=''
- globalThis.fetch=async(u)=>{url=String(u).startsWith('/api/bonds?')?String(u):url;return response(String(u).startsWith('/api/bonds?')?{ok:true,data:[{...base,ob:3.1}],total:1}:{ok:true,data:{items:[]}})}
- await vm.headSync();assert.equal(new URL(url,'http://local').searchParams.get('broker'),'9');assert.equal(vm.bonds.value[0].ob,'3.1000');scope.stop()
+ const {vm,scope}=setup(Quote);vm.chanTab.value=2;vm.brokerPick.value='9';const base=buildBonds()[0];const calls:Array<{url:string;init?:RequestInit}>=[]
+ vm.takePage({ok:true,data:[base],total:1,hasMore:false,nextBefore:10,nextUni:'1'},'replace')
+ globalThis.fetch=async(u,init)=>{calls.push({url:String(u),init});return response(String(u)==='/api/bonds/resolve'?{ok:true,data:[{...base,ob:3.1}]}:{ok:true,data:{items:[]}})}
+ try {
+  await vm.headSync()
+  const refresh=calls.filter(call=>call.url==='/api/bonds/resolve')
+  assert.equal(refresh.length,1);assert.equal(refresh[0].init?.method,'POST')
+  const selection=JSON.parse(String(refresh[0].init?.body)).selection
+  assert.deepEqual(selection.windcodes,[base.code]);assert.equal(selection.filter.channel,'broker');assert.equal(selection.filter.broker,'9')
+  assert.equal(calls.some(call=>call.url.startsWith('/api/bonds?')),false)
+  assert.equal(vm.bonds.value[0].ob,'3.1000')
+  // Aggregate worker deltas may not overwrite a specifically selected broker.
+  vm.onBatch(new Map([['bond-all',[{u:base.bondUniCode||base.code,f:999999,t:1,bb:9.99}]]]))
+  assert.equal(vm.bonds.value[0].ob,'3.1000')
+ } finally {scope.stop()}
+})
+test('QT后台刷新按对话身份区分同券并携带完整筛选',async()=>{
+ const {vm,scope}=setup(Quote);vm.chanTab.value=1;vm.appliedKeyword.value='合成'
+ const base=buildBonds()[0];const rows=[{...base,rowId:'dialogue-a'},{...base,rowId:'dialogue-b'}]
+ vm.takePage({ok:true,data:rows,total:2,hasMore:true,nextBefore:10,nextUni:'2'},'replace')
+ let selection:any
+ globalThis.fetch=async(u,init)=>{
+  if(String(u)==='/api/bonds/resolve') {selection=JSON.parse(String(init?.body)).selection;return response({ok:true,data:[{...rows[1],ob:3.2},{...rows[0],ob:3.1}]})}
+  return response({ok:true,data:{items:[]}})
+ }
+ try {
+  await vm.headSync()
+  assert.deepEqual(selection.rowIds,['dialogue-a','dialogue-b']);assert.equal(selection.windcodes,undefined)
+  assert.equal(selection.filter.channel,'qt');assert.equal(selection.filter.keyword,'合成')
+  assert.ok(selection.filter.chips);assert.ok(selection.filter.prices);assert.ok(selection.filter.groups)
+  assert.deepEqual(vm.bonds.value.map((row:any)=>[row.rowId,row.ob]),[['dialogue-a','3.1000'],['dialogue-b','3.2000']])
+ } finally {scope.stop()}
 })
 test('服务端删除询价和底价后本地显示清除旧快照',async()=>{
  const {vm,scope}=setup(Quote);vm.serverStatus['A.IB']='询价中';vm.floorKind['A.IB']='bp';vm.floorValue['A.IB']=2

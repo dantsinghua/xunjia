@@ -76,6 +76,7 @@ def test_rejected_or_unapplied_save_does_not_open_or_query_directory(unconfigure
 def test_successfully_saved_and_loaded_connection_precedes_authenticated_directory_selection(unconfigured):
     page,state=open_config(unconfigured);state['applied']=True
     fill_draft(page);page.get_by_test_id('mq-save').click()
+    page.locator('#settings-nav-account').click()
     panel=page.get_by_test_id('collector-account-settings');expect(panel).to_be_visible()
     expect(page.get_by_test_id('collector-workbench').locator('option[value=wb-authenticated]')).to_have_count(1)
     calls=state['api_calls'];saved_index=calls.index(('PUT','/api/im/mq-config'))
@@ -113,6 +114,7 @@ def metadata_panel(selector):
 
 def test_metadata_table_is_explicit_retained_history_and_paginates_without_mutations(metadata_panel):
     s,control=metadata_panel;page=open_selector(s)
+    page.locator('#settings-nav-files').click()
     panel=page.get_by_test_id('transfer-files');expect(panel).to_be_visible()
     expect(panel.locator('caption')).to_contain_text('wb-a / same-account')
     expect(panel.locator('tbody')).to_contain_text('current-v1.bin')
@@ -129,12 +131,15 @@ def test_metadata_table_is_explicit_retained_history_and_paginates_without_mutat
 
 def test_late_metadata_response_from_old_binding_version_is_not_applied(metadata_panel):
     s,control=metadata_panel;page=open_selector(s)
+    page.locator('#settings-nav-files').click()
     panel=page.get_by_test_id('transfer-files');expect(panel.locator('tbody')).to_contain_text('current-v1.bin')
     control['hold_next']=True
     panel.get_by_role('button',name='刷新文件记录',exact=True).click()
     expect(panel).to_contain_text('正在读取文件记录')
     assert len(control['held'])==1
+    page.locator('#settings-nav-account').click()
     page.get_by_test_id('collector-connect').click()
+    page.locator('#settings-nav-files').click()
     expect(panel.locator('tbody')).to_contain_text('current-v2.bin')
     old={'scope':'retained_authenticated_files','workbench_id':'wb-a','account_uid':'same-account',
         'items':[{'id':999,'name':'LATE-OLD-VERSION.bin','extension':'bin','kind':'contacts','lane':'up',
@@ -146,23 +151,28 @@ def test_late_metadata_response_from_old_binding_version_is_not_applied(metadata
     assert all(method=='GET' for method,_ in control['calls'])
 
 
-def test_fifty_file_rows_scroll_inside_bounded_table_keep_header_and_downstream_configuration_reachable(metadata_panel):
+def test_fifty_file_rows_scroll_in_detail_with_fixed_actions_and_reachable_navigation(metadata_panel):
     s,control=metadata_panel;control['row_count']=50
     page=open_selector(s)
+    page.locator('#settings-nav-files').click()
     panel=page.get_by_test_id('transfer-files')
     expect(panel.locator('tbody tr')).to_have_count(50)
-    box=panel.locator('.table-scroll');box.scroll_into_view_if_needed()
-    sizes=box.evaluate("""e=>({height:e.getBoundingClientRect().height,client:e.clientHeight,
+    detail=page.locator('.settings-detail')
+    actions=panel.locator('.settings-actions')
+    initial=actions.bounding_box()
+    assert initial is not None
+    sizes=detail.evaluate("""e=>({height:e.getBoundingClientRect().height,client:e.clientHeight,
         scroll:e.scrollHeight,viewport:innerHeight,overflow:getComputedStyle(e).overflowY})""")
-    assert sizes['height']<=min(480,sizes['viewport']*.55)+2
+    assert sizes['height']<=sizes['viewport']-66+2
     assert sizes['scroll']>sizes['client'] and sizes['overflow'] in ['auto','scroll']
-    box.evaluate('e=>{e.scrollTop=e.scrollHeight}')
-    sticky=box.evaluate("""e=>{const head=e.querySelector('thead'),cell=head.querySelector('th');
-        const h=getComputedStyle(head).position==='sticky'?head:cell;return {
-        top:h.getBoundingClientRect().top,containerTop:e.getBoundingClientRect().top,scrollTop:e.scrollTop}}""")
-    assert sticky['scrollTop']>0
-    assert abs(sticky['top']-sticky['containerTop'])<=2
-    lower=page.get_by_test_id('inno-config');lower.scroll_into_view_if_needed()
+    detail.evaluate('e=>{e.scrollTop=e.scrollHeight}')
+    assert detail.evaluate('e=>e.scrollTop')>0
+    fixed=actions.bounding_box()
+    assert fixed is not None and abs(initial['y']-fixed['y'])<=2
+    assert abs(fixed['y']+fixed['height']-sizes['viewport'])<=2
+    expect(panel.get_by_role('button',name='刷新文件记录',exact=True)).to_be_in_viewport()
+    page.locator('#settings-nav-innodealing').click()
+    lower=page.get_by_test_id('inno-config')
     expect(lower).to_be_visible()
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
     assert all(method=='GET' for method,_ in control['calls'])

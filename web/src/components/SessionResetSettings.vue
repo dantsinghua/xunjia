@@ -152,12 +152,14 @@ onBeforeUnmount(() => { disposed = true; generation++; readRequest++; clearTimer
     </div>
     <div v-if="armed" class="confirmation" data-testid="session-reset-confirmation">
       <p>确认清空上述企点号的全部会话状态？在途原生操作会先结束，双方确认完成前不会开始新一轮发送。</p>
+    </div>
+    <div class="actions settings-actions">
+      <template v-if="armed">
       <button type="button" class="btn-primary" data-testid="session-reset-confirm" :disabled="submitting" @click="confirm">
         {{ submitting ? '正在提交…' : '确认清空并同步' }}
       </button>
       <button type="button" class="btn-ghost" :disabled="submitting" @click="armed = false">取消</button>
-    </div>
-    <div class="actions">
+      </template>
       <button type="button" class="btn-ghost" data-testid="session-reset-start"
         :disabled="!imBoundAccount || pending || submitting || armed" @click="prepare">清空并同步全部会话</button>
       <button type="button" class="btn-ghost" data-testid="session-reset-refresh"

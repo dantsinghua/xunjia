@@ -91,7 +91,7 @@ onBeforeUnmount(() => { disposed = true })
         <p class="hint">更换连接配置会归档旧工作区并重新选择账号，保留历史事实和待核对记录；不会迁移或重发旧任务。原样保存不归档。</p>
         <p class="hint">正式环境使用 HTTPS 双向认证与 accesstoken。填写运行服务所在机器上的证书路径，不上传或回显私钥内容。</p>
         <p class="hint">测试只调用 pending 接口，不上传、下载或发送消息；通过不代表真实消息收发全链成功。</p>
-        <div class="controls">
+        <div class="controls settings-actions">
           <button class="btn-ghost" type="button" :disabled="busy || loading || !state.credentials_set" data-testid="mq-test" @click="act('test')">测试连接</button>
           <button class="btn-primary" type="submit" :disabled="busy || loading || !state.credentials_set" data-testid="mq-save">保存并连接文件中转</button>
           <button class="btn-ghost" type="button" :disabled="busy || loading" @click="refresh">重新读取配置</button>
@@ -103,7 +103,7 @@ onBeforeUnmount(() => { disposed = true })
         <p>本次未保存配置。pending 检查不代表上传、下载或真实消息收发全链成功。</p>
       </div>
     </template>
-    <button v-else class="btn-ghost" type="button" :disabled="loading" @click="refresh">{{ loading ? '正在读取连接配置…' : '重新读取连接配置' }}</button>
+    <div v-else class="settings-actions"><button class="btn-ghost" type="button" :disabled="loading" @click="refresh">{{ loading ? '正在读取连接配置…' : '重新读取连接配置' }}</button></div>
   </section>
 </template>
 

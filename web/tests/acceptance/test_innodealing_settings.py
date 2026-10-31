@@ -22,7 +22,7 @@ def inno(ui):
     page.route(base+'/api/im/quote**',route)
     return page,base,state,calls
 def open_page(inno):
-    page,base,_,_=inno;page.goto(base+'/#/link');expect(page.get_by_test_id('inno-config')).to_be_visible();expect(page.get_by_test_id('inno-save')).to_be_enabled();return page
+    page,base,_,_=inno;page.goto(base+'/#/link');page.locator('#settings-nav-innodealing').click();expect(page.get_by_test_id('inno-config')).to_be_visible();expect(page.get_by_test_id('inno-save')).to_be_enabled();return page
 def test_fields_recovered_no_secret_readback(inno):
     page=open_page(inno)
     expect(page.locator('[name=inno-account]')).to_have_value('synthetic-market')

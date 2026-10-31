@@ -22,7 +22,7 @@ def numeric(value):
 
 
 def enriched(service,owner,records):
-    from .market import parse_filter
+    from .market import parse_filter, project_intent
     status,floors=service._overlays(owner)
     codes=list(dict.fromkeys(row['code'] for row in records));public={}
     # Read only bonds that have QT records. The public book is never fully scanned.
@@ -35,18 +35,10 @@ def enriched(service,owner,records):
         row={**deepcopy(public.get(source['code'],{})),**deepcopy(source)}
         if not row.get('bondUniCode'):row['bondUniCode']=public.get(source['code'],{}).get('bondUniCode')
         row['status']=status.get(row['code'],'待询价');row['scheme']=None
-        row['floor']=deepcopy(floors.get(row['code']))
         row['pageKey']=row['rowId']
         # The four leading columns retain the user's PRIVATE floor semantics.
         # BidPx / OfferPx are counterpart prices, never internal limits.
-        row['ib']=row['io']=None
-        floor=row['floor'] or {};value=numeric(floor.get('value'))
-        if value is not None:
-            if floor.get('kind')=='yield':row['ib']=row['io']=format(value,'f')
-            elif floor.get('kind')=='bp':
-                valuation=numeric(row.get('val_yield'))
-                if valuation is not None:
-                    row['ib']=format(valuation+value/100,'f');row['io']=format(valuation-value/100,'f')
+        project_intent(row, floors.get(row['code']))
         clears=set(x for x in row['qt_settlement'].values() if x)
         row['clearing']=next(iter(clears)) if len(clears)==1 else None
         result.append(row)
@@ -80,7 +72,7 @@ def combined(service,owner,f,*,before=0,before_uni=0,limit=50,codes=None,exclude
             # must not masquerade as a ChinaBond valuation.
             first=quotes[0]
             base={k:deepcopy(v) for k,v in first.items() if not k.startswith('qt_') and k not in ('rowId','pageKey')}
-            for k in ('ob','obv','obs','oo','oov','oos','ib','io','ibv','iov'):base[k]=None
+            for k in ('ob','obv','obs','oo','oov','oos'):base[k]=None
         base['rowId']=code;base['pageKey']=base.get('bondUniCode') or code
         base['flowId']=max([base.get('flowId') or 0]+[row['flowId'] for row in quotes])
         clearing=CHIPS['清算'][f['chips']['清算']] if f['chips'].get('清算') else public.get(code,{}).get('clearing')

@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -113,6 +114,11 @@ class Manager:
         txn['phase'] = value
         atomic_json(self.txn_path(txn['id']), txn)
         if self.phase_hook: self.phase_hook(value, self, txn)
+    def bind_upgrade(self, txn):
+        job = os.environ.get('XUNJIA_UPGRADE_JOB_ID', '')
+        if job:
+            if not re.fullmatch('[0-9a-f]{32}', job):raise DeployError('INVALID_UPGRADE_JOB')
+            txn['upgrade_job'] = job
     def txn_path(self, rid): return self.prefix/'deployments'/(rid+'.json')
     @contextlib.contextmanager
     def lock(self):
@@ -395,6 +401,7 @@ class Manager:
             txn={'id':rid,'operation':'install','previous':str(previous) if previous else None,
                  'target':str(self.prefix/'releases'/rid),'active_before':self.service.active(),
                  'service_touched':False,'switched':False,'phase':'PREPARING'}
+            self.bind_upgrade(txn)
             self.phase(txn,'PREPARING')
             try:
                 sources={str(p):config_fingerprint(p) for p in self.config_sources()}
@@ -497,6 +504,7 @@ class Manager:
             rid=time.strftime('%Y%m%d-%H%M%S')+'-rollback-'+uuid.uuid4().hex[:8]
             txn={'id':rid,'operation':'rollback','previous':str(current),'target':str(previous),
                  'active_before':active,'service_touched':False,'switched':False,'phase':'PREPARING'}
+            self.bind_upgrade(txn)
             self.phase(txn,'PREPARING')
             try:
                 oldboot=self.old_boot(cfg) if active else None

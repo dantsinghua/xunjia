@@ -16,7 +16,7 @@ export type {
 } from './lib/types'
 
 import type { OrgStatus } from './lib/imLink'
-import { authFetch, requestJson } from './lib/http'
+import { authFetch, HttpError, requestJson } from './lib/http'
 import type { BondStatic } from './lib/quoteTypes'
 import type { QuoteFilterState } from './lib/quoteFilter'
 export interface UnknownCommand {cmd_id:string;peer_id:string;text:string;created_at:number;expected_result_hash:string;conflict:boolean}
@@ -127,6 +127,52 @@ export interface MqConfigInput {
 export interface MqConnectionTest {
   passed: boolean; connected: boolean; saved: false; steps: {name: string; ok: boolean; detail: string}[]
 }
+export type UpgradeJobState = 'queued' | 'downloading' | 'verifying' | 'installing' | 'succeeded' | 'failed' | 'unknown' | 'empty'
+export interface UpgradeJobDetail {
+  phase: string; rollback: 'not_needed' | 'running' | 'restored' | 'failed' | 'unknown'
+  health?: 'ready' | 'unverified' | 'failed'; previous_build?: string; code?: string
+}
+export interface UpgradeJob {
+  id: string; state: UpgradeJobState; message: string; target_build?: string
+  created_at: number; updated_at: number; detail?: UpgradeJobDetail
+}
+export interface UpgradeDiagnostics {
+  job: Omit<UpgradeJob, 'message'> & {
+    message?: string; code?: string; package_sha256?: string; result?: Record<string, unknown>
+  }
+  events: { id: number; job_id: string; at: number; phase: string; code: string;
+    message: string; details: Record<string, unknown> }[]
+}
+export interface UpgradeSyncStatus {
+  enabled: boolean; can_upgrade: boolean; current_build: string; retention_days: number
+  job: UpgradeJob | null; hint?: string
+  retention?: { days: number; last_run?: number; removed?: number; blocked?: number; hint?: string }
+  schedule?: { enabled: boolean; time: string; timezone: string; last_day: string; log_queue: string }
+  log_delivery?: { state: string; at?: number; code?: string }
+}
+
+export interface DifyFlowState {
+  stage:'analysis'|'reply';available:boolean;base_url:string;app_key_set:boolean;configured:boolean;revision:string;dsl_version:string
+}
+export interface QaWorkflowState {
+  available: boolean; enabled: boolean; configured: boolean; app_key_set: boolean
+  base_url: string; tool_base_url: string; revision: string; tool_path: string; hint: string
+}
+export interface QaWorkflowInput {
+  enabled: boolean; base_url: string; tool_base_url: string; app_key: string; expected_revision: string
+}
+export interface QaCandidate { code: string; name: string; current_day: boolean }
+export interface QaWorkflowAnswer extends QaResult {
+  workflow_enabled?: boolean; action?: string; candidates: QaCandidate[]
+  requires_selection?: boolean; as_of?: string; notice?: string; session_id?: string
+}
+export interface QaSession { id: string; title: string; created_at: number; updated_at: number }
+export interface QaStoredMessage {
+  id: string; role: 'user' | 'ai'; text: string; state: 'pending' | 'complete' | 'failed'
+  created_at: number; result?: QaWorkflowAnswer; request_id?: string
+}
+export interface QaSessionDetail { session: QaSession; messages: QaStoredMessage[] }
+export interface QaRequestScope { session_id: string; request_id: string }
 
 export interface QtSourceState {
   revision:string; mode:string; shared:boolean; enabled:boolean; configured:boolean; mapped:boolean
@@ -199,6 +245,8 @@ function normBond(r: Dict): BondRow {
     name: s(r.name), code: s(r.code), term: s(r.term), val: s(r.val),
     dur: num2(r.dur), coupon: typeof r.coupon === 'number' ? pctStr(r.coupon) : s(r.coupon),
     ibv: num2(r.ibv), ib: y4(r.ib), io: y4(r.io), iov: num2(r.iov),
+    hasActiveIntent: r.has_active_intent === true,
+    intentConflicts: Array.isArray(r.intent_conflicts) ? r.intent_conflicts.filter((v): v is string => v === 'BUY' || v === 'SELL') : [],
     obs: s(r.obs), obv: num2(r.obv), ob: y4(r.ob), oo: y4(r.oo), oov: num2(r.oov), oos: s(r.oos),
     status: (s(r.status, '待询价') as BondStatus),
     tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
@@ -360,8 +408,43 @@ function normChart(c: Dict | undefined): ChartSpec | undefined {
 }
 
 /* ============================ 债券详情组装 ============================ */
-async function assembleDetail(code: string, bond?: BondRow): Promise<BondDetail> {
-  const r = await jget<Resp<Dict>>(`/api/bond/${encodeURIComponent(code)}`)
+function detailCurve(value: unknown, fields: Record<string, string>, intraday: boolean): Record<string, string> {
+  const source = value && typeof value === 'object' ? value as Dict : {}
+  const result: Record<string, string> = { max: '—', min: '—', d0: '', d1: '', d2: '' }
+  const points: Record<string, {t: number; y: number}[]> = {}
+  let raw = false
+  for (const [target, key] of Object.entries(fields)) {
+    result[target] = typeof source[target] === 'string' ? source[target] as string : ''
+    const values = source[key]
+    if (!Array.isArray(values)) continue
+    raw = true
+    points[target] = values.filter(v => v && typeof v === 'object' && v.t != null && v.t !== '' && v.y != null && v.y !== ''
+      && typeof v.t !== 'boolean' && typeof v.y !== 'boolean')
+      .map(v => ({ t: Number(v.t), y: Number(v.y) }))
+      .filter(v => Number.isFinite(v.t) && Number.isFinite(v.y))
+      .sort((a, b) => a.t - b.t)
+  }
+  if (!raw) {
+    for (const key of ['max', 'min', 'd0', 'd1', 'd2']) if (typeof source[key] === 'string') result[key] = source[key] as string
+    return result
+  }
+  const all = Object.values(points).flat()
+  if (!all.length) return result
+  const start = Math.min(...all.map(p => p.t)), end = Math.max(...all.map(p => p.t))
+  let low = Math.min(...all.map(p => p.y)), high = Math.max(...all.map(p => p.y))
+  if (low === high) { const pad = Math.max(Math.abs(low) * .001, .0001); low -= pad; high += pad }
+  result.min = low.toFixed(4); result.max = high.toFixed(4)
+  const label = (stamp: number) => new Date(stamp * 1000).toLocaleString('zh-CN', intraday
+    ? {timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit'}
+    : {timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit'})
+  result.d0 = label(start); result.d1 = label((start + end) / 2); result.d2 = label(end)
+  for (const [target, values] of Object.entries(points)) result[target] = values.map(p =>
+    `${(start === end ? 295 : 40 + (p.t - start) / (end - start) * 510).toFixed(2)},${(140 - (p.y - low) / (high - low) * 120).toFixed(2)}`).join(' ')
+  return result
+}
+
+async function assembleDetail(code: string, bond?: BondRow, signal?: AbortSignal): Promise<BondDetail> {
+  const r = await requestJson<Resp<Dict>>(`/api/bond/${encodeURIComponent(code)}`, { signal })
   if (!r.ok || !r.data) throw new Error(r.hint || '债券详情读取失败')
   const d = r.data
   const nb = d.bond ? normBond(d.bond as Dict) : bond
@@ -370,12 +453,23 @@ async function assembleDetail(code: string, bond?: BondRow): Promise<BondDetail>
     label: s(q.channel), bid: num2(q.best_bid), ofr: num2(q.best_ofr),
     bidVol: num2(q.best_bid_vol), ofrVol: num2(q.best_ofr_vol), bidSide: s(q.best_bid_side), ofrSide: s(q.best_ofr_side),
   })) : []
-  const cps = await api.counterparties()
+  const cps = await api.counterparties(signal)
+  const hist = detailCurve(d.hist, {avg: 'avg_trade', zz: 'cnbd_val'}, false)
+  const intra = detailCurve(d.intra, {bid: 'bid', ofr: 'ofr', zz: 'val'}, true)
   return {
     bond: nb, channels,
-    trades: Array.isArray(d.trades) ? d.trades as BondDetail['trades'] : [],
-    hist: { avg:'', zz:'', max:'—', min:'—', d0:'', d1:'', d2:'', ...((d.hist as object) || {}) },
-    intra: { bid:'', ofr:'', zz:'', max:'—', min:'—', ...((d.intra as object) || {}) },
+    instructions: Array.isArray(d.instructions) ? (d.instructions as Dict[]).map(item => {
+      const boundary = item.boundary && typeof item.boundary === 'object' ? item.boundary as Dict : {}
+      return { groupId: s(item.group_id), side: s(item.our_side), volume: num2(item.target_volume),
+        opening: num2(item.opening_yield_pct), limit: num2(boundary.value), limitKind: s(boundary.kind),
+        status: s(item.status), tradeDay: s(item.trade_day) }
+    }) : [],
+    trades: Array.isArray(d.trades) ? (d.trades as Dict[]).map(t => ({
+      t: t.time != null ? hms(t.time) : s(t.t), ch: s(t.channel ?? t.ch),
+      dir: s(t.mark ?? t.dir), p: num2(t.yield ?? t.p), v: num2(t.vol_wan ?? t.v),
+    })) : [],
+    hist: { avg:'', zz:'', max:'—', min:'—', d0:'', d1:'', d2:'', ...hist },
+    intra: { bid:'', ofr:'', zz:'', max:'—', min:'—', ...intra },
     modalCps: cps.ok ? cps.data.flatMap(cp => cp.bonds.filter(cb => cb.code === nb.code).map(cb => ({ id:cp.id, name:cp.name, stage:cb.stage, spread:cb.spread, updated:cb.updated }))) : [],
   }
 }
@@ -431,8 +525,10 @@ export const api = {
         const data = normBonds(r.data)
         return { ok: true, data, total: r.total ?? data.length, hasMore: r.hasMore ?? false, nextBefore: r.nextBefore ?? 0, nextUni: r.nextUni ?? 0, source: r.source, emptyReason: r.emptyReason, qtColumns:r.qtColumns, privateCombined:r.privateCombined, sourceNotice:r.sourceNotice, qtStatus:r.qtStatus }
       }
-      return empty('行情接口没有返回报价')
-    } catch {
+      return empty(r.hint || '行情接口没有返回报价')
+    } catch (e) {
+      if (e instanceof HttpError) return empty(e.status >= 500 ? '行情服务暂时无法处理请求，请稍后重试' : e.message)
+      if (e instanceof SyntaxError) return empty('行情响应格式异常，请刷新后重试')
       return empty('连不上询价服务')
     }
   },
@@ -445,7 +541,7 @@ export const api = {
   getFloors: () => jget<Resp<{items:{code:string;kind:'bp'|'yield';value:number|string;revision:number}[]}>>('/api/im/inquiry/floor'),
   brokers: () => jget<{ ok: boolean; data: { id: number; name: string }[] }>('/api/brokers'),
 
-  bond: async (windcode: string, bond?: BondRow): Promise<Resp<BondDetail>> => ({ ok: true, data: await assembleDetail(windcode, bond) }),
+  bond: async (windcode: string, bond?: BondRow, signal?: AbortSignal): Promise<Resp<BondDetail>> => ({ ok: true, data: await assembleDetail(windcode, bond, signal) }),
   /* 批量操作的"选择"有两种形态,见后端 _resolve_selection:
      ① 枚举 { windcodes }            —— 用户手点了几只
      ② 谓词 { selectAll, groups, except } —— 用户点了全选
@@ -495,8 +591,8 @@ export const api = {
     return { ...r, revision:typeof r.data?.revision==='number'?r.data.revision:r.revision,data: normSummary(r.data ?? {}) } as Resp<{ botStatus: string; botEnabled?: boolean; stats: { k: string; v: string; d: string }[] }>
   }, emptySummary()),
   botToggle: (on: boolean) => result(() => jpost<Resp<{ botStatus: string }>>('/api/bot/toggle', { status: on ? '正常' : '停止' }), { botStatus: on ? '正常' : '停止' }),
-  counterparties: () => result(async () => {
-    const r = await jget<Resp<Dict[]>>('/api/monitor/counterparties')
+  counterparties: (signal?: AbortSignal) => result(async () => {
+    const r = await requestJson<Resp<Dict[]>>('/api/monitor/counterparties', { signal })
     return { ...r, data: (r.data ?? []).map(normCp) } as Resp<Counterparty[]>
   }, [] as Counterparty[]),
   async monitorChat(cp: string, cursor = ''): Promise<Resp<ChatMsg[]> & { hint?: string; nextCursor?: string | null; hasMore?: boolean; revision?:number }> {
@@ -569,6 +665,25 @@ export const api = {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }),
   testMqConfig: (body: MqConfigInput) => jpost<Resp<MqConnectionTest>>('/api/im/mq-config/test', body),
+  upgradeStatus: (signal?: AbortSignal) => requestJson<Resp<UpgradeSyncStatus>>('/api/system/upgrade', { signal }),
+  saveUpgradeSchedule: (enabled: boolean) => requestJson<Resp<NonNullable<UpgradeSyncStatus['schedule']>>>('/api/system/upgrade/schedule', {
+    method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled}),
+  }),
+  syncUpgrade: (signal?: AbortSignal) => requestJson<Resp<UpgradeSyncStatus>>('/api/system/upgrade', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal,
+  }),
+  upgradeDiagnostics: (jobId: string, signal?: AbortSignal) =>
+    requestJson<Resp<UpgradeDiagnostics>>('/api/system/upgrade/' + encodeURIComponent(jobId) + '/diagnostics', { signal }),
+  upgradeLog: async (jobId: string, signal?: AbortSignal): Promise<{blob: Blob; filename: string}> => {
+    const response = await authFetch('/api/system/upgrade/' + encodeURIComponent(jobId) + '/log', {
+      signal, headers: { Accept: 'text/plain' },
+    })
+    if (response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'text/plain')
+      throw new Error('服务端未返回诊断文本，未下载')
+    const blob = await response.blob()
+    if (!blob.size) throw new Error('服务端返回空诊断文件，未下载')
+    return { blob, filename: 'upgrade-' + jobId.replace(/[^A-Za-z0-9_-]/g, '_') + '.txt' }
+  },
   imLinks: () => jget<{ ok: boolean; data: { active_id: string; links: Dict[] }; hints: Record<string, string> }>('/api/im/links'),
   imSave: (id: string | null, body: Dict) => id
     ? requestJson('/api/im/links/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -606,14 +721,58 @@ export const api = {
     requestJson('/api/im/quote/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   imReceipt: (cmdId: string) => jget<{ ok: boolean; hint?: string; data: { cmd_id: string; status: string; ok: boolean; code: string; reason: string } }>('/api/im/receipts/' + encodeURIComponent(cmdId)),
 
-  qa: (question: string) => result(async () => {
-    const r = await jpost<Resp<Dict>>('/api/qa', { question })
-    const d = r.data || {}
-    return { ...r, data: { answer: s(d.answer, ''), chart: normChart(d.chart as Dict | undefined) } } as Resp<QaResult>
-  }, { answer: '没有可用的问答结果', chart: undefined }),
+  difyFlow: (stage: 'analysis'|'reply', signal?: AbortSignal) => requestJson<Resp<DifyFlowState>>('/api/dify/'+stage+'/config', {signal}),
+  saveDifyFlow: (stage: 'analysis'|'reply', body: {base_url:string;app_key:string;expected_revision:string}, signal?:AbortSignal) => requestJson<Resp<DifyFlowState>>('/api/dify/'+stage+'/config', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal}),
+  difyFlowDsl: async (stage:'analysis'|'reply') => {
+    const response=await authFetch('/api/dify/'+stage+'/dsl')
+    const url=URL.createObjectURL(await response.blob()),link=document.createElement('a')
+    link.href=url;link.download='xunjia-'+stage+'-0.6.0.yml';link.click()
+    setTimeout(()=>URL.revokeObjectURL(url),1000)
+  },
+  qaWorkflow: (signal?: AbortSignal) => requestJson<Resp<QaWorkflowState>>('/api/qa/workflow', { signal }),
+  qaWorkflowDsl: async () => {
+    const response = await authFetch('/api/qa/workflow/dsl')
+    const url = URL.createObjectURL(await response.blob())
+    const link = document.createElement('a')
+    link.href=url;link.download='xunjia-qa-workflow.yml';link.click()
+    setTimeout(()=>URL.revokeObjectURL(url),1000)
+  },
+  saveQaWorkflow: (body: QaWorkflowInput, signal?: AbortSignal) => requestJson<Resp<QaWorkflowState>>('/api/qa/workflow', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal,
+  }),
+  qaSessions: (signal?: AbortSignal,before?:string) => requestJson<Resp<{items: QaSession[];has_more?:boolean;next_before?:string|null;notice?:string}>>('/api/qa/sessions'+(before?'?before='+encodeURIComponent(before):''), { signal }),
+  createQaSession: (signal?: AbortSignal) => requestJson<Resp<QaSession>>('/api/qa/sessions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal,
+  }),
+  qaSession: async (sessionId: string, signal?: AbortSignal): Promise<Resp<QaSessionDetail>> => {
+    const r = await requestJson<Resp<QaSessionDetail>>(`/api/qa/sessions/${encodeURIComponent(sessionId)}`, { signal })
+    if (r.ok && Array.isArray(r.data?.messages)) r.data.messages = r.data.messages.map(message => ({
+      ...message, result: message.result ? normalizeQaAnswer(message.result as unknown as Dict) : undefined,
+    }))
+    return r
+  },
+  qa: (question: string, signal?: AbortSignal, scope?: QaRequestScope) => result(async () => {
+    const r = await requestJson<Resp<Dict>>('/api/qa', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({question, ...scope}), signal })
+    return { ...r, data: normalizeQaAnswer(r.data || {}) } as Resp<QaWorkflowAnswer>
+  }, { answer: '没有可用的问答结果', chart: undefined, candidates: [] } as QaWorkflowAnswer),
+}
+
+function normalizeQaAnswer(d: Dict): QaWorkflowAnswer {
+  return { answer: s(d.answer, ''), chart: normChart(d.chart as Dict | undefined),
+    session_id: optText(d.session_id), workflow_enabled: d.workflow_enabled === true, action: optText(d.action),
+    requires_selection: d.requires_selection === true, as_of: optText(d.as_of), notice: optText(d.notice),
+    candidates: Array.isArray(d.candidates) ? (d.candidates as Dict[])
+      .filter(item => item && typeof item === 'object' && typeof item.code === 'string' && typeof item.name === 'string')
+      .map(item => ({code: String(item.code), name: String(item.name), current_day: item.current_day === true})) : [],
+  }
 }
 
 /** 链路追踪:后端消息若带 trace 用后端,缺少服务端审计证据时明确标注缺失。 */
+export async function getMessageTrace(messageId: string, signal?: AbortSignal): Promise<TraceView> {
+  const r = await requestJson<Resp<TraceView>>(`/api/negotiation/messages/${encodeURIComponent(messageId)}/trace`, { signal })
+  return r.data
+}
+
 export function traceOf(m: ChatMsg & { idx: number; cp: string; trace?: TraceView }): TraceView {
   return m.trace && !Array.isArray(m.trace) ? m.trace : { id: m.id || '—', text:m.text, status:'无审计记录', summary:'服务端尚未提供此消息的审计证据', dirLabel:['human','bot','self'].includes(m.role) ? '发送' : ['cp','peer'].includes(m.role) ? '接收' : '未提供', steps:[], meta:[] }
 }

@@ -29,8 +29,8 @@ const states: Record<string,string> = {ACTIVE:'有效报价记录',WITHDRAWN:'�
       <tr v-for="row in props.rows" :key="row.rowId" data-testid="qt-detail-row" :data-row-id="row.rowId">
         <td class="qt-name"><input type="checkbox" :checked="isPicked(row.rowId || '')" :aria-label="`选择QT明细 ${row.qtFields?.NegotiationID || ''}`" @change="emit('toggle', row.rowId || '')" />
           <button type="button" @click="emit('open',row)">{{ row.name }}</button><small>{{ row.code }}</small></td>
-        <td data-testid="qt-bid-volume">{{ row.ibv }}</td><td data-testid="qt-bid-floor">{{ row.dispIb || row.ib }}</td>
-        <td data-testid="qt-ofr-floor">{{ row.dispIo || row.io }}</td><td>{{ row.iov }}</td>
+        <td data-testid="qt-bid-volume">{{ row.intentConflicts?.includes('BUY') ? '多组待核对' : row.ibv }}</td><td data-testid="qt-bid-floor">{{ row.dispIb || row.ib }}</td>
+        <td data-testid="qt-ofr-floor">{{ row.dispIo || row.io }}</td><td>{{ row.intentConflicts?.includes('SELL') ? '多组待核对' : row.iov }}</td>
         <td v-for="col in columns" :key="col.key" :data-qt-field="col.key" :title="text(row,col.key)">{{ text(row,col.key) }}</td>
         <td :title="row.qtStatus">{{ states[row.qtStatus || ''] || row.qtStatus || '待核对' }}</td>
       </tr>

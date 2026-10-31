@@ -43,9 +43,11 @@ def contract(mysql):
 def _type(text):
     lower=text.lower().replace('integer','int')
     return re.sub(r'^(bigint|int)\(\d+\)',r'\1',lower)
+# Added by explicit DBA migration 004; absence degrades quote storage only.
+OPTIONAL_COLUMNS=frozenset({'xj2_message.reply_json'})
 def schema_health(repository):
     expected=contract(repository.db.mysql)
-    missing_tables=[];missing_columns=[];invalid_columns=[];missing_indexes=[]
+    missing_tables=[];missing_columns=[];invalid_columns=[];missing_indexes=[];optional_missing=[]
     try:
         with repository.db.transaction(write=False) as tx:
             if repository.db.mysql:
@@ -73,7 +75,8 @@ def schema_health(repository):
                         if row['unique']: unique.add(name)
                 normalized={name:tuple(col for _,col in sorted(parts)) for name,parts in indexes.items()}
                 for name,typ in spec['columns'].items():
-                    if name not in actual:missing_columns.append(table+'.'+name)
+                    if name not in actual:
+                        (optional_missing if table+'.'+name in OPTIONAL_COLUMNS else missing_columns).append(table+'.'+name)
                     elif actual[name]!=typ:invalid_columns.append(table+'.'+name)
                 for name,columns in spec['secondary'].items():
                     if normalized.get(name)!=columns:missing_indexes.append(table+'.'+name)
@@ -86,7 +89,8 @@ def schema_health(repository):
     return {'ready':not bool(problems),'code':'SCHEMA_INCOMPLETE' if problems else 'SCHEMA_OK',
             'tables_expected':len(expected),'indexes_expected':sum(len(s['secondary']) for s in expected.values()),
             'missing_tables':missing_tables,'missing_columns':missing_columns,
-            'invalid_columns':invalid_columns,'missing_indexes':missing_indexes}
+            'invalid_columns':invalid_columns,'missing_indexes':missing_indexes,
+            'warnings':['OPTIONAL_COLUMN_MISSING:'+name for name in optional_missing]}
 def release_identity():
     root=Path(__file__).resolve().parents[1]
     identity={'build_id':'development','release_id':'development','boot_id':uuid.uuid4().hex,'pid':os.getpid()}

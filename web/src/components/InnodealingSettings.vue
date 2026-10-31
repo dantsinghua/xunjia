@@ -74,7 +74,7 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);clearSecrets()}
           <label>密码<input v-model="form.password" name="inno-password" type="password" autocomplete="new-password" :placeholder="state.password_set ? '已保存，留空不修改' : '填写 Innodealing 登录密码'" /></label>
         </fieldset>
         <p class="hint">用户名和密码只写入服务端受保护配置，不回显、不存入浏览器。保存时会登录并换取会话；会话失效后后台会自动重新登录。运行中修改凭据须先停止采集；测试新密码不会覆盖已保存配置。</p>
-        <div class="controls">
+        <div class="controls settings-actions">
           <button class="btn-primary" type="submit" :disabled="busy || !!state.collector_active" data-testid="inno-save">保存配置</button>
           <button class="btn-ghost" type="button" :disabled="busy" @click="act('test')" data-testid="inno-test">测试连接</button>
           <button class="btn-primary" type="button" :disabled="busy || !!state.collector_active || !state.configured || !state.reader_configured" @click="act('start')" data-testid="inno-start">启动采集</button>
@@ -95,7 +95,7 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);clearSecrets()}
       <p v-if="state.database && !state.database.ok" class="error">{{ state.database.note }}</p>
       <p v-if="state.reader_configured && state.reader">{{ state.reader.note }}</p>
     </template>
-    <button v-else class="btn-ghost" type="button" :disabled="loading" @click="refresh()">重新读取行情配置</button>
+    <div v-else class="settings-actions"><button class="btn-ghost" type="button" :disabled="loading" @click="refresh()">重新读取行情配置</button></div>
   </section>
 </template>
 <style scoped>

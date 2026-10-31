@@ -10,18 +10,46 @@ A 对单成员、单条入站的“完整直接收益率报价＋两个显式收
 
 完整的“能/可以/能否＋价＋方向＋量”询问会在 A 联合核对前获得问句提示；事实门仍读取真实券范围原文，拒绝把它提交为 QUOTE，不按模型裁剪后的片段忽略问句，也不把陈述后附带的问题一律当询价。公开 `yield_gap` 的两个操作数都必须来自当前对手可见原文、带实际回执的我方已发价、已验证的该对手报价或可信公共工具收益率字段。计算成功、`hypothetical` 或自报 `source_ref` 本身不能证明可公开；私有边界、未发开盘计划和其他对手汇总不提供这种来源。公开值偶合内部边界仍按公开来源允许。工具本身保持免 Token，既有算术精度和完整报价域均不变。
 
+## 企点引用回复（reply）
+
+企点事件的 `payload.reply` 经 `Inbox` 受限校验后存入 `xj2_message.reply_json`，只作上下文，不进 `text`、`content_hash`、重放比对或证据/片段来源。业务投影 Code 节点把消息行的七键对象改写为 `reply={text,text_is_summary,from,ts[,message_id]}`：原文优先、摘要兜底；`from` 与消息 `direction` 同域；A 阶段 `message_id` 为同 namespace 别名，生产 B 不给任何消息 ID。七键原对象（`source_text`、`source_direction`、`sender_id`、`source_ext_msg_id`）不进模型视图。无引用时视图与旧版逐字节相同。合同见 [2026-10-28-qidian-reply-context.md](../../docs/implementation/2026-10-28-qidian-reply-context.md)。
+
+数据库：新建库由 `server/negotiation/schema.py` 建列；已有 OceanBase 库由 DBA 手工执行 [004_message_reply.sql](../../sql/oceanbase/004_message_reply.sql)，执行后**重启询价端**才开始存引用（列探测在进程内缓存）。已有本地 SQLite 库不自动加列，可手工执行 `ALTER TABLE xj2_message ADD COLUMN reply_json TEXT;`（SQLite 必须写 `TEXT`）。未加列时入库照常、不存引用、进程内告警一次；健康检查只在 `warnings` 中列出，不影响就绪。
+
 ## 生成及导入
 
-选择工作区**已经配置**的 provider 和 model；无需改其他应用或新增供应商。
+仓库内导出件以 `build()` 为准，模型为明确占位符，不是客户已配置的应用。修改 `node_code.py` 或 `prompts.py` 后在仓库根目录重新生成四个文件：
 
 ```bash
-.venv/bin/python scripts/build_dify0153_dsl.py \
-  --version 0.15.3 --provider openai_api_compatible --model MODEL_NAME
-.venv/bin/python scripts/build_dify0153_dsl.py \
-  --version 1.17.1 --provider EXISTING_PROVIDER --model MODEL_NAME
+.venv/bin/python - <<'PY'
+from pathlib import Path
+import yaml
+from dify.negotiation_v22.build import build
+for version, folder in (('0.15.3', 'chatflow_0153'), ('1.17.1', 'chatflow_1171')):
+    for stage in ('analysis', 'reply'):
+        doc = build(stage, version=version, provider='CONFIGURE_MODEL_PROVIDER', model='CONFIGURE_MODEL_NAME')
+        Path('dify', folder, 'v22-' + stage + '.yml').write_text(
+            yaml.safe_dump(doc, allow_unicode=True, sort_keys=False), encoding='utf8')
+PY
 ```
 
-分别导入对应目录的 `v22-analysis.yml`、`v22-reply.yml`，检查模型选择后发布，并取得各应用的 API key。仓库内生成件含明确模型占位符；它们不是客户已配置的应用。1.17.1 需选该工作区现有模型插件的 provider 标识；本包不安装或升级插件。
+产物为 `dify/chatflow_0153/v22-analysis.yml`、`v22-reply.yml` 与 `dify/chatflow_1171/` 同名两件。导入时选择工作区**已经配置**的 provider 和 model；无需改其他应用或新增供应商。1.17.1 需选该工作区现有模型插件的 provider 标识；本包不安装或升级插件。
+
+客户重新导入（含企点引用版本）：
+
+1. 导出并保存客户现有 A、B 两个应用的 DSL 备份，记录已发布 workflow ID、graph 哈希与当前配置的两个 App API key（key 不写入仓库、日志或交接）。
+2. 按客户 Dify 版本取对应目录（0.15.3 → `chatflow_0153`，1.17.1 → `chatflow_1171`）的 `v22-analysis.yml`、`v22-reply.yml` 导入，选择已配置的 provider/model 后发布。
+3. 若导入为新应用：取得新 A/B App API key，更新 `XUNJIA_DIFY_ANALYSIS_APP_KEY`、`XUNJIA_DIFY_REPLY_APP_KEY` 后重启询价端；原应用保留不删，供回退。
+4. **上线顺序：执行 004（已有 OceanBase 库）→ 完成新 A/B 导入 → 升级询价端服务端。** 004 放在前后均可（未加列时降级、不存引用，执行后需重启询价端）。新 Dify 配旧服务端时消息行没有 `reply`，行为与改前一致；旧 Dify 配新服务端时，旧投影会把七键原对象（含原文全文与原生 ID）原样交给模型且没有提示词规则。
+5. 用合成会话做一次 A/B 冒烟（不对外发询价），确认模型视图含投影后的 `reply`、不含七键原对象。
+
+回退（与上线反序：先停服务、清值，再回退服务端，最后 Dify）：
+
+1. 先停询价端服务（停入站）。新服务端仍在入站时清值，停机前新到的引用会再写入 `reply_json`。
+2. 服务停止后、部署旧服务端前由 DBA 清空引用值（只清值、不删列）：`UPDATE xj2_message SET reply_json = NULL WHERE reply_json IS NOT NULL;`，再核对 `SELECT COUNT(*) FROM xj2_message WHERE reply_json IS NOT NULL;` 为 0。旧代码 `SELECT *` 不过滤未知列，不清值会把原串带入 Dify 上下文；丢失的仅是可再生的引用上下文，消息其它列不变。
+3. 部署旧服务端代码并启动询价端。
+4. 服务端回退完成后再回退 Dify：切回上文「客户重新导入」第 1 步备份的原应用（恢复原 key 配置并重启询价端），或导入备份 DSL。
+5. 004 只加列，旧代码 `INSERT` 用显式列清单，多一列不受影响，无需删列。
 
 应用配置：
 

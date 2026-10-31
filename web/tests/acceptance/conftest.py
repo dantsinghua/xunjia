@@ -72,7 +72,8 @@ def ui(browser, frontend_url):
     state = {"answer": "**真实回答标记**", "bot_error": None, "chat_error": False,
              "auth_status": 200, "qa_status": 200, "bond_detail": {}, "rfq_enabled": False,
              "rfq_status": "queued", "rfq_fail_first": False, "rfq_stale": False,
-             "reconciled": False, "reconcile_error": False}
+             "reconciled": False, "reconcile_error": False,
+             "qa_sessions": [], "qa_messages": {}, "qa_requests": {}}
     bond = {"code": "000100.IB", "name": "合成债券", "tags": [], "status": "待询价"}
 
     def route(request_route):
@@ -106,11 +107,60 @@ def ui(browser, frontend_url):
                 "heartbeat_seconds":60,"connect_timeout_seconds":10,"encoding":"utf-8","sending_timezone":"Asia/Shanghai","timezone":"Asia/Shanghai",
                 "qt_account_ids":[],"mapped_account_count":0,"collector_active":False,"collector_state":"stopped","code":"QT_STOPPED","note":"QT未配置",
                 "fix_session_connected":False,"stats":{"quotes_received":0,"quotes_written":0,"duplicate_quotes":0,"rejected_quotes":0,"reconnects":0}}
+        elif parsed.path == "/api/qa/sessions":
+            if request.method == 'POST':
+                assert request.post_data_json == {}
+                sid = 'synthetic-qa-session-' + str(len(state['qa_sessions']) + 1)
+                stamp = time.time()
+                session = {'id': sid, 'title': '新会话', 'created_at': stamp, 'updated_at': stamp}
+                state['qa_sessions'].insert(0, session)
+                state['qa_messages'][sid] = []
+                data['data'] = session
+            else:
+                assert request.method == 'GET'
+                data['data'] = {'items': sorted(state['qa_sessions'], key=lambda item: item['updated_at'], reverse=True),
+                                'has_more': False, 'next_before': None}
+        elif parsed.path.startswith('/api/qa/sessions/'):
+            assert request.method == 'GET'
+            sid = parsed.path.rsplit('/', 1)[1]
+            session = next((item for item in state['qa_sessions'] if item['id'] == sid), None)
+            if session is None:
+                status, data = 404, {'ok': False, 'hint': '合成会话不存在'}
+            else:
+                data['data'] = {'session': session, 'messages': state['qa_messages'][sid]}
+        elif parsed.path == '/api/qa/workflow':
+            data['data'] = {'available': True, 'enabled': True, 'configured': True, 'app_key_set': True,
+                            'base_url': 'https://synthetic-dify.invalid/v1', 'tool_base_url': frontend_url,
+                            'revision': 'synthetic-qa-r1', 'hint': '合成问答接口', 'tool_path': '/api/agent/tools/qa_market/query'}
         elif parsed.path == "/api/qa":
             status = state["qa_status"]
-            data["data"] = {"answer": state["answer"]}
             if status != 200:
                 data = {"ok": False, "hint": "合成身份已失效"}
+            else:
+                body = request.post_data_json
+                assert set(body) == {'question', 'session_id', 'request_id'}
+                sid, rid = body['session_id'], body['request_id']
+                assert isinstance(rid, str) and rid
+                session = next((item for item in state['qa_sessions'] if item['id'] == sid), None)
+                if session is None:
+                    status, data = 404, {'ok': False, 'hint': '合成会话不存在'}
+                elif rid in state['qa_requests']:
+                    original = state['qa_requests'][rid]
+                    assert original['body'] == body, 'Same request identity must keep its original question and session'
+                    data['data'] = original['result']
+                else:
+                    stamp = time.time()
+                    result = {'answer': state['answer'], 'session_id': sid}
+                    messages = state['qa_messages'][sid]
+                    if not messages:
+                        session['title'] = body['question'][:30]
+                    messages.extend([
+                        {'id': rid+'-user', 'role': 'user', 'text': body['question'], 'request_id': rid, 'state': 'complete', 'created_at': stamp},
+                        {'id': rid+'-ai', 'role': 'ai', 'text': state['answer'], 'request_id': rid, 'state': 'complete', 'created_at': stamp, 'result': result},
+                    ])
+                    session['updated_at'] = stamp
+                    state['qa_requests'][rid] = {'body': body, 'result': result}
+                    data['data'] = result
         elif parsed.path == "/api/strategy":
             if request.method == "POST":
                 if state.get("strategy_error"):

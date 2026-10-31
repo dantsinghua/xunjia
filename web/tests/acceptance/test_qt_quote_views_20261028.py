@@ -35,17 +35,17 @@ def install_views(page):
     return rows,captured
 
 
-def test_all_quotes_only_common_six_quote_fields_and_bid_ofr_sources(ui):
+def test_all_quotes_include_four_bond_intent_columns_and_market_sources(ui):
     page,url,_,requests,_=ui;install_views(page)
     page.goto(url+'/#/quote')
     table=page.get_by_test_id('quote-common-table')
     expect(table.locator('.mkt-row')).to_have_count(1)
-    expect(table.locator('th',has_text='bid 底价')).to_have_count(0)
-    expect(table.locator('th',has_text='ofr 底价')).to_have_count(0)
+    expect(table.locator('th',has_text='bid 底价')).to_have_count(1)
+    expect(table.locator('th',has_text='ofr 底价')).to_have_count(1)
     row=table.locator('.mkt-row')
     expect(row).to_contain_text('QT');expect(row).to_contain_text('1.98')
     expect(row).to_contain_text('3000');expect(row).to_contain_text('国际')
-    assert len(table.locator('thead tr').nth(1).locator('th').all())==8
+    assert len(table.locator('thead tr').nth(1).locator('th').all())==12
     page.goto(url+'/#/monitor')
     assert not any('/api/im/quote/stop' in request.url for request in requests)
 

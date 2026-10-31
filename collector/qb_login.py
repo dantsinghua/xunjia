@@ -29,8 +29,19 @@ def cookie_header(jar) -> str:
 
 def _request(client, method, url, headers, **kwargs):
     dial, hdrs, extensions = httpx_request(url, headers)
+    if dial != url:
+        import httpx
+        original = httpx.Request(method, url, headers=headers)
+        client.cookies.set_cookie_header(original)
+        if 'cookie' in original.headers:
+            hdrs['Cookie'] = original.headers['cookie']
     options = {"extensions": extensions} if extensions else {}
-    return getattr(client, method)(dial, headers=hdrs, **options, **kwargs)
+    response = getattr(client, method)(dial, headers=hdrs, **options, **kwargs)
+    if dial != url:
+        # Cookie domains belong to the website, not the TCP gateway address.
+        response.request = original
+        client.cookies.extract_cookies(response)
+    return response
 
 
 def _error_text(response) -> str:

@@ -96,17 +96,33 @@ def test_signin_requires_username_and_password():
 
 
 def test_signin_rewrites_tcp_to_site_egress_without_changing_host(monkeypatch):
+    import httpx
+
     monkeypatch.setenv('XUNJIA_EGRESS_GATEWAY', '172.26.64.36')
     calls = []
-    client = _client([
-        (200, {}, b'<form id="form-signin">', [('acw_tc', 'waf', 'web.innodealing.com')]),
-        (302, {'location': '/dashboard'}, b'', [('sid', 'synthetic-sid', '.innodealing.com')]),
-    ], calls)
-    signin('anlin9', 'synthetic-pass', client_factory=client)
-    assert [urlsplit(item[1]).hostname for item in calls] == ['172.26.64.36', '172.26.64.36']
-    assert [urlsplit(item[1]).port for item in calls] == [11443, 11443]
-    assert calls[0][2]['headers']['Host'] == 'web.innodealing.com'
-    assert calls[1][2]['headers']['Host'] == 'web.innodealing.com'
+
+    def transport(request):
+        calls.append(request)
+        if request.method == 'GET':
+            return httpx.Response(200, headers={
+                'Set-Cookie': 'acw_tc=waf; Domain=.innodealing.com; Path=/; Secure',
+            }, content=b'<form id="form-signin">')
+        return httpx.Response(302, headers={
+            'Location': '/dashboard',
+            'Set-Cookie': 'sid=synthetic-sid; Domain=.innodealing.com; Path=/; Secure',
+        })
+
+    def client(**kwargs):
+        assert kwargs['proxy'] is None and kwargs['verify'] is True and kwargs['trust_env'] is False
+        return httpx.Client(transport=httpx.MockTransport(transport), **kwargs)
+
+    result = signin('anlin9', 'synthetic-pass', client_factory=client)
+    assert [request.url.host for request in calls] == ['172.26.64.36', '172.26.64.36']
+    assert [request.url.port for request in calls] == [11443, 11443]
+    assert calls[0].headers['Host'] == calls[1].headers['Host'] == 'web.innodealing.com'
+    assert calls[1].headers['Cookie'] == 'acw_tc=waf'
+    assert result['sid'] == 'synthetic-sid'
+    assert result['cookie'] == 'acw_tc=waf; sid=synthetic-sid'
 
 
 def test_cookie_header_last_value_wins():

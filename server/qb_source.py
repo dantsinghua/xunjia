@@ -520,8 +520,8 @@ class QBSource:
                 "best_ofr_side": best.get("best_ofr_side"),
                 "firmness": best.get("firmness"),
                 "clearing": best.get("clearing"),
-                "updated_at": r["update_time"].timestamp() if r["update_time"] else None,
-                "bid_vol_str": r["bid_vol_str"], "ofr_vol_str": r["ofr_vol_str"],
+                "updated_at": r["update_time"].timestamp() if r.get("update_time") else None,
+                "bid_vol_str": r.get("bid_vol_str"), "ofr_vol_str": r.get("ofr_vol_str"),
                 "bid_quote_type": r.get("bid_quote_type"), "ofr_quote_type": r.get("ofr_quote_type"),
                 "bid_net_price": self._f(r.get("bid_net_price")), "ofr_net_price": self._f(r.get("ofr_net_price")),
             })
@@ -532,12 +532,12 @@ class QBSource:
                       "WHERE bond_uni_code=%s AND trade_time >= %s ORDER BY trade_time DESC LIMIT 50", (u, today))
             for t, bid, dtp, y in c.fetchall():
                 trades.append({"time": t.timestamp(), "channel": self.broker_name(bid),
-                               "mark": {0: "GVN", 1: "TKN"}.get(dtp, "TRD"),   # deal_type 含义待核
+                               "mark": "TRD", "deal_type": dtp,  # Native direction code is not yet verified.
                                "yield": self._f(y), "vol_wan": None})
             # 盘中:该券各经纪商报价流水(今日),按时间取 bid/ofr 与中债估值
             c.execute("SELECT update_time, bid_yield, ofr_yield, cnbd_yield_mat, bid_quote_type, ofr_quote_type FROM qb_live_best_quote "
-                      "WHERE bond_uni_code=%s AND update_time >= %s ORDER BY update_time LIMIT 2000", (u, today))
-            for t, by, oy, vy, bt, ot in c.fetchall():
+                      "WHERE bond_uni_code=%s AND update_time >= %s ORDER BY update_time DESC,id DESC LIMIT 2000", (u, today))
+            for t, by, oy, vy, bt, ot in reversed(c.fetchall()):
                 ts = t.timestamp()
                 if by is not None and bt in (1, 3):
                     intra_bid.append({"t": ts, "y": float(by)})

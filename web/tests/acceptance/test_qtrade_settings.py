@@ -32,6 +32,7 @@ def qt(ui):
         r.fulfill(content_type='application/json',body=json.dumps({'ok':True,'data':data}))
     page.route(base+'/api/im/qt-quote**',route)
     page.goto(base+'/#/link')
+    page.locator('#settings-nav-qt').click()
     expect(page.get_by_test_id('qt-save')).to_be_enabled()
     return page,base,state,calls
 
@@ -39,7 +40,10 @@ def qt(ui):
 def test_account_ids_and_secret_flags_in_same_collection_page(qt):
     page,_,_,_=qt
     expect(page.get_by_test_id('qt-config')).to_be_visible()
+    expect(page.get_by_test_id('inno-config')).to_be_hidden()
+    page.locator('#settings-nav-innodealing').click()
     expect(page.get_by_test_id('inno-config')).to_be_visible()
+    page.locator('#settings-nav-qt').click()
     expect(page.locator('[name=qt-username]')).to_have_value('synthetic-fix-account')
     expect(page.locator('[name=qt-accounts]')).to_have_value('qt-self')
     expect(page.locator('[name=qt-password]')).to_have_value('')
@@ -70,6 +74,7 @@ def test_start_navigation_and_return_never_stop_background_source(qt):
     expect(page.locator('.mkt-row').first).to_be_visible()
     assert state['collector_active'] and not any(x[1].endswith('/stop') for x in calls)
     page.goto(base+'/#/link')
+    page.locator('#settings-nav-qt').click()
     expect(page.get_by_test_id('qt-state')).to_contain_text('持续接收中')
     page.get_by_test_id('qt-stop').click()
     expect(page.get_by_test_id('qt-start')).to_be_enabled()

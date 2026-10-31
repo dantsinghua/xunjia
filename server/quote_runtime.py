@@ -36,7 +36,7 @@ class QBMarket:
         db.init_db(None,path=cache_path)
         self.db=db;self.source=QBSource(connection_options);self.groups={}
 
-    MAX_BROKER_BOOK = 20000
+    MAX_BROKER_BOOK = 100000
 
     def rows(self,channel,broker):
         # Compatibility for callers that explicitly need an export-sized set.
@@ -62,9 +62,9 @@ class QBMarket:
         try:broker_id=int(f['broker'])
         except ValueError:raise ValueError('经纪商编号无效') from None
         with self.source._lock:
-            if len(self.source.book)>self.MAX_BROKER_BOOK:
-                raise ValueError('单经纪商行情超过2万券容量，需扩容书簿查询后重试')
-            records,*_=self.source.page_one_broker(broker_id,0,0,self.MAX_BROKER_BOOK+1,['bond-all'])
+            records,total,*_=self.source.page_one_broker(broker_id,0,0,self.MAX_BROKER_BOOK+1,['bond-all'])
+            if total>self.MAX_BROKER_BOOK:
+                raise ValueError('单经纪商行情超过查询容量，请缩小范围或扩容后重试')
             sources=[public_row({**r['best'],'flow_id':r['best']['issue_time']},r['static']) for r in records]
         wanted=set(codes) if codes is not None else None
         omitted=set(excluded)

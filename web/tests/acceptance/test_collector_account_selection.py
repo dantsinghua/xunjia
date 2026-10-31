@@ -76,6 +76,7 @@ def open_selector(selector):
     page, base, *_ = selector
     page.set_viewport_size({'width': 1920, 'height': 1080})
     page.goto(base + '/#/link')
+    page.locator('#settings-nav-account').click()
     expect(page.get_by_test_id('collector-account-settings')).to_be_visible()
     expect(page.get_by_test_id('collector-workbench')).to_have_value('wb-a')
     return page
@@ -111,7 +112,7 @@ def test_save_distinct_online_pair_reads_correct_contacts_and_survives_refresh(s
     expect(page.get_by_test_id('collector-contacts')).not_to_contain_text('Person from wb-a')
     assert selection_writes(s) == [('POST', '/api/im/binding/select', {
         'workbench_id': 'wb-b', 'account_uid': 'other-account', 'expected_version': 1})]
-    page.reload();expect(page.get_by_test_id('collector-current')).to_contain_text('wb-b')
+    page.reload();page.locator('#settings-nav-account').click();expect(page.get_by_test_id('collector-current')).to_contain_text('wb-b')
     expect(page.get_by_test_id('collector-workbench')).to_have_value('wb-b')
     expect(page.get_by_test_id('collector-account')).to_have_value('other-account')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -130,6 +131,7 @@ def test_authenticated_offline_directory_is_labeled_and_cannot_be_selected(selec
 def test_empty_directory_preserves_saved_identity_and_does_not_invent_options(selector):
     page, base, s, *_ = selector;s['workbenches'] = []
     page.goto(base + '/#/link')
+    page.locator('#settings-nav-account').click()
     expect(page.get_by_test_id('collector-current')).to_contain_text('wb-a')
     expect(page.get_by_test_id('collector-current')).to_contain_text('目录暂不可用')
     expect(page.get_by_test_id('collector-workbench').locator('option')).to_have_count(1)
@@ -188,6 +190,7 @@ def test_late_contact_response_from_unmounted_old_pair_cannot_overwrite_new_pair
     s['selected'] = {'workbench_id': 'wb-b', 'account_uid': 'other-account', 'version': 2}
     s['hold_contacts'] = False
     page.goto(selector[1] + '/#/link')
+    page.locator('#settings-nav-account').click()
     expect(page.get_by_test_id('collector-current')).to_contain_text('wb-b')
     selector[4](s['held'].pop(), {'ok': True, 'data': old_book})
     page.get_by_test_id('collector-read-saved').click()
@@ -208,12 +211,15 @@ def test_mq_identity_summary_tracks_saved_pair_without_discarding_unsaved_connec
             'revision': 'synthetic-revision', 'note': 'MQ configured'}}))
     page.route(base + '/api/im/mq-config**', mq)
     open_selector(selector)
+    page.locator('#settings-nav-transfer').click()
     panel = page.get_by_test_id('mq-config')
     expect(panel.locator('.summary')).to_contain_text('wb-a')
     page.locator('[name=mq-base-url]').fill('https://unsaved-draft.synthetic.invalid')
     page.locator('[name=mq-client-cert]').fill('/synthetic/draft-retained.crt')
+    page.locator('#settings-nav-account').click()
     pick_b(page);page.get_by_test_id('collector-connect').click()
     expect(page.get_by_test_id('collector-current')).to_contain_text('wb-b')
+    page.locator('#settings-nav-transfer').click()
     expect(panel.locator('.summary')).to_contain_text('wb-b')
     expect(page.locator('[name=mq-base-url]')).to_have_value('https://unsaved-draft.synthetic.invalid')
     expect(page.locator('[name=mq-client-cert]')).to_have_value('/synthetic/draft-retained.crt')
@@ -292,6 +298,7 @@ def test_real_backend_online_contacts_reach_quote_and_offline_selection_is_block
     page.route_web_socket('**/*', lambda ws: None)
     try:
         page.goto(frontend_url + '/#/link')
+        page.locator('#settings-nav-account').click()
         expect(page.get_by_test_id('collector-account-settings')).to_be_visible()
         page.get_by_test_id('collector-workbench').select_option(wid)
         page.get_by_test_id('collector-account').select_option(uid)

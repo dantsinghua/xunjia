@@ -85,6 +85,7 @@ class QuoteControl:
         self._last_probe=None;self._database=None
         self._dictionary_resolver=None
         self._stats.update(dictionary_pending=0,dictionary_resolved=0,dictionary_failures=0)
+        self._stats.update(snapshot_quotes='pending',snapshot_trades='pending')
     def _database_options(self):
         options=getattr(getattr(self.reader,"source",None),"connection_options",None)
         return options if options is not None else database_options()
@@ -207,6 +208,8 @@ class QuoteControl:
             if key in values:self._stats[key]=values[key]
         if 'state' in values:self._state=values['state']
         if self._state=='streaming':self._code='QUOTE_STREAM_OPEN';self._note='行情连接已打开；是否收到报价请查看实际入库计数'
+        if 'unavailable' in (self._stats.get('snapshot_quotes'),self._stats.get('snapshot_trades')):
+            self._note+='；当日快照补取未完成，当前只显示已成功采集的数据'
     async def _supervise(self,values):
         attempt=0;logins=0
         try:

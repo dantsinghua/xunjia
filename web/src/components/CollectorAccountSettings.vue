@@ -192,7 +192,7 @@ onBeforeUnmount(() => { disposed = true; catalogRequest++; actionRequest++; sync
       </fieldset>
       <p v-if="workbench && !workbench.accounts.length" class="warning">此工作台尚未上报企点账号，请刷新采集端目录。</p>
       <p v-if="draftStale" class="warning">{{ institutional ? '采集端当前收发状态未确认；请检查文件中转和原生登录状态，暂不能启用发送。' : '目录已过期，可保存选择并读取缓存；尚未确认采集端当前在线，不会因此启用发送。' }}</p>
-      <div class="controls">
+      <div class="controls settings-actions">
         <button class="btn-primary" type="submit" data-testid="collector-connect" :disabled="loading || busy || !account || (institutional && draftStale)">保存选择并读取对应通讯录</button>
         <button class="btn-ghost" type="button" data-testid="collector-refresh" :disabled="loading || busy" @click="load(true)">刷新采集端目录</button>
         <button v-if="saved" class="btn-ghost" type="button" data-testid="collector-read-saved" :disabled="loading || busy" @click="readSaved">读取当前已选通讯录</button>

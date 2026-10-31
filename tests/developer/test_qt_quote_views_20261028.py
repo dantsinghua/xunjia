@@ -149,7 +149,8 @@ def test_price_floor_is_private_and_is_not_the_qt_bid_price(book):
     put(book,record(BidPx='1.90'),1)
     row=service(book,floor={'000001.IB':{'kind':'yield','value':'2.00'}}).page('alice',filter_spec={'channel':'qt'})['data'][0]
     assert row['ib']==row['io']=='2.00'
-    assert row['qt_fields']['BidPx']=='1.90' and row['ibv']=='1000'
+    assert row['qt_fields']['BidPx']=='1.90'
+    assert row['ibv'] is None and row['iov'] is None  # Counterparty sizes are not our bond intent.
     empty=service(book).page('alice',filter_spec={'channel':'qt'})['data'][0]
     assert empty['ib'] is empty['io'] is None
 

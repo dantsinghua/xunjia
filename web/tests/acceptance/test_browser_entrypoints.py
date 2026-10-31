@@ -10,6 +10,7 @@ def ask(ui, answer):
     state["answer"] = answer
     page.goto(url + "/#/chat")
     page.locator(".q-input").fill("合成问题")
+    expect(page.locator('button.send')).to_be_enabled()
     page.locator(".q-input").press("Enter")
     expect(page.locator(".md-body")).to_be_visible()
     return page
@@ -87,6 +88,7 @@ def test_identity_expiry_unmounts_the_active_business_page(ui):
     expect(page.locator(".q-input")).to_be_visible()
     state["qa_status"] = 401
     page.locator(".q-input").fill("过期后禁止继续")
+    expect(page.locator('button.send')).to_be_enabled()
     page.locator(".q-input").press("Enter")
     expect(page.get_by_role("heading", name="询价工作台登录")).to_be_visible()
     expect(page.locator(".q-input")).to_have_count(0)

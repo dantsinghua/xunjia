@@ -21,12 +21,14 @@ def test_transient_transport_failure_retains_session_but_real_401_expires(ui,fai
         else:route.fulfill(status=int(failure),json={'ok':False,'hint':'synthetic transport boundary'})
     page.route(base+'/api/qa',fail)
     page.locator('.q-input').fill('只读合成请求，不调用模型')
+    expect(page.locator('button.send')).to_be_enabled()
     page.locator('.q-input').press('Enter')
     if failure=='401':
         expect(page.get_by_test_id('xj-login-gate')).to_be_visible()
         assert page.evaluate("localStorage.getItem('xj_auth_token')") is None
     else:
-        expect(page.locator('.md-body')).to_contain_text('synthetic transport boundary' if failure=='502' else 'Failed to fetch')
+        expect(page.locator('.input-bar [role=alert]')).to_contain_text('synthetic transport boundary' if failure=='502' else 'Failed to fetch')
+        expect(page.locator('.md-body')).to_have_count(0)
         expect(page.locator('.q-input')).to_be_visible()
         expect(page.get_by_role('button',name='退出登录',exact=True)).to_be_visible()
         assert page.evaluate("localStorage.getItem('xj_auth_token')")==original

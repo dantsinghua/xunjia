@@ -1,16 +1,43 @@
 <script setup lang="ts">
 /** 数据链路追踪弹窗:一条消息从收到→归属→规则判定→动作的全链路(留痕)。
  *  还原设计稿 hasTrace。 */
-import { computed } from 'vue'
-import { traceOf } from '../api'
-import type { ChatMsg } from '../lib/types'
+import { computed, ref, watch } from 'vue'
+import { getMessageTrace, traceOf } from '../api'
+import type { ChatMsg, TraceView } from '../lib/types'
 import { useBodyScrollLock } from '../lib/useModal'
 
 const props = defineProps<{ msg: (ChatMsg & { idx: number; cp: string }) | null }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 useBodyScrollLock(() => !!props.msg)
 
-const trace = computed(() => (props.msg ? traceOf(props.msg) : null))
+const loaded = ref<TraceView | null>(null)
+const loading = ref(false)
+const error = ref('')
+watch(() => props.msg, async (msg, _, onCleanup) => {
+  const controller = new AbortController()
+  let current = true
+  onCleanup(() => { current = false; controller.abort() })
+  loaded.value = null
+  error.value = ''
+  loading.value = !!msg?.id
+  if (!msg?.id) return
+  try {
+    const result = await getMessageTrace(msg.id, controller.signal)
+    if (current) loaded.value = result
+  } catch (err) {
+    if (current) error.value = err instanceof Error ? err.message : '持久化证据读取失败'
+  } finally {
+    if (current) loading.value = false
+  }
+}, { immediate: true })
+const trace = computed(() => {
+  if (!props.msg) return null
+  if (loaded.value) return loaded.value
+  const base = traceOf(props.msg)
+  if (loading.value) return { ...base, status: '读取中', summary: '正在读取服务端持久化证据', steps: [] }
+  if (error.value) return { ...base, status: '读取失败', summary: error.value, steps: [] }
+  return base
+})
 const isBot = computed(() => props.msg && (props.msg.role === 'bot' || props.msg.role === 'human'))
 </script>
 
@@ -91,7 +118,7 @@ const isBot = computed(() => props.msg && (props.msg.role === 'bot' || props.msg
 .cost b { color: #1F6B3E; }
 .desc { font-size: 13px; color: #5C5148; line-height: 1.7; margin-top: 6px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.chip { padding: 3px 9px; border-radius: 7px; font-size: 11.5px; background: rgba(255,255,255,.9); border: 1px solid rgba(176, 28, 36,.14); color: #6E6258; white-space: nowrap; }
+.chip { padding: 3px 9px; border-radius: 7px; font-size: 11.5px; background: rgba(255,255,255,.9); border: 1px solid rgba(176, 28, 36,.14); color: #6E6258; overflow-wrap: anywhere; }
 .chip b { color: #2B2320; }
 .meta-list { display: flex; flex-direction: column; gap: 6px; }
 .meta-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 14px; border-radius: 10px; background: rgba(255,255,255,.75); border: 1px solid rgba(176, 28, 36,.1); font-size: 12.5px; }

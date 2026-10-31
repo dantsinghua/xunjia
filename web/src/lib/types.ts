@@ -16,6 +16,8 @@ export interface BondRow {
   val: string // "估值 / 净价"
   dur: string
   coupon: string
+  hasActiveIntent?: boolean
+  intentConflicts?: string[]
   ibv: string; ib: string; io: string; iov: string // 内部意向:bid量/bid底价/ofr底价/ofr量
   obs: string; obv: string; ob: string; oo: string; oov: string; oos: string // 外部:最优bid方/bid量/最优bid/最优ofr/ofr量/最优ofr方
   status: BondStatus
@@ -38,6 +40,10 @@ export interface ChannelBest {
 export interface TradeRow { t: string; ch: string; dir: string; p: string; v: string }
 export interface SeriesLine { max: string; min: string; d0?: string; d1?: string; d2?: string; [k: string]: unknown }
 export interface ModalCp { id: string; name: string; stage: string; spread: string; updated: string }
+export interface InternalInstruction {
+  groupId: string; side: string; volume: string; opening: string
+  limit: string; limitKind: string; status: string; tradeDay: string
+}
 export interface BondDetail {
   bond: BondRow
   channels: ChannelBest[]
@@ -45,6 +51,7 @@ export interface BondDetail {
   hist: { avg: string; zz: string; max: string; min: string; d0: string; d1: string; d2: string }
   intra: { bid: string; ofr: string; zz: string; max: string; min: string }
   modalCps: ModalCp[]
+  instructions?: InternalInstruction[]
 }
 
 export interface TradeBoard {

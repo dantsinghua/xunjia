@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import io
 import json
 from contextlib import nullcontext
-from fastapi import APIRouter,Body,Query,Request
+from fastapi import APIRouter,Body,Query,Request,HTTPException
 from fastapi.responses import Response,StreamingResponse
 from .prices import InvalidFact,number,comparison
 from .service import digest
@@ -66,6 +66,12 @@ def router(service,market,tools,transport,*,collector_selection=None):
     @r.get('/negotiation/messages/{thread_id}')
     def messages(request:Request,thread_id:str,after_revision:int=Query(0,ge=0),limit:int=Query(200,ge=1,le=500)):
         return {'ok':True,'data':store.raw_page(owner(request),thread_id,after_revision=after_revision,limit=limit)}
+    @r.get('/negotiation/messages/{message_id}/trace')
+    def message_trace(request:Request,message_id:str):
+        # Historical ownership comes from the persisted thread, not the
+        # currently selected collector. This read must work while it is offline.
+        try:return {'ok':True,'data':store.message_trace(owner(request),message_id)}
+        except LookupError as exc:raise HTTPException(status_code=404,detail=str(exc)) from None
     @r.get('/negotiation/updates')
     async def updates(request:Request,after:int=Query(0,ge=0)):
         who=owner(request)
@@ -379,10 +385,9 @@ def router(service,market,tools,transport,*,collector_selection=None):
         return {'ok':True,'data':[public_static(v) for v in rows if str(v.get('bond_uni_code')) in wanted]}
     @r.get('/bond/{code}')
     def bond(request:Request,code:str):
-        rows=market.resolve(owner(request),{'windcodes':[code]})
-        if not rows:return {'ok':False,'hint':'债券数据源尚无对应记录'}
-        details=market.detail_provider(code) if market.detail_provider else {}
-        return {'ok':True,'data':{'bond':rows[0],'instructions':[],**(details or {})}}
+        detail=market.detail(owner(request),code)
+        if detail is None:return {'ok':False,'hint':'债券数据源尚无对应记录'}
+        return {'ok':True,'data':detail}
     @r.post('/tools/{name}')
     @r.post('/agent/tools/{name}')
     def tool(name:str,body:dict=Body(default_factory=dict)):
@@ -451,7 +456,8 @@ def router(service,market,tools,transport,*,collector_selection=None):
             columns += [('qt_'+column['key'],column['label']+' ['+column['tag']+']') for column in COLUMNS]
             columns += [('qt_status','QT记录状态')]
         else:
-            columns=[('code','代码'),('name','债券'),('obs','最优bid方'),('obv','bid vol（万）'),('ob','最优bid'),
+            columns=[('code','代码'),('name','债券'),('ibv','内部bid vol（万）'),('ib','bid底价'),('io','ofr底价'),('iov','内部ofr vol（万）'),
+                     ('obs','最优bid方'),('obv','bid vol（万）'),('ob','最优bid'),
                      ('oo','最优ofr'),('oov','ofr vol（万）'),('oos','最优ofr方'),('val_yield','中债估值')]
         return spreadsheet(rows,columns)
     @r.get('/monitor/export')

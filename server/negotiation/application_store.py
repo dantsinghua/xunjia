@@ -1,6 +1,7 @@
 """Bindings, previews and read projections for the V2 production core only."""
 from __future__ import annotations
 import json
+from copy import deepcopy
 from .store import Store, encoded, identity, new_id
 from .prices import InvalidFact
 def status_label(group, peer=None):
@@ -20,6 +21,10 @@ def status_label(group, peer=None):
     return '询价中'
 
 class ApplicationStore(Store):
+    def message_trace(self, owner, message_id):
+        from .trace import message_trace
+        return message_trace(self, owner, message_id)
+
     @staticmethod
     def _member_handoff_pending(tx,peer):
         if peer['send_allowed']:return False
@@ -162,7 +167,19 @@ class ApplicationStore(Store):
         labels={g['bond_code']:status_label(g) for g in groups if not g['archived']}
         try:prefs=self.preferences(owner)
         except PermissionError:prefs={}
-        return labels,prefs.get('floors',{})
+        floors=deepcopy(prefs.get('floors',{}))
+        for group in groups:
+            if group['archived'] or group['state']=='CLOSED':continue
+            code=group['bond_code']
+            entry=floors.setdefault(code,{})
+            entry.setdefault('instructions',[]).append({
+                'group_id':group['group_id'],'our_side':group['our_side'],
+                'target_volume':group['target_volume'],'trade_day':group['trade_day'],
+                'opening_yield_pct':group['plan'].get('opening_yield_pct'),
+                'boundary':deepcopy(group['boundary']),
+                'state':group['state'],'status':status_label(group),
+            })
+        return labels,floors
     def switch_transport(self,owner,route,expected_version):
         if route not in ('oss','mail'):raise InvalidFact('Unsupported transport')
         with self.write(owner) as tx:

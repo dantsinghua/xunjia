@@ -23,7 +23,7 @@ def test_recorded_real_null_date_bp_three_bonds_reach_actual_server_preview_and_
     assert direct.status_code==200,direct.text
     assert len(direct.json()['data'])==3,{'direct':direct.json(),'book_codes':list(s['reader'].source.code2uni),'reader_stats':s['reader'].source.stats}
     listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(128)
-    backend='http://127.0.0.1:'+str(listener.getsockname()[1]);calls=[]
+    backend='http://127.0.0.1:'+str(listener.getsockname()[1]);calls=[];writes=[]
     server=uvicorn.Server(uvicorn.Config(app,log_level='error',access_log=False,lifespan='off'))
     thread=threading.Thread(target=lambda:server.run(sockets=[listener]),daemon=True);thread.start()
     deadline=time.monotonic()+10
@@ -41,6 +41,7 @@ def test_recorded_real_null_date_bp_three_bonds_reach_actual_server_preview_and_
             assert p.path in ['/api/bonds/resolve','/api/im/rfq/preview'],'No financial confirmation/send allowed'
         assert p.path!='/api/im/rfq/send'
         calls.append((req.method,p.path))
+        if req.method == 'POST':writes.append({'path':p.path,'body':req.post_data_json})
         response=route.fetch(url=backend+p.path+('?' + p.query if p.query else ''))
         route.fulfill(response=response)
     page.route('**/*',forward);page.route_web_socket('**/*',lambda ws:None)
@@ -70,7 +71,24 @@ def test_recorded_real_null_date_bp_three_bonds_reach_actual_server_preview_and_
             expect(item).to_contain_text('未提供')
         expect(preview.get_by_test_id('rfq-valuation-advisory')).to_have_count(3)
         expect(modal.get_by_test_id('rfq-confirm')).to_be_enabled()
-        assert [v for v in calls if v[0]=='POST']==[('POST','/api/bonds/resolve'),('POST','/api/im/rfq/preview')]
+        previews=[index for index,write in enumerate(writes) if write['path']=='/api/im/rfq/preview']
+        assert len(previews)==1, 'A single user preview must not create duplicate draft requests'
+        expected_codes={policy['code'] for policy in policies(s)}
+        selected=[(index,write['body']['selection']) for index,write in enumerate(writes)
+                  if write['path']=='/api/bonds/resolve' and 'filter' not in write['body']['selection']]
+        assert len(selected)==1, 'The explicit three-bond selection must resolve exactly once'
+        index,selection=selected[0]
+        assert index < previews[0], 'Resolve the selected bonds before requesting the server preview'
+        assert set(selection)=={'windcodes'}
+        assert len(selection['windcodes'])==3 and set(selection['windcodes'])==expected_codes
+        for write in writes:
+            if write['path']!='/api/bonds/resolve' or 'filter' not in write['body']['selection']:continue
+            background=write['body']['selection'];scope=background['filter']
+            assert set(background)=={'windcodes','filter'}
+            assert len(background['windcodes'])==3 and set(background['windcodes'])==expected_codes
+            assert set(scope)=={'keyword','chips','prices','groups','channel','broker'}
+            assert scope['channel']=='best' and scope['broker']=='' and scope['keyword']==''
+        assert all(write['path'] in ('/api/bonds/resolve','/api/im/rfq/preview') for write in writes)
         with app.state.repository.db.transaction(write=False) as tx:
             assert tx.execute('SELECT COUNT(*) AS n FROM xj2_command').fetchone()['n']==0
             assert tx.execute('SELECT COUNT(*) AS n FROM xj2_group').fetchone()['n']==0

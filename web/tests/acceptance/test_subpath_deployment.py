@@ -227,6 +227,7 @@ def test_login_directory_send_version_sso_and_coexisting_routes(browser, subpath
         expect(page.locator('.send-btn')).to_have_text('已提交')
         assert any(path == '/api/monitor/send' for path, _ in site['writes'])
         page.goto(site['url'] + '#/link')
+        page.locator('#settings-nav-account').click()
         expect(page.get_by_test_id('collector-current')).to_contain_text('910001')
         for _ in range(30):
             if ('GET', site['prefix']+'api/im/catalog') in site['requests']: break
@@ -320,6 +321,7 @@ def test_real_nginx_subpath_browser_flow_and_south_bank_routes(browser, nginx_si
         page.locator('.send-btn').click()
         expect(page.locator('.send-btn')).to_have_text('已提交')
         page.goto(site['url']+'#/link')
+        page.locator('#settings-nav-account').click()
         expect(page.get_by_test_id('collector-current')).to_contain_text('910001')
         page.goto(site['url']+'#/quote')
         page.wait_for_function("document.querySelector('.shell') !== null")

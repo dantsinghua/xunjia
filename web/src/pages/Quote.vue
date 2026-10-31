@@ -82,6 +82,7 @@ let stopStream: (() => void) | null = null
 
 const pageIndex = ref(0)
 const pageCursors: { before:number; uni:number | string }[] = [{ before:0, uni:0 }]
+const pageFrames = new Map<number, Awaited<ReturnType<typeof api.bonds>>>()
 let generation = 0
 async function readPage(index: number, cursor = pageCursors[index], resetScroll = true): Promise<boolean> {
   if (!cursor || feedStopped) return false
@@ -89,9 +90,11 @@ async function readPage(index: number, cursor = pageCursors[index], resetScroll 
   const key = scopeKey()
   loading.value = true
   try {
-    const r = await quoteBonds(cursor.before, cursor.uni)
+    const r = pageFrames.get(index) || await quoteBonds(cursor.before, cursor.uni)
     if (request !== generation || key !== scopeKey() || feedStopped) return false
     if (!r.ok) { feedHint.value = r.hint || '行情读取失败，保留上次成功内容'; return false }
+    if (feedTimer) { clearTimeout(feedTimer); feedTimer = null }
+    pageFrames.set(index, r)
     pageIndex.value = index
     pageCursors[index] = cursor
     takePage(r, 'replace')
@@ -129,7 +132,13 @@ function syncViewport() {
   viewH.value = el.clientHeight
 }
 
-function onScroll() { syncViewport() }
+function onScroll() {
+  syncViewport()
+  const el = scroller.value
+  if (el && el.scrollHeight > el.clientHeight && el.scrollTop + el.clientHeight >= el.scrollHeight - ROW_H) {
+    void loadMore()
+  }
+}
 
 /* ---------------- 实时灌入:QuoteClient(SharedWorker + 500ms pull) ----------------
  * 改造前是「WS 推一条→前端缓冲 300ms→prepend」。现在照 DM:
@@ -262,15 +271,33 @@ const HEAD_SYNC_MS = 1000
 let headTimer: ReturnType<typeof setTimeout> | null = null
 function scheduleHeadSync() {
   if (headTimer !== null) return
-  headTimer = setTimeout(headSync, HEAD_SYNC_MS)
+  headTimer = setTimeout(() => { headTimer = null; void headSync() }, HEAD_SYNC_MS)
 }
 async function headSync() {
+  if (headBusy || loading.value || feedStopped || !bonds.value.length) return
+  headBusy = true
+  const request = generation, index = pageIndex.value, key = scopeKey()
+  const current = bonds.value.slice()
   try {
-    if (loading.value || feedStopped) return
-    await readPage(pageIndex.value, pageCursors[pageIndex.value], false)
+    const selected: Selection = chanTab.value === 1
+      ? { rowIds: current.map(row => row.rowId || '').filter(Boolean), filter: filterSpec() }
+      : { windcodes: [...new Set(current.map(row => row.code))], filter: filterSpec() }
+    const response = await api.resolveBonds(selected)
+    if (request !== generation || index !== pageIndex.value || key !== scopeKey() || feedStopped) return
+    if (response.ok) {
+      const identity = (row: BondRow) => chanTab.value === 1 ? row.rowId || row.code : row.code
+      const updated = new Map(response.data.map(row => [identity(row), row]))
+      // Update existing identities in place. The next-page boundary belongs to
+      // the page snapshot, not the moving latest quote versions.
+      bonds.value = freezeRows(current.filter(row => updated.has(identity(row))).map(row => updated.get(identity(row))!))
+      const frame = pageFrames.get(index)
+      if (frame) pageFrames.set(index, { ...frame, data: [...bonds.value] })
+      reindex()
+    }
     await refreshBusiness()
-  } finally { headTimer = null }
+  } finally { headBusy = false }
 }
+let headBusy = false
 let marketTimer: ReturnType<typeof setInterval> | null = null
 
 let feedTimer: ReturnType<typeof setTimeout> | null = null
@@ -329,6 +356,14 @@ const brokerLabel = computed(() => {
  * 所有条件共用完整 FilterSpec，由服务端对全量报价先筛选再分页。
  * 关键字和价格区间点「筛选行情」或搜索框回车后才生效;chip 一点就生效。 */
 const activeChip = reactive<Record<string, number>>(Object.fromEntries(FILTER_GROUPS.map(g => [g.title, 0])))
+// 未接入入口暂不展示：方案没有来源字段；QB仅提供实盘/请示盘，
+// 未提供“可部分执行/意向价”；公募/私募尚未映射到筛选标签。
+// 保留FILTER_GROUPS与原索引，接入后恢复展示，不改变API及已生效条件。
+const visibleFilterGroups = FILTER_GROUPS.filter(g => g.title !== '方案').map(g => ({
+  title: g.title,
+  chips: g.chips.map((label, index) => ({ label, index })).filter(c =>
+    !(g.title === '报价类型' && c.index > 1) && !(g.title === '标签' && c.index > 2)),
+}))
 const keyword = ref('')
 const appliedKeyword = ref('')
 const priceDraft = reactive(emptyPrices())
@@ -385,6 +420,7 @@ watch(scopeKey, () => {
   bonds.value = []; qtColumns.value = []; sourceNotice.value = ''; channelNote.value = ''; reindex()
   if (hasChecked.value) message.info('筛选范围已变化，已清除原选择')
   clearSel(); pageIndex.value = 0; pageCursors.splice(0, pageCursors.length, {before:0,uni:0})
+  pageFrames.clear()
   scheduleReload()
 }, { flush:'sync' })
 function reloadNow() {
@@ -420,6 +456,7 @@ function resetFilters() {
 }
 
 async function reloadByFilter() {
+  pageFrames.clear()
   await loadFirst()
   blinking.clear()
   const next = quote?.subscribe(activeGroups.value, onBatch)
@@ -438,10 +475,10 @@ const BASE_SUBCOLS = [
   { label: 'bid-vol', g: 1 }, { label: 'bid 底价', g: 1 }, { label: 'ofr 底价', g: 1 }, { label: 'ofr-vol', g: 1 },
   { label: '最优 bid 方', g: 2 }, { label: 'bid-vol', g: 2 }, { label: '最优 bid', g: 2 }, { label: '最优 ofr', g: 2 }, { label: 'ofr-vol', g: 2 }, { label: '最优 ofr 方', g: 2 },
 ]
-const SUBCOLS = computed(() => BASE_SUBCOLS.filter(c => chanTab.value !== 0 || c.g !== 1))
-const tableColumns = computed(() => chanTab.value === 0 ? 10 : 14)
+const SUBCOLS = BASE_SUBCOLS
+const tableColumns = 14
 function subColColor(g: number) { return g === 1 ? '#B01C24' : g === 2 ? '#7A5A2E' : '#6E6258' }
-function subColBl(i: number) { return (i === 2 || chanTab.value !== 0 && i === 6) ? '1px solid rgba(176, 28, 36,.18)' : 'none' }
+function subColBl(i: number) { return (i === 2 || i === 6) ? '1px solid rgba(176, 28, 36,.18)' : 'none' }
 
 function tagStyle(t: string): [string, string] {
   const M: Record<string, [string, string]> = { 绿: ['rgba(46,125,79,.14)', '#1F6B3E'], 科创: ['rgba(30,95,180,.12)', '#1E5FB4'], 公募: ['rgba(198,141,88,.2)', '#7A5A2E'], 私募: ['rgba(110,98,88,.14)', '#5C5148'] }
@@ -467,8 +504,8 @@ const rows = computed(() => bonds.value.filter(hasRealName).filter(b => rowMatch
 })).map(b => {
   const status = serverStatus[b.code] || b.status
   const val = parseFloat(String(b.val || '').split('/')[0])
-  const kind = floorKind[b.code]
-  const saved = floorValue[b.code]
+  const kind = b.hasActiveIntent ? undefined : floorKind[b.code]
+  const saved = b.hasActiveIntent ? undefined : floorValue[b.code]
   const ov = kind === 'bp' && saved != null ? saved : undefined
   let ib = b.ib, io = b.io
   const blank = (v: string) => !v || v === '—' || v === '--' || v === '-'
@@ -544,6 +581,32 @@ const qGrid = computed(() => sideOpen.value ? '292px 10px minmax(0,1fr)' : '10px
 
 const rfqOpen = ref(false)
 const rfqBonds = ref<BondRow[]>([])
+const rfqOpening = ref(false)
+const completedRfqStatuses = new Set(['待询价', '已放弃', '已撤价', '未成交', '已成交'])
+// Detail and conversational callers share this entry; it opens the existing
+// authorized strategy/recipient/confirmation flow and never sends by itself.
+async function openRfqForBonds(requested: BondRow[]) {
+  if (rfqOpening.value || rfqOpen.value || !requested.length) return
+  const key = scopeKey()
+  rfqOpening.value = true
+  try {
+    const codes = [...new Set(requested.map(row => row.code))]
+    const response = await api.resolveBonds({ windcodes: codes })
+    if (feedStopped || key !== scopeKey()) return
+    if (!response.ok || response.data.length !== codes.length) {
+      message.error(response.hint || '债券当前资料不完整，请刷新后重试'); return
+    }
+    if (response.data.some(row => row.hasActiveIntent || !completedRfqStatuses.has(row.status))) {
+      message.info('所选债券存在未结束询价，请处理当前会话，避免重复发起。'); return
+    }
+    await refreshBusiness()
+    if (feedStopped || key !== scopeKey()) return
+    rfqBonds.value = response.data
+    rfqOpen.value = true
+  } catch (e) { message.error(e instanceof Error ? e.message : '无法读取询价准备信息') }
+  finally { rfqOpening.value = false }
+}
+defineExpose({ openRfqForBonds })
 async function resolveSelected(): Promise<BondRow[] | null> {
   const key = scopeKey()
   const frozenSelection = JSON.stringify(selection())
@@ -561,9 +624,12 @@ async function startRfq() {
   await refreshBusiness()
   rfqOpen.value = true
 }
-async function onRfqSent(_codes: string[]) { rfqOpen.value = false; await refreshBusiness() }
-async function onRfqPending(_codes: string[]) { await refreshBusiness() }
-async function onRfqFailed(_codes: string[]) { await refreshBusiness() }
+function refreshDetailAfterRfq(codes: string[]) {
+  if (modalBond.value && codes.includes(modalBond.value.code)) modalBond.value = { ...modalBond.value }
+}
+async function onRfqSent(codes: string[]) { rfqOpen.value = false; await refreshBusiness(); refreshDetailAfterRfq(codes) }
+async function onRfqPending(codes: string[]) { await refreshBusiness(); refreshDetailAfterRfq(codes) }
+async function onRfqFailed(codes: string[]) { await refreshBusiness(); refreshDetailAfterRfq(codes) }
 async function stopRfq() {
   const r = await api.rfqStop(selection())
   if (!r.ok) { message.error(r.hint || '停止失败'); return }
@@ -729,7 +795,7 @@ function onJump(cpId: string, bondName: string) {
       <!-- 筛选栏 -->
       <aside v-if="sideOpen" class="filter">
         <div class="f-head">
-          <span class="f-title">方案筛选 / FILTER</span>
+          <span class="f-title">行情筛选 / FILTER</span>
           <div class="f-search">
             <input class="ny-input" v-model="keyword" placeholder="债券代码 / 简称 / 发行人" @keydown.enter.prevent="applyFilters" />
             <button type="button" class="btn-ghost tiny" @click="clearKeyword">清空</button>
@@ -737,10 +803,10 @@ function onJump(cpId: string, bondName: string) {
         </div>
 
         <div class="f-body">
-        <div v-for="g in FILTER_GROUPS" :key="g.title" class="f-group">
+        <div v-for="g in visibleFilterGroups" :key="g.title" class="f-group">
           <span class="f-label">{{ g.title }}</span>
           <div class="chips">
-            <span v-for="(c, i) in g.chips" :key="c" class="chip" :class="{ on: activeChip[g.title] === i }" @click="pickChip(g.title, i)">{{ c }}</span>
+            <span v-for="c in g.chips" :key="c.index" class="chip" :class="{ on: activeChip[g.title] === c.index }" @click="pickChip(g.title, c.index)">{{ c.label }}</span>
           </div>
         </div>
         <div class="f-divider" />
@@ -759,7 +825,9 @@ function onJump(cpId: string, bondName: string) {
             <button type="button" class="btn-primary do" @click="applyFilters">筛选行情</button>
             <button type="button" class="btn-ghost reset" @click="resetFilters">重置</button>
           </div>
+          <!-- 方案持久化接入后恢复：
           <button class="save-scheme" disabled title="尚未接入筛选方案持久化">保存筛选为方案组（未开放）</button>
+          -->
         </div>
       </aside>
 
@@ -806,7 +874,7 @@ function onJump(cpId: string, bondName: string) {
           <table v-else class="mkt" data-testid="quote-common-table">
             <colgroup>
               <col style="width:260px"><col style="width:104px"><col style="width:150px">
-              <template v-if="chanTab !== 0"><col style="width:76px"><col style="width:92px"><col style="width:92px"><col style="width:76px"></template>
+              <col style="width:76px"><col style="width:92px"><col style="width:92px"><col style="width:76px">
               <col style="width:108px"><col style="width:76px"><col style="width:92px"><col style="width:92px">
               <col style="width:76px"><col style="width:108px"><col style="width:100px">
             </colgroup>
@@ -820,7 +888,7 @@ function onJump(cpId: string, bondName: string) {
                   </div>
                 </th>
                 <th colspan="2" class="grp base">债券基本信息</th>
-                <th v-if="chanTab !== 0" colspan="4" class="grp intent">内部意向</th>
+                <th colspan="4" class="grp intent">内部意向</th>
                 <th colspan="6" class="grp ext">外部报价</th>
                 <th rowspan="2" class="sticky-r">当前状态</th>
               </tr>
@@ -842,12 +910,10 @@ function onJump(cpId: string, bondName: string) {
                 </td>
                 <td class="muted" :title="r.term">{{ r.term }}</td>
                 <td class="mono muted" :title="r.val">{{ r.val }}</td>
-                <template v-if="chanTab !== 0">
-                <td class="mono muted intent-bl">{{ r.ibv }}</td>
+                <td class="mono muted intent-bl" :title="r.intentConflicts?.includes('BUY') ? '本人同券买入存在多组未结束指令，请打开详情逐组核对' : '本人买入目标量（万）'">{{ r.intentConflicts?.includes('BUY') ? '多组待核对' : r.ibv }}</td>
                 <td class="mono b red" :class="cellCls(r.code, 'ib')">{{ r.dispIb }}</td>
                 <td class="mono b green" :class="cellCls(r.code, 'io')">{{ r.dispIo }}</td>
-                <td class="mono muted">{{ r.iov }}</td>
-                </template>
+                <td class="mono muted" :title="r.intentConflicts?.includes('SELL') ? '本人同券卖出存在多组未结束指令，请打开详情逐组核对' : '本人卖出目标量（万）'">{{ r.intentConflicts?.includes('SELL') ? '多组待核对' : r.iov }}</td>
                 <td class="ext-bl"><span class="side-pill" :title="r.obs" :style="{ background: r.obsBg, color: r.obsColor }">{{ r.obs }}</span></td>
                 <td class="mono muted">{{ r.obv }}</td>
                 <td class="mono b red" :class="cellCls(r.code, 'ob')">{{ r.ob }}</td>
@@ -936,9 +1002,9 @@ function onJump(cpId: string, bondName: string) {
     </Teleport>
 
     <PipelineStats :stat="stat" />
-    <BondModal :bond="modalBond" @close="modalBond = null" @jump="onJump" />
+    <BondModal :bond="modalBond" :rfq-busy="rfqOpening" @close="modalBond = null" @jump="onJump" @configure-rfq="openRfqForBonds([$event])" />
     <StrategyModal :open="strategyOpen" :value="strategy" @close="strategyOpen = false" @saved="s => strategy = s" />
-    <RfqAssignModal :saved-floors="savedFloors" :strategy="strategy.templateId ? strategy : undefined" :floors="floorLabels" :open="rfqOpen" :bonds="rfqBonds" :picked-count="checkedCount" @close="rfqOpen = false" @sent="onRfqSent" @pending="onRfqPending" @failed="onRfqFailed" />
+    <RfqAssignModal :saved-floors="savedFloors" :strategy="strategy.templateId ? strategy : undefined" :floors="floorLabels" :open="rfqOpen" :bonds="rfqBonds" :picked-count="rfqBonds.length" @close="rfqOpen = false" @sent="onRfqSent" @pending="onRfqPending" @failed="onRfqFailed" />
   </div>
 </template>
 

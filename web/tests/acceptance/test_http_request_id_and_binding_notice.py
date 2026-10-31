@@ -56,7 +56,7 @@ def test_binding_warning_tracks_real_selection_then_server_revocation_without_re
     page.route(base + '/api/im/binding/select', select)
     page.route(base + '/api/im/contacts**', lambda route: route.fulfill(json={'ok': True, 'data': contacts()}))
     open_unbound(unbound)
-    warning = page.get_by_text('当前本人账号尚未绑定企点，发送功能不可用。', exact=True)
+    warning = page.locator('.settings-context').get_by_text('尚未选择采集账号，可先配置文件中转，再选择工作台和台内企点号。', exact=True)
     expect(warning).to_be_visible()
     page.get_by_test_id('collector-workbench').select_option('synthetic-wb')
     page.get_by_test_id('collector-account').select_option('synthetic-account')

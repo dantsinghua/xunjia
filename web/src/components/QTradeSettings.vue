@@ -110,7 +110,7 @@ onBeforeUnmount(()=>{disposed=true;if(timer)clearInterval(timer);form.password='
         </fieldset>
         <p class="hint">FIX登录账号不等于本方QT号，必须分别填写供应商分配的实际值。新增QT账号由服务端绑定当前登录用户；不能认领他人已绑定的账号，删除文本也不会转移或删除历史绑定。密码不回显、不存入浏览器。</p>
         <p class="hint">手册约定重连后下行序号重置，业务去重独立持久化。只收报价，向FIX仅发送登录、心跳、恢复和注销消息，不发送交易指令。编码、时区与传输方式需与供应商配置一致。</p>
-        <div class="controls">
+        <div class="controls settings-actions">
           <button type="submit" class="btn-primary" data-testid="qt-save" :disabled="busy||state.collector_active">保存共享配置</button>
           <button type="button" class="btn-ghost" data-testid="qt-test" :disabled="busy||!state.configured" @click="act('test')">测试FIX连接</button>
           <button type="button" class="btn-primary" data-testid="qt-start" :disabled="busy||!state.configured||state.collector_active" @click="act('start')">开启后台供数</button>

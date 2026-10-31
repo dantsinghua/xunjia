@@ -11,6 +11,6 @@ export const router = createRouter({
     { path: '/quote', component: Quote, meta: { title: '意向询价' } },
     { path: '/monitor', component: Monitor, meta: { title: '机器人监控' } },
     { path: '/chat', component: Chat, meta: { title: '智能问答' } },
-    { path: '/link', component: Link, meta: { title: '采集通道' } },
+    { path: '/link', component: Link, meta: { title: '系统设置' } },
   ],
 })

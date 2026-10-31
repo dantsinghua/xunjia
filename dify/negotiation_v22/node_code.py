@@ -114,6 +114,7 @@ def analysis_reference_metadata(value,context,*,encode,kind='result'):
         mentioned={identity for identity in maps['m'] if any(identity in text for text in original_texts)}
         def message(row):
             original=row.get('message_id');refs(row,'message_id','m');refs(row,'target_id','m') if row.get('target_id') else None
+            if isinstance(row.get('reply'),dict):refs(row['reply'],'message_id','m')
             if original in mentioned:row['original_reference_id']=original
         for key in ('messages','correction_context','context'):
             for row in result.get(key,[]):message(row)
@@ -190,10 +191,42 @@ def compact_context(context):
     text_only=isinstance(feedback,dict) and feedback.get('mode')=='TEXT_ONLY'
     production_reply=(context.get('stage')=='reply'
                       and context.get('context_policy_revision')=='latest_quote_confirmation_v1')
+    # A quoted original is context only. The raw seven-key object (native IDs,
+    # sender, full source) never reaches the model view; evidence stays text-only.
+    if context.get('stage')=='analysis':
+        stage_rows=list(context.get('messages',[]))+list(context.get('correction_context',[]))
+        for member in context.get('members',[]):stage_rows.extend(member.get('context',[]))
+    else:
+        stage_rows=list(context.get('context',[]))+list(context.get('unresolved_messages',[]))
+    for history in context.get('history_results',[]):
+        if isinstance(history,dict):stage_rows.extend(history.get('messages',[]))
+    quoted_ids={}
+    for row in stage_rows:
+        if (isinstance(row,dict) and row.get('kind')=='message' and isinstance(row.get('native_id'),str)
+                and isinstance(row.get('message_id'),str)):
+            quoted_ids.setdefault(row['native_id'],set()).add(row['message_id'])
+    def quoted(reply):
+        if not isinstance(reply,dict) or reply.get('state') not in ('ok','unparsed'):return None
+        if reply['state']=='unparsed':return {'text':None,'text_is_summary':False,'from':None,'ts':None}
+        source=reply.get('source_text') if isinstance(reply.get('source_text'),str) else None
+        summary=reply.get('text') if isinstance(reply.get('text'),str) else None
+        view={'text':source if source is not None else summary,
+              'text_is_summary':source is None and summary is not None,
+              'from':reply.get('source_direction') if reply.get('source_direction') in ('in','out') else None,
+              'ts':reply.get('ts') if isinstance(reply.get('ts'),str) else None}
+        native=reply.get('source_ext_msg_id')
+        targets=quoted_ids.get(native,()) if isinstance(native,str) else ()
+        if not production_reply and len(targets)==1:view['message_id']=next(iter(targets))
+        return view
+    def with_quote(row,omitted=()):
+        view={key:value for key,value in row.items() if key not in omitted and key not in ('reply','reply_json')}
+        projected=quoted(row.get('reply'))
+        if projected is not None:view['reply']=projected
+        return view
     def message(row):
         omitted={'content_hash','thread_id','event_id'}
         if production_reply:omitted.update(('message_id','native_id','target_id','source_seq'))
-        return {key:value for key,value in row.items() if key not in omitted}
+        return with_quote(row,omitted)
     def evidence_index(member, rows, our_quote):
         loaded = list(dict.fromkeys(row['message_id'] for row in rows))
         if isinstance(our_quote, str):
@@ -270,6 +303,16 @@ def compact_context(context):
         if isinstance(result.get('our_quote'),dict):
             result['our_quote']={key:value for key,value in result['our_quote'].items()
                                  if key not in ('command_id','message_id','native_id')}
+    else:
+        if isinstance(result.get('current_inbound_message'),dict):
+            result['current_inbound_message']=with_quote(result['current_inbound_message'])
+        for key in ('unresolved_messages','handoff_evidence'):
+            if isinstance(result.get(key),list):
+                result[key]=[with_quote(row) if isinstance(row,dict) else row for row in result[key]]
+    if isinstance(result.get('history_results'),list):
+        result['history_results']=[{**history,'messages':[with_quote(row) if isinstance(row,dict) else row for row in history['messages']]}
+                                   if isinstance(history,dict) and isinstance(history.get('messages'),list) else history
+                                   for history in result['history_results']]
     if 'members' in context:
         result['members'] = []
         for member in context['members']:

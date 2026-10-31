@@ -1,7 +1,7 @@
 <script setup lang="ts">
-/** 壳:ConfigProvider(南银主题) → a-app → 玻璃拟态顶栏(logo + 三屏导航 + 安琳在线徽标 + 时钟) → router-view。
+/** 壳:ConfigProvider(南银主题) → a-app → 顶栏、当前登录身份与 router-view。
  *  还原设计稿 现券询价机器人.dc.html 的 header。 */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, ref } from 'vue'
 import { App as AntApp, ConfigProvider } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import { useRoute, useRouter } from 'vue-router'
@@ -20,6 +20,8 @@ const authReady = ref(false)
 const authBusy = ref(false)
 const authError = ref('')
 const identity = ref<{user_id:string;display_name:string;account_uid:string|null;binding:unknown}|null>(null)
+provide('authenticatedDisplayName', computed(() => identity.value?.display_name?.trim() || ''))
+provide('authenticatedUserId', computed(() => identity.value?.user_id || ''))
 async function authenticate(provided?: SsoProof, destination?: string) {
   if (authBusy.value) return
   authBusy.value = true; authReady.value = false; authError.value = ""
@@ -63,7 +65,7 @@ const NAVS = [
   { label: '意向询价', path: '/quote' },
   { label: '机器人监控', path: '/monitor' },
   { label: '智能问答', path: '/chat' },
-  { label: '采集通道', path: '/link' },
+  { label: '系统设置', path: '/link' },
 ]
 const activePath = computed(() => route.path)
 
@@ -78,7 +80,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
 <template>
   <ConfigProvider :locale="zhCN" :theme="antdTheme">
     <AntApp>
-      <div class="shell">
+      <div class="shell" :class="{ 'settings-shell': route.path === '/link' }">
         <!-- 背景动画光斑 -->
         <div class="bg-blobs">
           <div class="blob a" />
@@ -115,7 +117,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
         <main class="pane">
           <router-view v-if="authReady" />
         <LoginGate v-else :busy="authBusy" :error="authError" :portal-failure="portalFailure" @login="authenticate" @retry="authenticate()" @reset="logout" />
-        <p v-if="authReady && !imBoundAccount?.account_uid" role="alert" style="text-align:center">当前本人账号尚未绑定企点，发送功能不可用。</p>
+        <p v-if="authReady && !imBoundAccount?.account_uid && route.path !== '/link'" role="alert" style="text-align:center">当前本人账号尚未绑定企点，发送功能不可用。</p>
         </main>
       </div>
     </AntApp>
@@ -172,4 +174,12 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
 .meta .clock { font-variant-numeric: tabular-nums; font-weight: 500; }
 
 .pane { position: relative; z-index: 1; }
+@media (max-width:760px) {
+  .settings-shell .mast { overflow-x:auto; gap:12px; padding:0 12px; }
+  .settings-shell .brand { gap:10px; }
+  .settings-shell .logo { height:32px; }
+  .settings-shell .divider, .settings-shell .meta { display:none; }
+  .settings-shell .title { font-size:16px; }
+  .settings-shell .nav-btn { padding:9px 12px; font-size:13px; }
+}
 </style>

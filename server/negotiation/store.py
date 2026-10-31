@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, replace
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -28,13 +29,72 @@ def identity(value, label="identifier", size=160):
     return value
 def new_id():
     return uuid.uuid4().hex
+REPLY_KEYS = ("state", "text", "source_text", "source_direction", "sender_id", "ts", "source_ext_msg_id")
+_REPLY_LIMITS = {"text": 2000, "source_text": 4000, "sender_id": 128, "source_ext_msg_id": 128, "ts": 64}
+_reply_column_warned = False
+def reply_wire(value):
+    """Bounded Qidian quote context. Malformed input degrades, never raises.
+
+    It is context only: never part of text, content_hash, replay comparison
+    or evidence/segment sources.
+    """
+    if not isinstance(value, dict):
+        return None
+    state = value.get("state")
+    if type(state) is not str or state not in ("ok", "unparsed"):
+        return None
+    result = dict.fromkeys(REPLY_KEYS)
+    result["state"] = state
+    if state == "ok":
+        for key, size in _REPLY_LIMITS.items():
+            item = value.get(key)
+            if type(item) is str and len(item) <= size:
+                result[key] = item
+        direction = value.get("source_direction")
+        if type(direction) is str and direction in ("in", "out"):
+            result["source_direction"] = direction
+    return result
 class Store:
     def __init__(self, url, *, clock=time.time, settings=None, initialize=False):
         self.db = Database(url)
         self.clock = clock
         self.settings = settings or Settings()
+        self._reply_column = None
         if initialize:
             self.initialize()
+    def _reply_available(self, tx):
+        """Probe once per Store; a database without migration 004 stores no quote."""
+        global _reply_column_warned
+        if getattr(self, "_reply_column", None) is not None:
+            return self._reply_column
+        try:
+            if tx.mysql:
+                available = bool(tx.execute("SHOW COLUMNS FROM xj2_message LIKE 'reply_json'").fetchall())
+            else:
+                available = any(row["name"] == "reply_json" for row in tx.execute("PRAGMA table_info(xj2_message)").fetchall())
+        except Exception:
+            available = None
+        if available is not None:
+            self._reply_column = available
+        if not available and not _reply_column_warned:
+            _reply_column_warned = True
+            logging.getLogger("xunjia.runtime").warning("component=store code=REPLY_COLUMN_UNAVAILABLE error_type=none")
+        return bool(available)
+    @staticmethod
+    def message_row(row):
+        """Context row: reply_json text becomes the seven-key reply object or None."""
+        message = dict(row)
+        raw = message.pop("reply_json", None)
+        reply = None
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, RecursionError):
+                parsed = None
+            if isinstance(parsed, dict) and set(parsed) == set(REPLY_KEYS):
+                reply = reply_wire(parsed)
+        message["reply"] = reply
+        return message
     def initialize(self):
         """Explicit new-schema provisioning; never called by legacy startup."""
         self.db.initialize(statements(mysql=self.db.mysql))
@@ -107,7 +167,7 @@ class Store:
             args+[cut.get('local_revisions',{}).get(thread['thread_id'],0),cut['source_highwater']])
     def _eligible_messages(self,tx,thread,after,limit=100):
         clause,args=self._reset_message_filter(tx,thread)
-        return [dict(r) for r in tx.execute('SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>?'+clause+' ORDER BY ingest_revision LIMIT ?',
+        return [self.message_row(r) for r in tx.execute('SELECT * FROM xj2_message WHERE thread_id=? AND ingest_revision>?'+clause+' ORDER BY ingest_revision LIMIT ?',
             (thread['thread_id'],after,*args,limit)).fetchall()]
     def _analysis_pending(self,tx,thread):
         if not self.thread_is_current(tx,thread):return False
@@ -321,8 +381,14 @@ class Store:
         tx.execute("INSERT INTO xj2_peer(member_id,group_id,thread_id,version,control_version,send_allowed,response_state,our_quote_json) VALUES(?,?,?,0,1,1,'NONE','{}')", (mid, group_id, tid))
         return mid, tid
     def ingest(self, owner, thread_id, *, event_id, source_seq, text, trade_day,
-               occurred_at=None, direction="in", historical=False, native_id=None, kind="message", target_event_id=None):
-        """Commit raw text immediately, independently of model/command state."""
+               occurred_at=None, direction="in", historical=False, native_id=None, kind="message", target_event_id=None,
+               reply=None):
+        """Commit raw text immediately, independently of model/command state.
+
+        reply is quote context only: excluded from content_hash and replay
+        comparison; a NULL stored value may be filled by an event-ID replay.
+        """
+        reply = reply_wire(reply)
         identity(event_id, "source event")
         if kind not in ("message", "edit", "retract"):
             raise InvalidFact("Invalid message event kind")
@@ -344,7 +410,13 @@ class Store:
         digest = hashlib.sha256(encoded(payload).encode()).hexdigest()
         with self.write(owner) as tx:
             thread = self._thread(tx, owner, thread_id)
+            stored_reply = self._reply_available(tx)
             previous = tx.execute("SELECT * FROM xj2_message WHERE thread_id=? AND event_id=?", (thread_id, event_id)).fetchone()
+            def fill_reply():
+                if stored_reply and reply is not None and dict(previous).get("reply_json") is None:
+                    tx.execute("UPDATE xj2_message SET reply_json=? WHERE message_id=? AND reply_json IS NULL",
+                               (encoded(reply), previous["message_id"]))
+                return previous["message_id"]
             if previous:
                 if previous["content_hash"] != digest:
                     # A new workspace may replay the same retired native event
@@ -356,9 +428,9 @@ class Store:
                         target_matches=(previous['target_id']==target['message_id']) if target is not None else target_event_id is None and previous['target_id'] is None
                         fields=('text','direction','kind','native_id','occurred_at','trade_day')
                         if target_matches and tuple(previous[key] for key in fields)==(text,direction,kind,native_id,stamp,trade_day):
-                            return previous['message_id']
+                            return fill_reply()
                     raise InvalidFact("Replayed event ID has different native content")
-                return previous["message_id"]
+                return fill_reply()
             if direction == "out" and native_id:
                 echo = tx.execute("SELECT message_id,text FROM xj2_message WHERE thread_id=? AND direction='out' AND native_id=?", (thread_id, native_id)).fetchone()
                 if echo:
@@ -372,9 +444,13 @@ class Store:
                 target_id=target['message_id']
             message_id = new_id()
             revision = thread["ingest_revision"] + 1
-            tx.execute("INSERT INTO xj2_message(message_id,thread_id,event_id,content_hash,source_seq,ingest_revision,direction,kind,text,native_id,occurred_at,received_at,trade_day,historical,target_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (message_id, thread_id, event_id, digest, source_seq, revision, direction, kind, text,
-                        native_id, stamp, self.clock(), trade_day, int(historical),target_id))
+            columns = "message_id,thread_id,event_id,content_hash,source_seq,ingest_revision,direction,kind,text,native_id,occurred_at,received_at,trade_day,historical,target_id"
+            values = [message_id, thread_id, event_id, digest, source_seq, revision, direction, kind, text,
+                      native_id, stamp, self.clock(), trade_day, int(historical), target_id]
+            if stored_reply:
+                columns += ",reply_json"
+                values.append(None if reply is None else encoded(reply))
+            tx.execute("INSERT INTO xj2_message(" + columns + ") VALUES(" + ",".join("?" * len(values)) + ")", tuple(values))
             first = thread["pending_since"] if thread["pending_since"] is not None else self.clock()
             tx.execute("UPDATE xj2_thread SET ingest_revision=?,pending_since=?,last_ingest_at=? WHERE thread_id=?", (revision, first, self.clock(), thread_id))
             if direction == 'in' and not historical:
@@ -482,7 +558,7 @@ class Store:
                 AND s.relation IN ('MENTION','UNRESOLVED','INVALID'))
             """+clause+" ORDER BY m.occurred_at DESC,m.ingest_revision DESC LIMIT ?",
                           (member_id, through_revision, *args, self.settings.context_messages)).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        return [self.message_row(row) for row in reversed(rows)]
     def _history_message(self, tx, member_id, message_id, through_revision, *, allow_invalid=False):
         clause,args=self._reset_message_filter(tx,self._context_thread(tx,member_id),'m')
         return tx.execute("""SELECT m.* FROM xj2_message m
@@ -511,7 +587,7 @@ class Store:
                 if not row:
                     raise InvalidFact("Context anchor belongs to a different bond/counterparty or lacks native send evidence")
                 if anchor not in seen:
-                    rows.append(dict(row)); seen.add(anchor)
+                    rows.append(self.message_row(row)); seen.add(anchor)
             return sorted(rows, key=lambda r: (r["occurred_at"], r["ingest_revision"]))
     def _settlement_question(self, tx, owner, member):
         """Read actual command evidence, independently of the generic waiting pointer."""

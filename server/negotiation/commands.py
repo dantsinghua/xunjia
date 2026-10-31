@@ -172,7 +172,7 @@ class Commands:
         for quote in quotes.values():
             for field in ('price','volume_wan'):
                 refs.update((quote.get('evidence') or {}).get(field,[]))
-        return [dict(row) for ref in sorted(refs)
+        return [self.store.message_row(row) for ref in sorted(refs)
                 if (row:=self.store._history_message(tx,member_id,ref,through)) is not None]
 
     def _handoff_notice_current(self,tx,owner,member_id,marker,*,through=None):

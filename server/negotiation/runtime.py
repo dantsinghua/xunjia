@@ -9,7 +9,10 @@ import hashlib
 import time
 from relay.file_gateway import timing_event
 from .prices import InvalidFact
-from .store import encoded, identity, new_id
+from .store import encoded, identity, new_id, reply_wire
+def _reply_wire(value):
+    """Qidian quote context from the wire; malformed shapes degrade to None, never quarantine."""
+    return reply_wire(value)
 class Inbox:
     def __init__(self,service,transport):self.service,self.transport=service,transport
     def apply(self,binding,envelope):
@@ -102,9 +105,10 @@ class Inbox:
         if kind=='private':kind='message'
         day=payload.get('trade_day')
         if not day and type(occurred) in (int,float):day=datetime.fromtimestamp(occurred,ZoneInfo('Asia/Shanghai')).date().isoformat()
+        reply=_reply_wire(payload.get('reply'))
         return store.ingest(owner,tid,event_id=payload.get('event_id'),source_seq=payload.get('source_seq'),text=payload.get('text'),
              trade_day=day,occurred_at=occurred,direction=direction,historical=bool(payload.get('historical') or envelope.get('transport_replay')),
-             native_id=native,kind=kind,target_event_id=payload.get('target_event_id'))
+             native_id=native,kind=kind,target_event_id=payload.get('target_event_id'),reply=reply)
     def poll_once(self):
         if self.transport is None:return 0
         adapters=list({id(a):a for a in getattr(self.transport,'adapters',{}).values()}.values())

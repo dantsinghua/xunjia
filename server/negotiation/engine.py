@@ -11,7 +11,7 @@ import math
 import re
 import time
 from .prices import InvalidFact, Price, StaleDecision, number, resolve_yield_suffix, valuation_quote, volume_wan
-from .store import encoded, new_id
+from .store import Store, encoded, new_id
 from .validation import economics, token_side, validate_public_text, validate_observation
 from .reply_render import render_reply_plan, reply_requirements, requested_volume_signature, handoff_notice_source
 from .slots import collect_candidates, window_reference_gaps
@@ -564,7 +564,7 @@ class Engine:
                     row=tx.execute('SELECT * FROM xj2_message WHERE message_id=? AND thread_id=? AND ingest_revision<=?',
                         (correction.get('message_id'),thread_id,job['snapshot']['through_revision'])).fetchone()
                     if not row:raise InvalidFact('Correction anchor is outside this snapshot')
-                    correction_context.append(dict(row))
+                    correction_context.append(Store.message_row(row))
             job['snapshot']['correction_context']=correction_context
             normalized=deepcopy(original)
             scopes,observations,unresolved=self._normalize(job['snapshot'],normalized)
@@ -683,7 +683,7 @@ class Engine:
         member=self.store._member(tx,owner,mid)
         group=self.store._group(tx,owner,member['group_id'])
         thread=self.store._thread(tx,owner,member['thread_id'])
-        unresolved=[dict(r) for r in tx.execute("SELECT m.* FROM xj2_message m JOIN xj2_scope s ON s.message_id=m.message_id WHERE s.member_id=? AND s.relation IN ('UNRESOLVED','INVALID') AND m.ingest_revision<=? ORDER BY m.ingest_revision DESC LIMIT ?",(mid,thread['analyzed_revision'],self.store.settings.context_messages)).fetchall()]
+        unresolved=[Store.message_row(r) for r in tx.execute("SELECT m.* FROM xj2_message m JOIN xj2_scope s ON s.message_id=m.message_id WHERE s.member_id=? AND s.relation IN ('UNRESOLVED','INVALID') AND m.ingest_revision<=? ORDER BY m.ingest_revision DESC LIMIT ?",(mid,thread['analyzed_revision'],self.store.settings.context_messages)).fetchall()]
         context={'member_id':mid,'thread_id':member['thread_id'],'basis':basis,
                 'bond_code':group['bond_code'],'our_side':group['our_side'],'trade_day':group['trade_day'],
                 'policy':json.loads(group['policy_json']),'boundary':json.loads(group['boundary_json']),

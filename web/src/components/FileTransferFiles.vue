@@ -41,7 +41,6 @@ onBeforeUnmount(() => { generation++ })
     <h3 id="transfer-files-title">当前采集端与账号的文件记录</h3>
     <p>列出本服务已保全或提交、且已验证归属的真实文件。远端接口只提供待收数量，尚未下载的文件名无法在此列出。查看列表不会取件、重发或改变处理状态。</p>
     <p>文件生成时间来自认证报文；接收时间从本次升级后开始记录，旧记录显示“未记录”。已上传、已保全或已移交处理均不代表原生消息已发送。</p>
-    <button class="btn-ghost" type="button" :disabled="busy" @click="load()">刷新文件记录</button>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <div v-if="page?.items.length" class="table-scroll">
       <table>
@@ -54,7 +53,10 @@ onBeforeUnmount(() => { generation++ })
       </table>
     </div>
     <p v-else-if="page && !busy">当前选择暂无已验证归属的文件记录。</p>
-    <button v-if="page?.next_before" class="btn-ghost" type="button" :disabled="busy" @click="load(true)">加载更早记录</button>
+    <div class="settings-actions">
+      <button class="btn-ghost" type="button" :disabled="busy" @click="load()">刷新文件记录</button>
+      <button v-if="page?.next_before" class="btn-ghost" type="button" :disabled="busy" @click="load(true)">加载更早记录</button>
+    </div>
     <p v-if="busy" role="status">正在读取文件记录…</p>
     </fieldset>
   </section>

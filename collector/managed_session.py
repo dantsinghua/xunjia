@@ -33,7 +33,7 @@ async def collect(values,update,database,*,dictionary_resolver=None):
         holder.append(store)
         return store
     stats={'quotes_received':0,'quotes_written':0,'trades_written':0,'decode_errors':0,'last_quote_at':None,'last_frame_at':None}
-    heartbeat=None;dictionary_worker=None
+    heartbeat=None;dictionary_worker=None;snapshot_task=None
     try:
         store=await _join_io(open_store)
         if dictionary_resolver is not None:
@@ -44,6 +44,23 @@ async def collect(values,update,database,*,dictionary_resolver=None):
             groups=[f'{kind}_{broker}' for kind in (1,5) for broker in (1,2,3,6,7,8,9)]
             await ws.send(qb_ws.encode_packet(qb_ws.PT_EVENT,qb_ws.EV_JOIN_GROUP,qb_ws.encode_join_group(groups),ack_id=1))
             update(state='streaming',**stats)
+            async def load_day_snapshots():
+                from collector.market_snapshot import fetch_snapshot
+                for kind,path in (('quotes',qb_apollo.BEST_QUOTES),('trades',qb_apollo.TRADES)):
+                    for attempt in range(2):
+                        try:
+                            rows=await _join_io(fetch_snapshot,kind,cookie,values['device_id'])
+                            written=await _join_io(store.save,path,rows)
+                            stats['quotes_written' if kind=='quotes' else 'trades_written']+=written
+                            if dictionary_worker is not None:
+                                for row in rows:dictionary_worker.enqueue(row.get('bond_uni_code'))
+                            update(**stats,**{'snapshot_'+kind:'ready'})
+                            break
+                        except asyncio.CancelledError:raise
+                        except Exception:
+                            if attempt==0:await asyncio.sleep(2)
+                            else:update(**{'snapshot_'+kind:'unavailable'})
+            snapshot_task=asyncio.create_task(load_day_snapshots())
             async def beat():
                 while True:
                     await asyncio.sleep(20)
@@ -74,6 +91,9 @@ async def collect(values,update,database,*,dictionary_resolver=None):
                 else:stats['trades_written']+=written
                 update(**stats)
     finally:
+        if snapshot_task:
+            snapshot_task.cancel()
+            with suppress(asyncio.CancelledError,Exception):await snapshot_task
         if heartbeat:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError,Exception):await heartbeat

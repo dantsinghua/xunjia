@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS xj2_message (
         text LONGTEXT NOT NULL, native_id VARCHAR(160), target_id VARCHAR(64),
         occurred_at DOUBLE NOT NULL, received_at DOUBLE NOT NULL,
         trade_day VARCHAR(10) NOT NULL,
-        historical INTEGER NOT NULL, UNIQUE(thread_id,event_id),
+        historical INTEGER NOT NULL, reply_json LONGTEXT, UNIQUE(thread_id,event_id),
         UNIQUE(thread_id,ingest_revision), KEY idx_xj2_message_order (thread_id,source_seq,message_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE IF NOT EXISTS xj2_scope (

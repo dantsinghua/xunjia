@@ -56,6 +56,7 @@ def unbound(ui):
 def open_unbound(unbound):
     page, base, _ = unbound
     page.goto(base + '/#/link')
+    page.locator('#settings-nav-account').click()
     panel = page.get_by_test_id('collector-account-settings')
     expect(panel).to_be_visible()
     expect(page.get_by_test_id('collector-workbench').locator('option[value="synthetic-wb"]')).to_have_count(1)
